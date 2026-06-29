@@ -1,0 +1,99 @@
+<script setup lang="ts">
+import { X } from "lucide-vue-next";
+import { computed, ref, watch } from "vue";
+
+import { normalizeTagNames } from "../../composables/useEntryFilters";
+import { tagsSuggest } from "../../services/tagApi";
+import type { Tag } from "../../types/generated";
+
+const props = defineProps<{
+  modelValue: string[];
+}>();
+
+const emit = defineEmits<{
+  "update:modelValue": [value: string[]];
+}>();
+
+const draft = ref("");
+const suggestions = ref<Tag[]>([]);
+const selected = computed(() => normalizeTagNames(props.modelValue));
+let suggestionRequestId = 0;
+
+watch(draft, async (value) => {
+  const requestId = ++suggestionRequestId;
+  const query = value.trim();
+  try {
+    const nextSuggestions = query ? await tagsSuggest(query) : [];
+    if (requestId === suggestionRequestId) {
+      suggestions.value = nextSuggestions;
+    }
+  } catch {
+    if (requestId === suggestionRequestId) {
+      suggestions.value = [];
+    }
+  }
+});
+
+function addTag(value = draft.value) {
+  const next = normalizeTagNames([...selected.value, value]);
+  emit("update:modelValue", next);
+  draft.value = "";
+  suggestions.value = [];
+}
+
+function removeTag(tag: string) {
+  emit(
+    "update:modelValue",
+    selected.value.filter((item) => item !== tag),
+  );
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key === "Enter" || event.key === ",") {
+    event.preventDefault();
+    addTag();
+  }
+  if (event.key === "Backspace" && !draft.value && selected.value.length) {
+    removeTag(selected.value[selected.value.length - 1]);
+  }
+}
+</script>
+
+<template>
+  <div class="tag-input">
+    <span
+      v-for="tag in selected"
+      :key="tag"
+      class="tag-pill"
+    >
+      {{ tag }}
+      <button
+        type="button"
+        :title="`移除 ${tag}`"
+        @click="removeTag(tag)"
+      >
+        <X :size="13" />
+      </button>
+    </span>
+    <input
+      v-model="draft"
+      type="text"
+      placeholder="添加标签"
+      @keydown="onKeydown"
+      @blur="draft.trim() && addTag()"
+    >
+    <div
+      v-if="suggestions.length"
+      class="suggestions"
+    >
+      <button
+        v-for="tag in suggestions"
+        :key="tag.id"
+        type="button"
+        @mousedown.prevent="addTag(tag.name)"
+      >
+        {{ tag.name }}
+      </button>
+    </div>
+  </div>
+</template>

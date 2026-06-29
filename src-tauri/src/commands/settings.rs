@@ -1,0 +1,62 @@
+use tauri::{AppHandle, State};
+use tauri_plugin_autostart::ManagerExt;
+
+use crate::{
+    app_state::AppState,
+    db::{migrations::now_string, repos::SettingsRepo},
+    error::{AppError, AppErrorResponse, CommandResult},
+    types::settings::{AppSettings, SettingsPatch},
+};
+
+#[tauri::command]
+pub fn settings_get(app: AppHandle, state: State<'_, AppState>) -> CommandResult<AppSettings> {
+    let conn = state.conn().map_err(AppErrorResponse::from)?;
+    let shortcut = state.shortcut_status().map_err(AppErrorResponse::from)?;
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or_else(|err| {
+        log::warn!("autostart_status_failed source={err}");
+        false
+    });
+    let backup_error = SettingsRepo::get_bool(&conn, "backup_failed", false)
+        .ok()
+        .and_then(|failed| failed.then(|| "最近一次安全快照失败".to_string()));
+
+    Ok(AppSettings {
+        data_dir: state.data_dir().display().to_string(),
+        log_dir: state.log_dir().display().to_string(),
+        shortcut: shortcut.shortcut,
+        shortcut_registered: shortcut.registered,
+        shortcut_error: shortcut.error,
+        autostart_enabled,
+        backup_error,
+    })
+}
+
+#[tauri::command]
+pub fn settings_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    patch: SettingsPatch,
+) -> CommandResult<AppSettings> {
+    if let Some(enabled) = patch.autostart_enabled {
+        let result = if enabled {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        result
+            .map_err(|err| AppError::system("AUTOSTART_UPDATE_FAILED", err.to_string()))
+            .map_err(AppErrorResponse::from)?;
+
+        let mut conn = state.conn().map_err(AppErrorResponse::from)?;
+        let tx = conn
+            .transaction()
+            .map_err(AppError::from)
+            .map_err(AppErrorResponse::from)?;
+        SettingsRepo::set_bool(&tx, "autostart_enabled", enabled, &now_string())
+            .map_err(AppErrorResponse::from)?;
+        tx.commit()
+            .map_err(AppError::from)
+            .map_err(AppErrorResponse::from)?;
+    }
+    settings_get(app, state)
+}
