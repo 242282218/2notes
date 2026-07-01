@@ -2,19 +2,23 @@
 import { Clipboard, Send, X } from "lucide-vue-next";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
-import { draftClear, draftGet, draftUpdate } from "../../services/draftApi";
-import { entriesCreate } from "../../services/entryApi";
+import {
+  draftGet,
+  draftUpdate,
+  quickCaptureSubmit,
+} from "../../services/draftApi";
 import { appQuitReady, windowHideQuickCapture } from "../../services/windowApi";
 import IconButton from "../shared/IconButton.vue";
 
 const content = ref("");
 const revision = ref(0);
+const hydrated = ref(false);
 const saving = ref(false);
 const submitting = ref(false);
 const error = ref<string | null>(null);
-let hydrated = false;
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
 let timer: number | undefined;
 let localVersion = 0;
 let draftInFlight = false;
@@ -26,14 +30,26 @@ onMounted(async () => {
   unlistenQuit = await listen<{ requestId: string }>(
     "app-quit-requested",
     async (event) => {
-      await flushDraft();
-      await appQuitReady(event.payload.requestId, getCurrentWindow().label);
+      try {
+        await flushDraft();
+        await appQuitReady(event.payload.requestId, getCurrentWindow().label);
+      } catch {
+        await revealCurrentWindow();
+      }
     },
   );
-  const draft = await draftGet();
-  content.value = draft.content;
-  revision.value = draft.revision;
-  hydrated = true;
+  try {
+    const draft = await draftGet();
+    content.value = draft.content;
+    revision.value = draft.revision;
+  } catch (loadError) {
+    error.value =
+      loadError instanceof Error ? loadError.message : "草稿加载失败";
+  } finally {
+    hydrated.value = true;
+    await nextTick();
+    textareaRef.value?.focus();
+  }
 });
 
 onUnmounted(() => {
@@ -41,7 +57,7 @@ onUnmounted(() => {
 });
 
 watch(content, () => {
-  if (!hydrated) {
+  if (!hydrated.value) {
     return;
   }
   error.value = null;
@@ -72,7 +88,7 @@ async function flushDraft() {
 }
 
 async function saveDraftOnce() {
-  if (!hydrated) {
+  if (!hydrated.value) {
     return;
   }
   const requestVersion = localVersion;
@@ -111,9 +127,8 @@ async function submit() {
   error.value = null;
   try {
     await flushDraft();
-    await entriesCreate(trimmed);
-    const cleared = await draftClear();
-    hydrated = false;
+    const cleared = await quickCaptureSubmit(trimmed);
+    hydrated.value = false;
     try {
       content.value = "";
       revision.value = cleared.revision;
@@ -121,7 +136,7 @@ async function submit() {
       pendingDraftSave = false;
       await windowHideQuickCapture();
     } finally {
-      hydrated = true;
+      hydrated.value = true;
     }
   } catch (submitError) {
     error.value =
@@ -136,8 +151,19 @@ async function copyContent() {
 }
 
 async function hideQuickCapture() {
-  await flushDraft();
-  await windowHideQuickCapture();
+  try {
+    await flushDraft();
+    await windowHideQuickCapture();
+  } catch {
+    await revealCurrentWindow();
+  }
+}
+
+async function revealCurrentWindow() {
+  const currentWindow = getCurrentWindow();
+  await currentWindow.show();
+  await currentWindow.unminimize();
+  await currentWindow.setFocus();
 }
 </script>
 
@@ -153,8 +179,10 @@ async function hideQuickCapture() {
       />
     </header>
     <textarea
+      ref="textareaRef"
       v-model="content"
       autofocus
+      :disabled="!hydrated || submitting"
       placeholder="记下现在这件事"
       @keydown.enter.exact.prevent="submit"
       @keydown.esc.prevent="hideQuickCapture"
@@ -171,12 +199,13 @@ async function hideQuickCapture() {
         <IconButton
           label="复制"
           :icon="Clipboard"
+          :disabled="!hydrated"
           @click="copyContent"
         />
         <button
           type="button"
           class="primary-button"
-          :disabled="!content.trim() || submitting"
+          :disabled="!hydrated || !content.trim() || submitting"
           @click="submit"
         >
           <Send :size="16" />

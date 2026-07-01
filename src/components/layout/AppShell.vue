@@ -16,6 +16,7 @@ import SidebarNav from "./SidebarNav.vue";
 const entries = useEntriesStore();
 const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
 let unlistenQuit: (() => void) | null = null;
+let unlistenEntriesChanged: (() => void) | null = null;
 
 function onGlobalKeydown(event: KeyboardEvent) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
@@ -44,10 +45,17 @@ onMounted(async () => {
   unlistenQuit = await listen<{ requestId: string }>(
     "app-quit-requested",
     async (event) => {
-      await detailRef.value?.flushPendingSave();
+      if (!(await flushDetail())) {
+        await revealCurrentWindow();
+        return;
+      }
       await appQuitReady(event.payload.requestId, getCurrentWindow().label);
     },
   );
+  unlistenEntriesChanged = await listen("entries-changed", async () => {
+    await entries.load();
+    await entries.refreshTags();
+  });
   window.addEventListener("keydown", onGlobalKeydown);
   await entries.load();
   await entries.refreshTags();
@@ -55,6 +63,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenQuit?.();
+  unlistenEntriesChanged?.();
   window.removeEventListener("keydown", onGlobalKeydown);
 });
 
@@ -65,6 +74,13 @@ function focusSearch() {
 
 async function flushDetail() {
   return (await detailRef.value?.flushPendingSave()) ?? true;
+}
+
+async function revealCurrentWindow() {
+  const currentWindow = getCurrentWindow();
+  await currentWindow.show();
+  await currentWindow.unminimize();
+  await currentWindow.setFocus();
 }
 
 async function selectEntry(id: string) {

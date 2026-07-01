@@ -103,7 +103,9 @@ watch(
 );
 
 async function confirmMoveToTrash() {
-  await autosave.flush();
+  if (!(await flushPendingSave())) {
+    return;
+  }
   confirmTrash.value = false;
   emit("trash");
 }

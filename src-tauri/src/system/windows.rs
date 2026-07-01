@@ -6,6 +6,7 @@ use crate::{app_state::AppState, error::AppResult};
 const APP_QUIT_REQUESTED: &str = "app-quit-requested";
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct QuitRequestPayload {
     request_id: String,
 }
@@ -85,4 +86,20 @@ pub fn mark_app_quit_ready(app: &AppHandle, request_id: &str, window_label: &str
         app.exit(0);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_request_payload_uses_frontend_field_names() {
+        let value = serde_json::to_value(QuitRequestPayload {
+            request_id: "request-1".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(value["requestId"], "request-1");
+        assert!(value.get("request_id").is_none());
+    }
 }

@@ -58,6 +58,7 @@ pub fn run() {
             commands::drafts::draft_get,
             commands::drafts::draft_update,
             commands::drafts::draft_clear,
+            commands::drafts::quick_capture_submit,
             commands::export_markdown::export_markdown,
             commands::windows::window_open_main,
             commands::windows::window_open_quick_capture,

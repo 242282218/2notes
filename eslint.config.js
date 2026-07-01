@@ -16,6 +16,7 @@ export default tseslint.config(
         document: "readonly",
         HTMLInputElement: "readonly",
         HTMLSelectElement: "readonly",
+        HTMLTextAreaElement: "readonly",
         KeyboardEvent: "readonly",
         navigator: "readonly",
         URLSearchParams: "readonly",

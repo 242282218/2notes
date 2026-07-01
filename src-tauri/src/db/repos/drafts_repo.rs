@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::{
     db::migrations::now_string,
+    db::repos::EntriesRepo,
     error::{AppError, AppResult},
     types::settings::Draft,
 };
@@ -99,12 +100,25 @@ impl DraftsRepo {
             updated_at: now.to_string(),
         })
     }
+
+    pub fn submit_quick_capture(
+        tx: &Transaction<'_>,
+        content: &str,
+        now: &str,
+    ) -> AppResult<Draft> {
+        EntriesRepo::create(tx, content, now)?;
+        Self::clear(tx, now)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::connection::open_in_memory;
+    use crate::{
+        db::connection::open_in_memory,
+        db::repos::EntriesRepo,
+        types::entries::{EntryListFilter, PageRequest},
+    };
 
     #[test]
     fn updates_and_clears_draft() {
@@ -117,5 +131,37 @@ mod tests {
         assert_eq!(draft.revision, 1);
         assert_eq!(cleared.content, "");
         assert_eq!(DraftsRepo::get(&conn).unwrap().content, "");
+    }
+
+    #[test]
+    fn submit_quick_capture_creates_entry_and_clears_draft_atomically() {
+        let mut conn = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        DraftsRepo::update(&tx, "hello", 0, &now).unwrap();
+
+        let cleared = DraftsRepo::submit_quick_capture(&tx, "hello", &now).unwrap();
+
+        tx.commit().unwrap();
+        let page = EntriesRepo::list(
+            &conn,
+            &EntryListFilter {
+                query: None,
+                entry_type: None,
+                status: None,
+                tag: None,
+                include_deleted: false,
+                trash_only: false,
+            },
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cleared.content, "");
+        assert_eq!(DraftsRepo::get(&conn).unwrap().content, "");
+        assert_eq!(page.items.len(), 1);
     }
 }

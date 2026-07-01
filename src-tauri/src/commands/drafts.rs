@@ -1,4 +1,5 @@
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::{
     app_state::AppState,
@@ -6,6 +7,14 @@ use crate::{
     error::{AppErrorResponse, CommandResult},
     types::settings::Draft,
 };
+
+const ENTRIES_CHANGED: &str = "entries-changed";
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EntriesChangedPayload {
+    source: &'static str,
+}
 
 #[tauri::command]
 pub fn draft_get(state: State<'_, AppState>) -> CommandResult<Draft> {
@@ -44,4 +53,47 @@ pub fn draft_clear(state: State<'_, AppState>) -> CommandResult<Draft> {
         .map_err(crate::error::AppError::from)
         .map_err(AppErrorResponse::from)?;
     Ok(draft)
+}
+
+#[tauri::command]
+pub fn quick_capture_submit(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    content: String,
+) -> CommandResult<Draft> {
+    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
+    let tx = conn
+        .transaction()
+        .map_err(crate::error::AppError::from)
+        .map_err(AppErrorResponse::from)?;
+    let draft = DraftsRepo::submit_quick_capture(&tx, &content, &now_string())
+        .map_err(AppErrorResponse::from)?;
+    tx.commit()
+        .map_err(crate::error::AppError::from)
+        .map_err(AppErrorResponse::from)?;
+    if let Err(err) = app.emit_to(
+        "main",
+        ENTRIES_CHANGED,
+        EntriesChangedPayload {
+            source: "quick_capture",
+        },
+    ) {
+        log::warn!("entries_changed_emit_failed source={err}");
+    }
+    Ok(draft)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entries_changed_payload_uses_frontend_field_names() {
+        let value = serde_json::to_value(EntriesChangedPayload {
+            source: "quick_capture",
+        })
+        .unwrap();
+
+        assert_eq!(value["source"], "quick_capture");
+    }
 }
