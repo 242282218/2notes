@@ -1,20 +1,13 @@
-import { computed, type Ref } from "vue";
 import type { SaveState } from "./useAutosave";
 
-export function useSaveStateLabel(state: Ref<SaveState>) {
-  return computed(() => {
-    switch (state.value) {
-      case "dirty":
-        return "未保存";
-      case "saving":
-        return "保存中";
-      case "saved":
-        return "已保存";
-      case "failed":
-        return "保存失败";
-      case "idle":
-      default:
-        return "空闲";
-    }
-  });
+const labels: Record<SaveState, string> = {
+  dirty: "未保存",
+  saving: "保存中",
+  saved: "已保存",
+  failed: "保存失败",
+  idle: "空闲",
+};
+
+export function getSaveStateLabel(state: SaveState): string {
+  return labels[state];
 }

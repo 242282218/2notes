@@ -212,10 +212,6 @@ export const useEntriesStore = defineStore("entries", () => {
   }
 
   function upsertListItem(updated: EntryDetail) {
-    if (!matchesCurrentFilter(updated)) {
-      items.value = items.value.filter((item) => item.id !== updated.id);
-      return;
-    }
     const listItem: EntryListItem = {
       id: updated.id,
       title: updated.title,
@@ -232,43 +228,6 @@ export const useEntriesStore = defineStore("entries", () => {
     if (index >= 0) {
       items.value.splice(index, 1, listItem);
     }
-  }
-
-  function matchesCurrentFilter(entry: EntryDetail): boolean {
-    const filter = buildEntryFilter(view.value, filters);
-    if (filter.trashOnly && !entry.deletedAt) {
-      return false;
-    }
-    if (!filter.includeDeleted && entry.deletedAt) {
-      return false;
-    }
-    if (filter.status && entry.status !== filter.status) {
-      return false;
-    }
-    if (filter.entryType && entry.entryType !== filter.entryType) {
-      return false;
-    }
-    if (filter.tag) {
-      const tag = filter.tag.trim().toLocaleLowerCase();
-      if (!entry.tags.some((item) => item.name.toLocaleLowerCase() === tag)) {
-        return false;
-      }
-    }
-    if (filter.query) {
-      const query = filter.query.toLocaleLowerCase();
-      const haystack = [
-        entry.title || "",
-        entry.currentContent,
-        entry.originalContent,
-        ...entry.tags.map((tag) => tag.name),
-      ]
-        .join("\n")
-        .toLocaleLowerCase();
-      if (!haystack.includes(query)) {
-        return false;
-      }
-    }
-    return true;
   }
 
   return {

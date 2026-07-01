@@ -2,8 +2,10 @@
 import { Clipboard, Send, X } from "lucide-vue-next";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
+import { useAutosave } from "../../composables/useAutosave";
+import { revealCurrentWindow } from "../../composables/useWindowReveal";
 import {
   draftGet,
   draftUpdate,
@@ -15,23 +17,32 @@ import IconButton from "../shared/IconButton.vue";
 const content = ref("");
 const revision = ref(0);
 const hydrated = ref(false);
-const saving = ref(false);
 const submitting = ref(false);
 const error = ref<string | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
-let timer: number | undefined;
-let localVersion = 0;
-let draftInFlight = false;
-let pendingDraftSave = false;
-let activeDraftSave: Promise<void> | null = null;
 let unlistenQuit: (() => void) | null = null;
+
+const autosave = useAutosave({
+  delay: 250,
+  save: () => draftUpdate(content.value, revision.value),
+  onSaved: (draft) => {
+    revision.value = draft.revision;
+    error.value = null;
+  },
+  onFailed: (saveError) => {
+    error.value =
+      saveError instanceof Error ? saveError.message : "草稿保存失败";
+  },
+});
+
+const saving = computed(() => autosave.state.value === "saving");
 
 onMounted(async () => {
   unlistenQuit = await listen<{ requestId: string }>(
     "app-quit-requested",
     async (event) => {
       try {
-        await flushDraft();
+        await autosave.flush();
         await appQuitReady(event.payload.requestId, getCurrentWindow().label);
       } catch {
         await revealCurrentWindow();
@@ -47,7 +58,7 @@ onMounted(async () => {
       loadError instanceof Error ? loadError.message : "草稿加载失败";
   } finally {
     hydrated.value = true;
-    await nextTick();
+    await autosave.reset();
     textareaRef.value?.focus();
   }
 });
@@ -56,66 +67,12 @@ onUnmounted(() => {
   unlistenQuit?.();
 });
 
-watch(content, () => {
+function onContentChange() {
   if (!hydrated.value) {
     return;
   }
   error.value = null;
-  localVersion += 1;
-  if (timer) {
-    window.clearTimeout(timer);
-  }
-  timer = window.setTimeout(() => {
-    void flushDraft();
-  }, 250);
-});
-
-async function flushDraft() {
-  if (timer) {
-    window.clearTimeout(timer);
-    timer = undefined;
-  }
-  if (draftInFlight) {
-    pendingDraftSave = true;
-    await activeDraftSave;
-    return;
-  }
-  pendingDraftSave = true;
-  while (pendingDraftSave) {
-    pendingDraftSave = false;
-    await saveDraftOnce();
-  }
-}
-
-async function saveDraftOnce() {
-  if (!hydrated.value) {
-    return;
-  }
-  const requestVersion = localVersion;
-  draftInFlight = true;
-  saving.value = true;
-  activeDraftSave = (async () => {
-    const draft = await draftUpdate(content.value, revision.value);
-    revision.value = draft.revision;
-    if (requestVersion === localVersion) {
-      error.value = null;
-    } else {
-      pendingDraftSave = true;
-    }
-  })();
-  try {
-    await activeDraftSave;
-  } catch (saveError) {
-    error.value =
-      saveError instanceof Error ? saveError.message : "草稿保存失败";
-    throw saveError;
-  } finally {
-    activeDraftSave = null;
-    draftInFlight = false;
-    if (!pendingDraftSave) {
-      saving.value = false;
-    }
-  }
+  autosave.markDirty();
 }
 
 async function submit() {
@@ -126,14 +83,12 @@ async function submit() {
   submitting.value = true;
   error.value = null;
   try {
-    await flushDraft();
+    await autosave.flush();
     const cleared = await quickCaptureSubmit(trimmed);
     hydrated.value = false;
     try {
       content.value = "";
       revision.value = cleared.revision;
-      localVersion += 1;
-      pendingDraftSave = false;
       await windowHideQuickCapture();
     } finally {
       hydrated.value = true;
@@ -152,18 +107,11 @@ async function copyContent() {
 
 async function hideQuickCapture() {
   try {
-    await flushDraft();
+    await autosave.flush();
     await windowHideQuickCapture();
   } catch {
     await revealCurrentWindow();
   }
-}
-
-async function revealCurrentWindow() {
-  const currentWindow = getCurrentWindow();
-  await currentWindow.show();
-  await currentWindow.unminimize();
-  await currentWindow.setFocus();
 }
 </script>
 
@@ -184,6 +132,7 @@ async function revealCurrentWindow() {
       autofocus
       :disabled="!hydrated || submitting"
       placeholder="记下现在这件事"
+      @input="onContentChange"
       @keydown.enter.exact.prevent="submit"
       @keydown.esc.prevent="hideQuickCapture"
     />

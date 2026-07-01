@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { onMounted, onUnmounted, ref } from "vue";
 
 import type { AppView } from "../../app/routes";
+import { revealCurrentWindow } from "../../composables/useWindowReveal";
 import { appQuitReady, windowOpenQuickCapture } from "../../services/windowApi";
 import { useEntriesStore } from "../../stores/entries";
 import type { EntryStatus, EntryType } from "../../types/generated";
@@ -74,13 +75,6 @@ function focusSearch() {
 
 async function flushDetail() {
   return (await detailRef.value?.flushPendingSave()) ?? true;
-}
-
-async function revealCurrentWindow() {
-  const currentWindow = getCurrentWindow();
-  await currentWindow.show();
-  await currentWindow.unminimize();
-  await currentWindow.setFocus();
 }
 
 async function selectEntry(id: string) {

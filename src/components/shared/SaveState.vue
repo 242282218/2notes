@@ -2,6 +2,7 @@
 import { AlertCircle, CheckCircle2, Loader2 } from "lucide-vue-next";
 import { computed } from "vue";
 
+import { getSaveStateLabel } from "../../composables/useSaveState";
 import type { SaveState } from "../../composables/useAutosave";
 
 const props = defineProps<{
@@ -10,19 +11,10 @@ const props = defineProps<{
 }>();
 
 const label = computed(() => {
-  switch (props.state) {
-    case "dirty":
-      return "未保存";
-    case "saving":
-      return "保存中";
-    case "saved":
-      return "已保存";
-    case "failed":
-      return props.error || "保存失败";
-    case "idle":
-    default:
-      return "";
+  if (props.state === "failed") {
+    return props.error || "保存失败";
   }
+  return getSaveStateLabel(props.state);
 });
 </script>
 
