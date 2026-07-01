@@ -6,15 +6,14 @@ import AppShell from "../components/layout/AppShell.vue";
 import QuickCapture from "../components/quick-capture/QuickCapture.vue";
 
 const windowLabel = ref("main");
+const isQuickCaptureView = new URLSearchParams(window.location.search).get("view") === "quick-capture";
 
 onMounted(() => {
   windowLabel.value = getCurrentWindow().label;
 });
 
 const isQuickCapture = computed(
-  () =>
-    windowLabel.value === "quick-capture" ||
-    new URLSearchParams(window.location.search).get("view") === "quick-capture",
+  () => windowLabel.value === "quick-capture" || isQuickCaptureView,
 );
 </script>
 

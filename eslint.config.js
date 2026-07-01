@@ -12,6 +12,7 @@ export default tseslint.config(
   {
     languageOptions: {
       globals: {
+        crypto: "readonly",
         document: "readonly",
         HTMLInputElement: "readonly",
         HTMLSelectElement: "readonly",
@@ -31,11 +32,11 @@ export default tseslint.config(
     },
   },
   {
-    rules: {
-      "@typescript-eslint/no-empty-object-type": "off",
-      "@typescript-eslint/no-explicit-any": "off",
-      "vue/multi-word-component-names": "off",
-      "vue/no-v-html": "off",
-    },
+  rules: {
+    "@typescript-eslint/no-empty-object-type": "off",
+    "@typescript-eslint/no-explicit-any": "warn",
+    "vue/multi-word-component-names": "off",
+    "vue/no-v-html": "off",
+  },
   },
 );

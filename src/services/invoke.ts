@@ -29,11 +29,13 @@ export async function invokeCommand<T>(
 }
 
 function isAppErrorResponse(value: unknown): value is AppErrorResponse {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
   return (
-    typeof value === "object" &&
-    value !== null &&
-    "code" in value &&
-    "message" in value &&
-    "recoverable" in value
+    typeof candidate.code === "string" &&
+    typeof candidate.message === "string" &&
+    typeof candidate.recoverable === "boolean"
   );
 }

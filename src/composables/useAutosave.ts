@@ -42,7 +42,11 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
     }
     if (inFlight) {
       pending = true;
-      await activeFlush;
+      try {
+        await activeFlush;
+      } catch {
+        // runFlush already recorded state; swallow to avoid unhandled rejection
+      }
       return;
     }
     if (state.value !== "dirty" && state.value !== "failed") {
@@ -51,6 +55,8 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
     activeFlush = runFlush();
     try {
       await activeFlush;
+    } catch {
+      // state already set inside runFlush; swallow to keep flush() re-entrant safe
     } finally {
       activeFlush = null;
     }
@@ -78,6 +84,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
       } else {
         pending = true;
       }
+      throw saveError;
     } finally {
       inFlight = false;
       if (pending) {

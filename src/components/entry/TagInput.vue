@@ -18,6 +18,7 @@ const draft = ref("");
 const suggestions = ref<Tag[]>([]);
 const selected = computed(() => normalizeTagNames(props.modelValue));
 let suggestionRequestId = 0;
+let pendingBlurSave = false;
 
 watch(draft, async (value) => {
   const requestId = ++suggestionRequestId;
@@ -39,6 +40,7 @@ function addTag(value = draft.value) {
   emit("update:modelValue", next);
   draft.value = "";
   suggestions.value = [];
+  pendingBlurSave = false;
 }
 
 function removeTag(tag: string) {
@@ -56,6 +58,16 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === "Backspace" && !draft.value && selected.value.length) {
     removeTag(selected.value[selected.value.length - 1]);
   }
+}
+
+function onBlur() {
+  pendingBlurSave = true;
+  window.setTimeout(() => {
+    if (pendingBlurSave && draft.value.trim()) {
+      addTag();
+    }
+    pendingBlurSave = false;
+  }, 0);
 }
 </script>
 
@@ -80,7 +92,7 @@ function onKeydown(event: KeyboardEvent) {
       type="text"
       placeholder="添加标签"
       @keydown="onKeydown"
-      @blur="draft.trim() && addTag()"
+      @blur="onBlur"
     >
     <div
       v-if="suggestions.length"

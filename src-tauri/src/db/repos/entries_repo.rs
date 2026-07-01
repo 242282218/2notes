@@ -61,7 +61,7 @@ impl EntriesRepo {
         page: &PageRequest,
     ) -> AppResult<EntryPage> {
         let limit = page.limit.unwrap_or(50).clamp(1, 200);
-        let offset = page.offset.unwrap_or(0);
+        let offset = page.offset.unwrap_or(0).min(100_000);
         let fetch_limit = limit + 1;
 
         let (where_sql, values) = build_filter(filter);

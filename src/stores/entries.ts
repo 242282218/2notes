@@ -111,6 +111,11 @@ export const useEntriesStore = defineStore("entries", () => {
       if (requestId === selectRequestId && selectedId.value === id) {
         detail.value = entry;
       }
+    } catch (selectError) {
+      if (requestId === selectRequestId) {
+        error.value =
+          selectError instanceof Error ? selectError.message : "加载失败";
+      }
     } finally {
       if (requestId === selectRequestId) {
         detailLoading.value = false;
@@ -225,7 +230,7 @@ export const useEntriesStore = defineStore("entries", () => {
     };
     const index = items.value.findIndex((item) => item.id === updated.id);
     if (index >= 0) {
-      items.value[index] = listItem;
+      items.value.splice(index, 1, listItem);
     }
   }
 

@@ -11,6 +11,8 @@ defineEmits<{
   confirm: [];
   cancel: [];
 }>();
+
+const titleId = `modal-title-${crypto.randomUUID()}`;
 </script>
 
 <template>
@@ -23,8 +25,11 @@ defineEmits<{
       class="modal"
       role="dialog"
       aria-modal="true"
+      :aria-labelledby="titleId"
     >
-      <h2>{{ title }}</h2>
+      <h2 :id="titleId">
+        {{ title }}
+      </h2>
       <p>{{ message }}</p>
       <div class="modal-actions">
         <button

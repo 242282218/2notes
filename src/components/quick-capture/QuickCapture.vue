@@ -114,12 +114,15 @@ async function submit() {
     await entriesCreate(trimmed);
     const cleared = await draftClear();
     hydrated = false;
-    content.value = "";
-    revision.value = cleared.revision;
-    localVersion += 1;
-    pendingDraftSave = false;
-    hydrated = true;
-    await windowHideQuickCapture();
+    try {
+      content.value = "";
+      revision.value = cleared.revision;
+      localVersion += 1;
+      pendingDraftSave = false;
+      await windowHideQuickCapture();
+    } finally {
+      hydrated = true;
+    }
   } catch (submitError) {
     error.value =
       submitError instanceof Error ? submitError.message : "提交失败";

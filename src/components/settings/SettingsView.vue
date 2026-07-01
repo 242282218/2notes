@@ -34,6 +34,15 @@ async function chooseExportDir() {
     exportError.value = error instanceof Error ? error.message : "导出失败";
   }
 }
+
+async function openDir(path: string) {
+  try {
+    await openPath(path);
+  } catch (error) {
+    exportError.value =
+      error instanceof Error ? error.message : "打开目录失败";
+  }
+}
 </script>
 
 <template>
@@ -85,7 +94,7 @@ async function chooseExportDir() {
         <IconButton
           label="打开数据目录"
           :icon="FolderOpen"
-          @click="openPath(settingsStore.settings.dataDir)"
+          @click="openDir(settingsStore.settings.dataDir)"
         />
       </div>
 
@@ -97,7 +106,7 @@ async function chooseExportDir() {
         <IconButton
           label="打开日志目录"
           :icon="ExternalLink"
-          @click="openPath(settingsStore.settings.logDir)"
+          @click="openDir(settingsStore.settings.logDir)"
         />
       </div>
 

@@ -17,6 +17,13 @@ const entries = useEntriesStore();
 const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
 let unlistenQuit: (() => void) | null = null;
 
+function onGlobalKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    focusSearch();
+  }
+}
+
 const typeOptions: Array<{ value: EntryType | ""; label: string }> = [
   { value: "", label: "全部类型" },
   { value: "unclear", label: "未澄清" },
@@ -41,12 +48,14 @@ onMounted(async () => {
       await appQuitReady(event.payload.requestId, getCurrentWindow().label);
     },
   );
+  window.addEventListener("keydown", onGlobalKeydown);
   await entries.load();
   await entries.refreshTags();
 });
 
 onUnmounted(() => {
   unlistenQuit?.();
+  window.removeEventListener("keydown", onGlobalKeydown);
 });
 
 function focusSearch() {
@@ -94,12 +103,6 @@ async function setQuery(value: string) {
   }
 }
 
-window.addEventListener("keydown", (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-    event.preventDefault();
-    focusSearch();
-  }
-});
 </script>
 
 <template>

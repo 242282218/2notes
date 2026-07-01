@@ -1,3 +1,19 @@
+<script lang="ts">
+export const typeLabels: Record<string, string> = Object.freeze({
+  unclear: "未澄清",
+  idea: "想法",
+  task: "任务",
+  material: "素材",
+  question: "问题",
+});
+
+export const statusLabels: Record<string, string> = Object.freeze({
+  pending: "待处理",
+  done: "已完成",
+  archived: "已归档",
+});
+</script>
+
 <script setup lang="ts">
 import type { EntryListItem } from "../../types/generated";
 
@@ -9,20 +25,6 @@ defineProps<{
 defineEmits<{
   select: [id: string];
 }>();
-
-const typeLabels: Record<string, string> = {
-  unclear: "未澄清",
-  idea: "想法",
-  task: "任务",
-  material: "素材",
-  question: "问题",
-};
-
-const statusLabels: Record<string, string> = {
-  pending: "待处理",
-  done: "已完成",
-  archived: "已归档",
-};
 </script>
 
 <template>
