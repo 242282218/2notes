@@ -8,22 +8,6 @@ use crate::{
 };
 
 #[tauri::command]
-pub fn entries_create(state: State<'_, AppState>, content: String) -> CommandResult<EntryDetail> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let entry =
-        EntriesRepo::create(&tx, &content, &now_string()).map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    log::info!("entry_created id={}", entry.id);
-    Ok(entry)
-}
-
-#[tauri::command]
 pub fn entries_list(
     state: State<'_, AppState>,
     filter: EntryListFilter,

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isTauri } from "@tauri-apps/api/core";
 import { computed, onMounted, ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -9,7 +10,9 @@ const windowLabel = ref("main");
 const isQuickCaptureView = new URLSearchParams(window.location.search).get("view") === "quick-capture";
 
 onMounted(() => {
-  windowLabel.value = getCurrentWindow().label;
+  if (isTauri()) {
+    windowLabel.value = getCurrentWindow().label;
+  }
 });
 
 const isQuickCapture = computed(

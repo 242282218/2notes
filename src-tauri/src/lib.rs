@@ -44,7 +44,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::entries::entries_create,
             commands::entries::entries_list,
             commands::entries::entries_get,
             commands::entries::entries_update,
@@ -57,14 +56,10 @@ pub fn run() {
             commands::settings::settings_update,
             commands::drafts::draft_get,
             commands::drafts::draft_update,
-            commands::drafts::draft_clear,
             commands::drafts::quick_capture_submit,
             commands::export_markdown::export_markdown,
-            commands::windows::window_open_main,
             commands::windows::window_open_quick_capture,
             commands::windows::window_hide_quick_capture,
-            commands::windows::window_hide_main,
-            commands::windows::app_quit,
             commands::windows::app_quit_ready,
         ])
         .run(tauri::generate_context!())

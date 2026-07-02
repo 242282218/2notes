@@ -42,20 +42,6 @@ pub fn draft_update(
 }
 
 #[tauri::command]
-pub fn draft_clear(state: State<'_, AppState>) -> CommandResult<Draft> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let draft = DraftsRepo::clear(&tx, &now_string()).map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    Ok(draft)
-}
-
-#[tauri::command]
 pub fn quick_capture_submit(
     app: AppHandle,
     state: State<'_, AppState>,

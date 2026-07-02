@@ -48,13 +48,6 @@ pub fn hide_quick_capture_window(app: &AppHandle) -> AppResult<()> {
     Ok(())
 }
 
-pub fn hide_main_window(app: &AppHandle) -> AppResult<()> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.hide()?;
-    }
-    Ok(())
-}
-
 pub fn request_app_quit(app: &AppHandle) -> AppResult<()> {
     let windows = app
         .webview_windows()

@@ -12,10 +12,6 @@ export function draftUpdate(
   return invokeCommand("draft_update", { content, expectedRevision });
 }
 
-export function draftClear(): Promise<Draft> {
-  return invokeCommand("draft_clear");
-}
-
 export function quickCaptureSubmit(content: string): Promise<Draft> {
   return invokeCommand("quick_capture_submit", { content });
 }

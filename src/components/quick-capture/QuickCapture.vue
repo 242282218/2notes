@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import { Clipboard, Send, X } from "lucide-vue-next";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
+import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
 import { useAutosave } from "../../composables/useAutosave";
 import { revealCurrentWindow } from "../../composables/useWindowReveal";
 import {
@@ -11,7 +10,7 @@ import {
   draftUpdate,
   quickCaptureSubmit,
 } from "../../services/draftApi";
-import { appQuitReady, windowHideQuickCapture } from "../../services/windowApi";
+import { windowHideQuickCapture } from "../../services/windowApi";
 import IconButton from "../shared/IconButton.vue";
 
 const content = ref("");
@@ -20,7 +19,6 @@ const hydrated = ref(false);
 const submitting = ref(false);
 const error = ref<string | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
-let unlistenQuit: (() => void) | null = null;
 
 const autosave = useAutosave({
   delay: 250,
@@ -37,18 +35,16 @@ const autosave = useAutosave({
 
 const saving = computed(() => autosave.state.value === "saving");
 
+useAppQuitRequest(async () => {
+  try {
+    await autosave.flush();
+    return true;
+  } catch {
+    return false;
+  }
+});
+
 onMounted(async () => {
-  unlistenQuit = await listen<{ requestId: string }>(
-    "app-quit-requested",
-    async (event) => {
-      try {
-        await autosave.flush();
-        await appQuitReady(event.payload.requestId, getCurrentWindow().label);
-      } catch {
-        await revealCurrentWindow();
-      }
-    },
-  );
   try {
     const draft = await draftGet();
     content.value = draft.content;
@@ -61,10 +57,6 @@ onMounted(async () => {
     await autosave.reset();
     textareaRef.value?.focus();
   }
-});
-
-onUnmounted(() => {
-  unlistenQuit?.();
 });
 
 function onContentChange() {

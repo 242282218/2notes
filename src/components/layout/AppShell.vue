@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { Search, SquarePen } from "lucide-vue-next";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { onMounted, onUnmounted, ref } from "vue";
 
 import type { AppView } from "../../app/routes";
-import { revealCurrentWindow } from "../../composables/useWindowReveal";
-import { appQuitReady, windowOpenQuickCapture } from "../../services/windowApi";
+import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
+import { windowOpenQuickCapture } from "../../services/windowApi";
 import { useEntriesStore } from "../../stores/entries";
 import type { EntryStatus, EntryType } from "../../types/generated";
 import EntryDetail from "../entry/EntryDetail.vue";
@@ -16,7 +16,6 @@ import SidebarNav from "./SidebarNav.vue";
 
 const entries = useEntriesStore();
 const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
-let unlistenQuit: (() => void) | null = null;
 let unlistenEntriesChanged: (() => void) | null = null;
 
 function onGlobalKeydown(event: KeyboardEvent) {
@@ -42,28 +41,21 @@ const statusOptions: Array<{ value: EntryStatus | ""; label: string }> = [
   { value: "archived", label: "已归档" },
 ];
 
+useAppQuitRequest(flushDetail);
+
 onMounted(async () => {
-  unlistenQuit = await listen<{ requestId: string }>(
-    "app-quit-requested",
-    async (event) => {
-      if (!(await flushDetail())) {
-        await revealCurrentWindow();
-        return;
-      }
-      await appQuitReady(event.payload.requestId, getCurrentWindow().label);
-    },
-  );
-  unlistenEntriesChanged = await listen("entries-changed", async () => {
+  window.addEventListener("keydown", onGlobalKeydown);
+  if (isTauri()) {
+    unlistenEntriesChanged = await listen("entries-changed", async () => {
+      await entries.load();
+      await entries.refreshTags();
+    });
     await entries.load();
     await entries.refreshTags();
-  });
-  window.addEventListener("keydown", onGlobalKeydown);
-  await entries.load();
-  await entries.refreshTags();
+  }
 });
 
 onUnmounted(() => {
-  unlistenQuit?.();
   unlistenEntriesChanged?.();
   window.removeEventListener("keydown", onGlobalKeydown);
 });
