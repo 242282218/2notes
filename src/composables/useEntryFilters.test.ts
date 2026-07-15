@@ -8,6 +8,14 @@ import {
 import type { EntryDetail } from "../types/generated";
 
 describe("entry filters", () => {
+  it("separates capture inbox from knowledge view", () => {
+    expect(buildEntryFilter("inbox", emptyFilters())).toEqual(
+      expect.objectContaining({ status: "pending", knowledgeState: "capture" }),
+    );
+    expect(buildEntryFilter("knowledge", emptyFilters())).toEqual(
+      expect.objectContaining({ status: null, knowledgeState: "knowledge" }),
+    );
+  });
   it("normalizes duplicate tag names", () => {
     expect(normalizeTagNames([" Work ", "work", "中文", ""])).toEqual([
       "Work",
@@ -68,6 +76,15 @@ describe("entryMatchesCurrentFilter", () => {
     expect(entryMatchesCurrentFilter(base, filter)).toBe(true);
   });
 
+  it("excludes knowledge entries from inbox", () => {
+    expect(
+      entryMatchesCurrentFilter(
+        { ...base, knowledgeState: "knowledge" },
+        buildEntryFilter("inbox", emptyFilters()),
+      ),
+    ).toBe(false);
+  });
+
   it("filters by tag normalized name", () => {
     const filter = buildEntryFilter("tags", {
       query: "",
@@ -89,3 +106,7 @@ describe("entryMatchesCurrentFilter", () => {
     expect(entryMatchesCurrentFilter(trashed, filter)).toBe(false);
   });
 });
+
+function emptyFilters() {
+  return { query: "", entryType: "", status: "", tag: "" } as const;
+}

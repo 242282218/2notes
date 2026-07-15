@@ -21,7 +21,8 @@ export function buildEntryFilter(
     query: filters.query.trim() || null,
     entryType: filters.entryType || null,
     status: filters.status || (view === "inbox" ? "pending" : null),
-    knowledgeState: null,
+    knowledgeState:
+      view === "inbox" ? "capture" : view === "knowledge" ? "knowledge" : null,
     tag: filters.tag.trim() || null,
     includeDeleted: view === "trash",
     trashOnly: view === "trash",

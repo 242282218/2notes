@@ -14,3 +14,5 @@ export const STATUS_LABELS: Readonly<Record<string, string>> = Object.freeze({
   done: "已完成",
   archived: "已归档",
 });
+
+export const KNOWLEDGE_LABEL = "知识";

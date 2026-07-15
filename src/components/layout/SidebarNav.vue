@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { Inbox, Search, Settings, Tags, Trash2 } from "lucide-vue-next";
+import {
+  BookOpen,
+  Inbox,
+  Search,
+  Settings,
+  Tags,
+  Trash2,
+} from "lucide-vue-next";
 
 import type { AppView } from "../../app/routes";
 
@@ -13,6 +20,7 @@ defineEmits<{
 
 const navItems: Array<{ view: AppView; label: string; icon: unknown }> = [
   { view: "inbox", label: "收集箱", icon: Inbox },
+  { view: "knowledge", label: "知识库", icon: BookOpen },
   { view: "search", label: "搜索", icon: Search },
   { view: "tags", label: "标签", icon: Tags },
   { view: "trash", label: "回收站", icon: Trash2 },

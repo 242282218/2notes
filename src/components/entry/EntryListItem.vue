@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { STATUS_LABELS, TYPE_LABELS } from "../../constants/labels";
+import {
+  KNOWLEDGE_LABEL,
+  STATUS_LABELS,
+  TYPE_LABELS,
+} from "../../constants/labels";
 import type { EntryListItem } from "../../types/generated";
 
 defineProps<{
@@ -24,6 +28,9 @@ defineEmits<{
     }}</span>
     <span class="entry-summary">{{ item.summary }}</span>
     <span class="entry-meta">
+      <span v-if="item.knowledgeState === 'knowledge'">{{
+        KNOWLEDGE_LABEL
+      }}</span>
       <span>{{ TYPE_LABELS[item.entryType] ?? item.entryType }}</span>
       <span>{{ STATUS_LABELS[item.status] ?? item.status }}</span>
       <span v-for="tag in item.tags.slice(0, 3)" :key="tag.id"

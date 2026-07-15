@@ -475,6 +475,11 @@ fn build_filter(filter: &EntryListFilter, search_mode: SearchMode) -> (String, V
         values.push(Value::Text(status.as_str().to_string()));
     }
 
+    if let Some(knowledge_state) = &filter.knowledge_state {
+        clauses.push("e.knowledge_state = ?".to_string());
+        values.push(Value::Text(knowledge_state.as_str().to_string()));
+    }
+
     if let Some(entry_type) = &filter.entry_type {
         clauses.push("e.type = ?".to_string());
         values.push(Value::Text(entry_type.as_str().to_string()));
@@ -749,6 +754,31 @@ mod tests {
         assert_eq!(entry.entry_type, EntryType::Unclear);
         assert_eq!(entry.status, EntryStatus::Pending);
         assert_eq!(entry.original_content, "hello world");
+    }
+
+    #[test]
+    fn knowledge_filter_returns_only_knowledge_entries() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "capture", &now).unwrap();
+        let knowledge = EntriesRepo::create(&tx, "knowledge", &now).unwrap();
+        KnowledgeRepo::promote(&tx, &knowledge.id, knowledge.revision, &now).unwrap();
+        tx.commit().unwrap();
+        let mut filter = default_filter();
+        filter.knowledge_state = Some(KnowledgeState::Knowledge);
+
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, knowledge.id);
     }
 
     #[test]
