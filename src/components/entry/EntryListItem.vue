@@ -26,7 +26,13 @@ defineEmits<{
     <span class="entry-title">{{
       item.title || item.summary || "untitled"
     }}</span>
-    <span class="entry-summary">{{ item.summary }}</span>
+    <span v-if="item.searchSnippet" class="entry-summary search-snippet">
+      <template v-for="(part, index) in item.searchSnippet.parts" :key="index">
+        <mark v-if="part.highlighted">{{ part.text }}</mark>
+        <template v-else>{{ part.text }}</template>
+      </template>
+    </span>
+    <span v-else class="entry-summary">{{ item.summary }}</span>
     <span class="entry-meta">
       <span v-if="item.knowledgeState === 'knowledge'">{{
         KNOWLEDGE_LABEL

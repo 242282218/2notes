@@ -11,6 +11,27 @@ describe("EntryListItem", () => {
     });
     expect(wrapper.text()).toContain("知识");
   });
+  it("renders search snippets as text instead of html", () => {
+    const item = knowledgeItem();
+    item.searchSnippet = {
+      parts: [
+        { text: "matched ", highlighted: false },
+        {
+          text: '<img src=x onerror="alert(1)">',
+          highlighted: true,
+        },
+      ],
+    };
+
+    const wrapper = mount(EntryListItem, {
+      props: { item, active: false },
+    });
+
+    expect(wrapper.find("img").exists()).toBe(false);
+    expect(wrapper.get("mark").text()).toContain(
+      '<img src=x onerror="alert(1)">',
+    );
+  });
 });
 
 function knowledgeItem(): EntryListItemType {

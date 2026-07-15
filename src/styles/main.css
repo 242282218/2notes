@@ -215,6 +215,11 @@ button:disabled {
   -webkit-box-orient: vertical;
 }
 
+.search-snippet mark {
+  color: #12333f;
+  background: #cfe9ed;
+}
+
 .entry-meta {
   display: flex;
   flex-wrap: wrap;
