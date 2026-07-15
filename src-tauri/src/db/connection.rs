@@ -16,6 +16,9 @@ pub fn open_database(path: &Path) -> AppResult<(Connection, Connection)> {
     let mut write_conn = Connection::open(path)?;
     apply_pragmas(&write_conn)?;
     super::migrations::run_migrations(&mut write_conn)?;
+    if let Err(err) = super::repos::KnowledgeRepo::ensure_link_index(&mut write_conn) {
+        log::error!("knowledge_link_index_rebuild_failed source={err}");
+    }
 
     let read_conn = Connection::open(path)?;
     apply_pragmas(&read_conn)?;
@@ -36,6 +39,7 @@ pub fn open_in_memory() -> AppResult<(Connection, Connection)> {
     let mut write_conn = Connection::open_with_flags(&uri, flags)?;
     apply_pragmas(&write_conn)?;
     super::migrations::run_migrations(&mut write_conn)?;
+    super::repos::KnowledgeRepo::ensure_link_index(&mut write_conn)?;
 
     let read_conn = Connection::open_with_flags(&uri, flags)?;
     apply_pragmas(&read_conn)?;

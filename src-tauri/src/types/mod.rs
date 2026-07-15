@@ -1,5 +1,6 @@
 pub mod backups;
 pub mod entries;
+pub mod knowledge;
 pub mod settings;
 pub mod tags;
 

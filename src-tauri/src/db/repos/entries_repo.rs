@@ -249,7 +249,7 @@ impl EntriesRepo {
         Ok(entries)
     }
 
-    fn get_with_tx(tx: &Transaction<'_>, id: &str) -> AppResult<EntryDetail> {
+    pub(crate) fn get_with_tx(tx: &Transaction<'_>, id: &str) -> AppResult<EntryDetail> {
         let record =
             Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
         record_to_detail_tx(tx, record)
