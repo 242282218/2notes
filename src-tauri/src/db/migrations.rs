@@ -9,10 +9,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("schema/001_init.sql")),
     (2, include_str!("schema/002_entries_fts.sql")),
     (3, include_str!("schema/003_knowledge_graph.sql")),
+    (4, include_str!("schema/004_entries_fts_trigram.sql")),
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
     let fts5_available = fts5_available(conn)?;
+    let fts5_trigram_available = fts5_trigram_available(conn)?;
     let tx = conn.transaction()?;
     let applied = load_applied(&tx)?;
     let current_max = MIGRATIONS.last().map(|(version, _)| *version).unwrap_or(0);
@@ -38,6 +40,15 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
 
         if *version == 2 && !fts5_available {
             log::warn!("fts5_unavailable migration=2 fallback=like_search");
+            tx.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+                params![version, checksum, now_string()],
+            )?;
+            continue;
+        }
+
+        if *version == 4 && !fts5_trigram_available {
+            log::warn!("fts5_trigram_unavailable migration=4 fallback=fts5_unicode61");
             tx.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
                 params![version, checksum, now_string()],
@@ -92,6 +103,24 @@ fn fts5_available(conn: &Connection) -> AppResult<bool> {
     }
 }
 
+fn fts5_trigram_available(conn: &Connection) -> AppResult<bool> {
+    match conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE temp.__fts5_trigram_probe USING fts5(value, tokenize='trigram');
+        DROP TABLE temp.__fts5_trigram_probe;
+        ",
+    ) {
+        Ok(()) => Ok(true),
+        Err(err)
+            if err.to_string().contains("no such module")
+                || err.to_string().contains("no such tokenizer") =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub fn checksum(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in input.as_bytes() {
@@ -112,6 +141,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn migration_uses_trigram_fts_when_supported() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        if !fts5_trigram_available(&conn).unwrap() {
+            return;
+        }
+
+        run_migrations(&mut conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("tokenize='trigram'"), "{sql}");
+    }
+
+    #[test]
+    fn migration_004_backfills_existing_aliases() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for (version, sql) in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, checksum(sql), now_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_promoted_at, knowledge_title_key
+             ) VALUES ('e1', '当前标题', 'user', '正文', '正文', 'idea', 'archived', 0,
+                       '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z', NULL,
+                       'knowledge', '2026-07-16T00:00:00Z', '当前标题')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entry_aliases(normalized_alias, entry_id, alias, created_at)
+             VALUES ('历史标题', 'e1', '历史标题', '2026-07-16T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH '历史标题'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn trigram_fts_matches_chinese_substring() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_promoted_at, knowledge_title_key
+             ) VALUES ('e1', '第二阶段知识库全文搜索', 'user', '正文', '正文', 'idea',
+                       'archived', 0, '2026-07-16T00:00:00Z', '2026-07-16T00:00:00Z',
+                       NULL, 'knowledge', '2026-07-16T00:00:00Z', '第二阶段知识库全文搜索')",
+            [],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE entries_fts MATCH '知识库'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
     fn migration_is_idempotent() {
         let mut conn = Connection::open_in_memory().unwrap();
 
@@ -123,7 +239,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
     }
 
     #[test]
