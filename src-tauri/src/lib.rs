@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod error;
 mod files;
+pub mod knowledge;
 mod system;
 mod types;
 
