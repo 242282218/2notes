@@ -8,7 +8,10 @@ use crate::{
     knowledge::wiki_links::{
         canonicalize_knowledge_title, normalize_knowledge_title, parse_wiki_links,
     },
-    types::{entries::EntryDetail, knowledge::KnowledgeIndexReport},
+    types::{
+        entries::EntryDetail,
+        knowledge::{KnowledgeIndexReport, KnowledgeSuggestion},
+    },
 };
 
 const LINK_INDEX_VERSION_KEY: &str = "knowledge_link_index_version";
@@ -16,6 +19,65 @@ const LINK_INDEX_VERSION_KEY: &str = "knowledge_link_index_version";
 pub struct KnowledgeRepo;
 
 impl KnowledgeRepo {
+    pub fn suggest(
+        conn: &Connection,
+        query: &str,
+        limit: u32,
+    ) -> AppResult<Vec<KnowledgeSuggestion>> {
+        let normalized = normalize_knowledge_title(query);
+        let limit = i64::from(limit.clamp(1, 20));
+        if normalized.is_empty() {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, NULL
+                 FROM entries
+                 WHERE knowledge_state = 'knowledge' AND deleted_at IS NULL
+                 ORDER BY updated_at DESC, id ASC
+                 LIMIT ?1",
+            )?;
+            return collect_suggestions(stmt.query_map([limit], map_suggestion)?);
+        }
+
+        let pattern = format!("%{}%", super::entries_repo::escape_like(&normalized));
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.title,
+                    CASE
+                        WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN NULL
+                        ELSE (
+                            SELECT ea.alias
+                            FROM entry_aliases ea
+                            WHERE ea.entry_id = e.id
+                              AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
+                            ORDER BY ea.normalized_alias
+                            LIMIT 1
+                        )
+                    END AS matched_alias
+             FROM entries e
+             WHERE e.knowledge_state = 'knowledge'
+               AND e.deleted_at IS NULL
+               AND (
+                   e.knowledge_title_key LIKE ?2 ESCAPE '\\'
+                   OR EXISTS (
+                       SELECT 1
+                       FROM entry_aliases ea
+                       WHERE ea.entry_id = e.id
+                         AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
+                   )
+               )
+             ORDER BY CASE
+                          WHEN e.knowledge_title_key = ?1 THEN 0
+                          WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN 1
+                          ELSE 2
+                      END,
+                      e.title COLLATE NOCASE,
+                      e.id
+             LIMIT ?3",
+        )?;
+        let suggestions = collect_suggestions(
+            stmt.query_map(params![normalized, pattern, limit], map_suggestion)?,
+        );
+        suggestions
+    }
+
     pub fn promote(
         tx: &Transaction<'_>,
         id: &str,
@@ -255,6 +317,21 @@ impl KnowledgeRepo {
     }
 }
 
+fn collect_suggestions(
+    rows: impl Iterator<Item = rusqlite::Result<KnowledgeSuggestion>>,
+) -> AppResult<Vec<KnowledgeSuggestion>> {
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn map_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeSuggestion> {
+    Ok(KnowledgeSuggestion {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        matched_alias: row.get(2)?,
+    })
+}
+
 fn validate_title(input: &str) -> AppResult<String> {
     let canonical = canonicalize_knowledge_title(input);
     if canonical.is_empty() {
@@ -330,7 +407,96 @@ mod tests {
     use crate::{
         db::{connection::open_in_memory, migrations::now_string, repos::EntriesRepo},
         error::AppError,
+        types::entries::EntryPatch,
     };
+
+    #[test]
+    fn suggest_matches_current_title_and_alias_but_excludes_trash() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+
+        let exact = EntriesRepo::create(&tx, "Atlas", &now).unwrap();
+        let exact = KnowledgeRepo::promote(&tx, &exact.id, exact.revision, &now).unwrap();
+
+        let current = EntriesRepo::create(&tx, "Current Atlas", &now).unwrap();
+        let current = KnowledgeRepo::promote(&tx, &current.id, current.revision, &now).unwrap();
+
+        let alias = EntriesRepo::create(&tx, "Atlas First", &now).unwrap();
+        let alias = KnowledgeRepo::promote(&tx, &alias.id, alias.revision, &now).unwrap();
+        let alias = EntriesRepo::update(
+            &tx,
+            &alias.id,
+            EntryPatch {
+                title: Some("Atlas Second".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            alias.revision,
+            &now,
+        )
+        .unwrap();
+        let alias = EntriesRepo::update(
+            &tx,
+            &alias.id,
+            EntryPatch {
+                title: Some("Canonical Page".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            alias.revision,
+            &now,
+        )
+        .unwrap();
+
+        let trashed = EntriesRepo::create(&tx, "Atlas Trash", &now).unwrap();
+        let trashed = KnowledgeRepo::promote(&tx, &trashed.id, trashed.revision, &now).unwrap();
+        EntriesRepo::move_to_trash(&tx, &trashed.id, trashed.revision, &now).unwrap();
+        tx.commit().unwrap();
+
+        let suggestions = KnowledgeRepo::suggest(&conn, " atlas ", 20).unwrap();
+
+        assert_eq!(suggestions.len(), 3);
+        assert_eq!(suggestions[0].id, exact.id);
+        assert_eq!(suggestions[0].title, "Atlas");
+        assert_eq!(suggestions[0].matched_alias, None);
+        assert_eq!(suggestions[1].id, current.id);
+        assert_eq!(suggestions[1].title, "Current Atlas");
+        assert_eq!(suggestions[1].matched_alias, None);
+        assert_eq!(suggestions[2].id, alias.id);
+        assert_eq!(suggestions[2].title, "Canonical Page");
+        assert_eq!(suggestions[2].matched_alias.as_deref(), Some("Atlas First"));
+    }
+
+    #[test]
+    fn suggest_empty_query_orders_recent_and_clamps_limit() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let older = EntriesRepo::create(&tx, "Older", "2026-07-16T00:00:00Z").unwrap();
+        KnowledgeRepo::promote(&tx, &older.id, older.revision, "2026-07-16T00:00:00Z").unwrap();
+        for index in 0..19 {
+            let entry =
+                EntriesRepo::create(&tx, &format!("Middle {index}"), "2026-07-16T01:00:00Z")
+                    .unwrap();
+            KnowledgeRepo::promote(&tx, &entry.id, entry.revision, "2026-07-16T01:00:00Z").unwrap();
+        }
+        let newest = EntriesRepo::create(&tx, "Newest", "2026-07-16T02:00:00Z").unwrap();
+        let newest =
+            KnowledgeRepo::promote(&tx, &newest.id, newest.revision, "2026-07-16T02:00:00Z")
+                .unwrap();
+        tx.commit().unwrap();
+
+        let recent = KnowledgeRepo::suggest(&conn, "", 0).unwrap();
+        let limited = KnowledgeRepo::suggest(&conn, "", 100).unwrap();
+
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, newest.id);
+        assert_eq!(limited.len(), 20);
+    }
 
     #[test]
     fn promote_uses_persisted_title_and_rejects_normalized_conflicts() {

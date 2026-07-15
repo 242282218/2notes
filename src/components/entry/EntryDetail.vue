@@ -1,15 +1,25 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { RotateCcw, Trash2 } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
+import {
+  applyWikiLinkCompletion,
+  findWikiLinkCompletion,
+  type WikiLinkCompletion,
+} from "../../composables/useWikiLinkCompletion";
 import { entriesUpdate } from "../../services/entryApi";
-import { knowledgeDemote, knowledgePromote } from "../../services/knowledgeApi";
+import {
+  knowledgeDemote,
+  knowledgePromote,
+  knowledgeSuggest,
+} from "../../services/knowledgeApi";
 import type {
   EntryDetail,
   EntryPatch,
   EntryStatus,
   EntryType,
+  KnowledgeSuggestion,
 } from "../../types/generated";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import IconButton from "../shared/IconButton.vue";
@@ -17,6 +27,7 @@ import SaveState from "../shared/SaveState.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
 import EntryTypeSelect from "./EntryTypeSelect.vue";
 import TagInput from "./TagInput.vue";
+import WikiLinkSuggestions from "./WikiLinkSuggestions.vue";
 
 const props = defineProps<{
   detail: EntryDetail | null;
@@ -35,15 +46,27 @@ const currentContent = ref("");
 const entryType = ref<EntryType>("unclear");
 const status = ref<EntryStatus>("pending");
 const tagInputRef = ref<{ commitDraft: () => void } | null>(null);
+const contentEditorRef = ref<HTMLTextAreaElement | null>(null);
 const tags = ref<string[]>([]);
 const baseRevision = ref(0);
 const editingEntryId = ref<string | null>(null);
 const confirmTrash = ref(false);
 const confirmDelete = ref(false);
 const knowledgeError = ref("");
+const wikiLinkCompletion = ref<WikiLinkCompletion | null>(null);
+const wikiLinkSuggestions = ref<KnowledgeSuggestion[]>([]);
+const wikiLinkActiveIndex = ref(0);
+const wikiLinkListboxId = "entry-wiki-link-suggestions";
+const wikiLinkSuggestionsOpen = computed(
+  () =>
+    wikiLinkCompletion.value !== null && wikiLinkSuggestions.value.length > 0,
+);
 let initializing = false;
 let syncVersion = 0;
 let titleDirty = false;
+let wikiLinkRequestId = 0;
+let wikiLinkTimer: number | undefined;
+let wikiLinkHandledKey: string | null = null;
 
 const autosave = useAutosave<EntryDetail>({
   delay: 500,
@@ -77,6 +100,7 @@ const autosave = useAutosave<EntryDetail>({
 watch(
   () => props.detail,
   async (entry) => {
+    resetWikiLinkCompletion();
     const currentSync = ++syncVersion;
     initializing = true;
     try {
@@ -105,6 +129,8 @@ watch(
   },
   { immediate: true },
 );
+
+onBeforeUnmount(resetWikiLinkCompletion);
 
 watch(title, () => {
   if (!initializing && props.detail && !props.detail.deletedAt) {
@@ -170,6 +196,106 @@ async function demoteFromKnowledge() {
     emit("saved", updated);
   } catch (error) {
     knowledgeError.value = error instanceof Error ? error.message : "移出失败";
+  }
+}
+
+function refreshWikiLinkCompletion() {
+  const editor = contentEditorRef.value;
+  if (!editor) {
+    resetWikiLinkCompletion();
+    return;
+  }
+  const next = findWikiLinkCompletion(editor.value, editor.selectionStart);
+  if (!next) {
+    resetWikiLinkCompletion();
+    return;
+  }
+  const current = wikiLinkCompletion.value;
+  if (current?.start === next.start && current.query === next.query) return;
+
+  clearWikiLinkTimer();
+  const requestId = ++wikiLinkRequestId;
+  wikiLinkCompletion.value = next;
+  wikiLinkSuggestions.value = [];
+  wikiLinkActiveIndex.value = 0;
+  wikiLinkTimer = window.setTimeout(async () => {
+    wikiLinkTimer = undefined;
+    try {
+      const suggestions = await knowledgeSuggest(next.query);
+      if (requestId !== wikiLinkRequestId) return;
+      wikiLinkSuggestions.value = suggestions;
+      wikiLinkActiveIndex.value = 0;
+    } catch {
+      if (requestId === wikiLinkRequestId) {
+        wikiLinkSuggestions.value = [];
+      }
+    }
+  }, 120);
+}
+
+function handleWikiLinkKeyup(event: KeyboardEvent) {
+  if (wikiLinkHandledKey === event.key) {
+    wikiLinkHandledKey = null;
+    return;
+  }
+  wikiLinkHandledKey = null;
+  refreshWikiLinkCompletion();
+}
+
+function handleWikiLinkKeydown(event: KeyboardEvent) {
+  wikiLinkHandledKey = null;
+  if (!wikiLinkSuggestionsOpen.value || event.isComposing) return;
+  const count = wikiLinkSuggestions.value.length;
+  if (event.key === "ArrowDown") {
+    wikiLinkHandledKey = event.key;
+    event.preventDefault();
+    wikiLinkActiveIndex.value = (wikiLinkActiveIndex.value + 1) % count;
+  } else if (event.key === "ArrowUp") {
+    wikiLinkHandledKey = event.key;
+    event.preventDefault();
+    wikiLinkActiveIndex.value = (wikiLinkActiveIndex.value - 1 + count) % count;
+  } else if (event.key === "Enter") {
+    wikiLinkHandledKey = event.key;
+    event.preventDefault();
+    void selectWikiLinkSuggestion(
+      wikiLinkSuggestions.value[wikiLinkActiveIndex.value],
+    );
+  } else if (event.key === "Escape") {
+    wikiLinkHandledKey = event.key;
+    event.preventDefault();
+    resetWikiLinkCompletion();
+  }
+}
+
+async function selectWikiLinkSuggestion(suggestion: KnowledgeSuggestion) {
+  const editor = contentEditorRef.value;
+  const completion = wikiLinkCompletion.value;
+  if (!editor || !completion) return;
+
+  const applied = applyWikiLinkCompletion(
+    editor.value,
+    completion,
+    suggestion.title,
+  );
+  currentContent.value = applied.value;
+  resetWikiLinkCompletion();
+  await nextTick();
+  editor.focus();
+  editor.setSelectionRange(applied.caret, applied.caret);
+}
+
+function resetWikiLinkCompletion() {
+  clearWikiLinkTimer();
+  wikiLinkRequestId += 1;
+  wikiLinkCompletion.value = null;
+  wikiLinkSuggestions.value = [];
+  wikiLinkActiveIndex.value = 0;
+}
+
+function clearWikiLinkTimer() {
+  if (wikiLinkTimer !== undefined) {
+    window.clearTimeout(wikiLinkTimer);
+    wikiLinkTimer = undefined;
   }
 }
 
@@ -262,12 +388,38 @@ defineExpose({
         :disabled="Boolean(detail.deletedAt)"
       />
 
-      <textarea
-        v-model="currentContent"
-        class="content-editor"
-        aria-label="正文"
-        :disabled="Boolean(detail.deletedAt)"
-      />
+      <div class="content-editor-wrap">
+        <textarea
+          ref="contentEditorRef"
+          v-model="currentContent"
+          class="content-editor"
+          role="combobox"
+          aria-label="正文"
+          :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
+          :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
+          :aria-controls="
+            wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
+          "
+          :aria-activedescendant="
+            wikiLinkSuggestionsOpen
+              ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
+              : undefined
+          "
+          :disabled="Boolean(detail.deletedAt)"
+          @input="refreshWikiLinkCompletion"
+          @click="refreshWikiLinkCompletion"
+          @keyup="handleWikiLinkKeyup"
+          @keydown="handleWikiLinkKeydown"
+          @blur="resetWikiLinkCompletion"
+        />
+        <WikiLinkSuggestions
+          v-if="wikiLinkSuggestionsOpen"
+          :suggestions="wikiLinkSuggestions"
+          :active-index="wikiLinkActiveIndex"
+          :listbox-id="wikiLinkListboxId"
+          @select="selectWikiLinkSuggestion"
+        />
+      </div>
 
       <details class="original-content">
         <summary>原始内容</summary>
