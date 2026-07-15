@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::knowledge::KnowledgeState;
 use super::tags::Tag;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -122,6 +123,7 @@ pub struct EntryListItem {
     pub summary: String,
     pub entry_type: EntryType,
     pub status: EntryStatus,
+    pub knowledge_state: KnowledgeState,
     pub tags: Vec<Tag>,
     #[ts(type = "number")]
     pub revision: i64,
@@ -140,6 +142,9 @@ pub struct EntryDetail {
     pub current_content: String,
     pub entry_type: EntryType,
     pub status: EntryStatus,
+    pub knowledge_state: KnowledgeState,
+    pub knowledge_promoted_at: Option<String>,
+    pub knowledge_aliases: Vec<String>,
     pub tags: Vec<Tag>,
     #[ts(type = "number")]
     pub revision: i64,

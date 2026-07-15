@@ -4,13 +4,18 @@ use rusqlite::{params, types::Value, Connection, OptionalExtension, Transaction}
 use uuid::Uuid;
 
 use crate::{
-    db::repos::tags_repo::{normalize_name, TagsRepo},
+    db::repos::{
+        knowledge_repo::KnowledgeRepo,
+        tags_repo::{normalize_name, TagsRepo},
+    },
     error::{AppError, AppResult},
+    knowledge::wiki_links::canonicalize_knowledge_title,
     types::{
         entries::{
             EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
             EntryType, PageRequest, TitleSource,
         },
+        knowledge::KnowledgeState,
         tags::Tag,
     },
 };
@@ -29,6 +34,9 @@ struct EntryRecord {
     created_at: String,
     updated_at: String,
     deleted_at: Option<String>,
+    knowledge_state: KnowledgeState,
+    knowledge_promoted_at: Option<String>,
+    knowledge_title_key: Option<String>,
 }
 
 impl EntriesRepo {
@@ -53,6 +61,8 @@ impl EntriesRepo {
             ",
             params![id, title, content, content, now],
         )?;
+
+        KnowledgeRepo::refresh_source_links(tx, &id, content)?;
 
         Self::get_with_tx(tx, &id)
     }
@@ -121,13 +131,16 @@ impl EntriesRepo {
             ));
         }
 
+        let old_title = current.title.clone().unwrap_or_default();
+        let is_knowledge = current.knowledge_state == KnowledgeState::Knowledge;
         let (title, title_source) = match title {
             Some(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
+                if is_knowledge {
+                    (Some(validated_knowledge_title(&raw)?), TitleSource::User)
+                } else if raw.trim().is_empty() {
                     (auto_title(&new_content), TitleSource::Auto)
                 } else {
-                    (Some(trimmed.to_string()), TitleSource::User)
+                    (Some(raw.trim().to_string()), TitleSource::User)
                 }
             }
             None if current.title_source == TitleSource::Auto && content_changed => {
@@ -163,8 +176,22 @@ impl EntriesRepo {
             ],
         )?;
 
+        if is_knowledge {
+            KnowledgeRepo::sync_title_metadata(
+                tx,
+                id,
+                &old_title,
+                title.as_deref().unwrap_or_default(),
+                now,
+            )?;
+        }
+
         if let Some(tags) = tags {
             TagsRepo::replace_entry_tags(tx, id, &tags, now)?;
+        }
+
+        if new_content != current.current_content {
+            KnowledgeRepo::refresh_source_links(tx, id, &new_content)?;
         }
 
         Self::get_with_tx(tx, id)
@@ -234,7 +261,8 @@ impl EntriesRepo {
         let mut stmt = conn.prepare(
             "
             SELECT id, title, title_source, original_content, current_content, type, status,
-                   revision, created_at, updated_at, deleted_at
+                   revision, created_at, updated_at, deleted_at,
+                   knowledge_state, knowledge_promoted_at, knowledge_title_key
             FROM entries
             WHERE deleted_at IS NULL
             ORDER BY created_at DESC
@@ -259,7 +287,8 @@ impl EntriesRepo {
         conn.query_row(
             "
             SELECT id, title, title_source, original_content, current_content, type, status,
-                   revision, created_at, updated_at, deleted_at
+                   revision, created_at, updated_at, deleted_at,
+                   knowledge_state, knowledge_promoted_at, knowledge_title_key
             FROM entries
             WHERE id = ?1
             ",
@@ -274,7 +303,8 @@ impl EntriesRepo {
         tx.query_row(
             "
             SELECT id, title, title_source, original_content, current_content, type, status,
-                   revision, created_at, updated_at, deleted_at
+                   revision, created_at, updated_at, deleted_at,
+                   knowledge_state, knowledge_promoted_at, knowledge_title_key
             FROM entries
             WHERE id = ?1
             ",
@@ -284,6 +314,29 @@ impl EntriesRepo {
         .optional()
         .map_err(Into::into)
     }
+}
+
+fn validated_knowledge_title(input: &str) -> AppResult<String> {
+    let title = canonicalize_knowledge_title(input);
+    if title.is_empty() {
+        return Err(AppError::validation(
+            "KNOWLEDGE_TITLE_REQUIRED",
+            "知识标题不能为空",
+        ));
+    }
+    if title.chars().count() > 200 {
+        return Err(AppError::validation(
+            "KNOWLEDGE_TITLE_TOO_LONG",
+            "知识标题不能超过 200 个字符",
+        ));
+    }
+    if title.contains("[[") || title.contains("]]") {
+        return Err(AppError::validation(
+            "KNOWLEDGE_TITLE_INVALID",
+            "知识标题不能包含 WikiLink 定界符",
+        ));
+    }
+    Ok(title)
 }
 
 #[derive(Clone, Copy)]
@@ -306,7 +359,8 @@ fn list_with_search(
     let sql = format!(
         "
         SELECT id, title, title_source, original_content, current_content, type, status,
-               revision, created_at, updated_at, deleted_at
+               revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_promoted_at, knowledge_title_key
         FROM entries e
         {where_sql}
         ORDER BY created_at DESC
@@ -492,12 +546,19 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         deleted_at: row.get(10)?,
+        knowledge_state: match row.get::<_, String>(11)?.as_str() {
+            "knowledge" => KnowledgeState::Knowledge,
+            _ => KnowledgeState::Capture,
+        },
+        knowledge_promoted_at: row.get(12)?,
+        knowledge_title_key: row.get(13)?,
     })
 }
 
 fn record_to_detail(conn: &Connection, record: EntryRecord) -> AppResult<EntryDetail> {
     let tags = TagsRepo::tags_for_entry(conn, &record.id)?;
-    Ok(detail(record, tags))
+    let aliases = KnowledgeRepo::aliases_for_entry(conn, &record.id)?;
+    Ok(detail(record, tags, aliases))
 }
 
 fn records_to_list_items(
@@ -516,11 +577,20 @@ fn records_to_list_items(
 
 fn records_to_details(conn: &Connection, records: Vec<EntryRecord>) -> AppResult<Vec<EntryDetail>> {
     let tags_by_entry = tags_for_entries(conn, &records)?;
+    let ids = records
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    let aliases_by_entry = KnowledgeRepo::aliases_for_entries(conn, &ids)?;
     Ok(records
         .into_iter()
         .map(|record| {
             let tags = tags_by_entry.get(&record.id).cloned().unwrap_or_default();
-            detail(record, tags)
+            let aliases = aliases_by_entry
+                .get(&record.id)
+                .cloned()
+                .unwrap_or_default();
+            detail(record, tags, aliases)
         })
         .collect())
 }
@@ -576,7 +646,8 @@ fn tags_for_entries(
 
 fn record_to_detail_tx(tx: &Transaction<'_>, record: EntryRecord) -> AppResult<EntryDetail> {
     let tags = tags_for_entry_tx(tx, &record.id)?;
-    Ok(detail(record, tags))
+    let aliases = KnowledgeRepo::aliases_for_entry(tx, &record.id)?;
+    Ok(detail(record, tags, aliases))
 }
 
 fn tags_for_entry_tx(tx: &Transaction<'_>, entry_id: &str) -> AppResult<Vec<Tag>> {
@@ -623,6 +694,7 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
         summary,
         entry_type: record.entry_type,
         status: record.status,
+        knowledge_state: record.knowledge_state,
         tags,
         revision: record.revision,
         created_at: record.created_at,
@@ -631,7 +703,7 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
     }
 }
 
-fn detail(record: EntryRecord, tags: Vec<Tag>) -> EntryDetail {
+fn detail(record: EntryRecord, tags: Vec<Tag>, knowledge_aliases: Vec<String>) -> EntryDetail {
     EntryDetail {
         id: record.id,
         title: record.title,
@@ -640,6 +712,9 @@ fn detail(record: EntryRecord, tags: Vec<Tag>) -> EntryDetail {
         current_content: record.current_content,
         entry_type: record.entry_type,
         status: record.status,
+        knowledge_state: record.knowledge_state,
+        knowledge_promoted_at: record.knowledge_promoted_at,
+        knowledge_aliases,
         tags,
         revision: record.revision,
         created_at: record.created_at,
@@ -651,7 +726,7 @@ fn detail(record: EntryRecord, tags: Vec<Tag>) -> EntryDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{connection::open_in_memory, migrations::now_string};
+    use crate::db::{connection::open_in_memory, migrations::now_string, repos::KnowledgeRepo};
 
     fn default_filter() -> EntryListFilter {
         EntryListFilter {
@@ -674,6 +749,136 @@ mod tests {
         assert_eq!(entry.entry_type, EntryType::Unclear);
         assert_eq!(entry.status, EntryStatus::Pending);
         assert_eq!(entry.original_content, "hello world");
+    }
+
+    #[test]
+    fn create_indexes_wiki_links_from_quick_capture_path() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "目标", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let source = EntriesRepo::create(&tx, "引用 [[目标]]", &now).unwrap();
+
+        let resolved: String = tx
+            .query_row(
+                "SELECT target_entry_id FROM entry_links WHERE source_entry_id = ?1",
+                [&source.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolved, target.id);
+    }
+
+    #[test]
+    fn updating_knowledge_title_adds_alias_in_same_transaction() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "旧名", &now).unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+
+        let updated = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: Some("新名".into()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+
+        assert_eq!(updated.title.as_deref(), Some("新名"));
+        assert_eq!(updated.knowledge_aliases, vec!["旧名"]);
+    }
+
+    #[test]
+    fn clearing_a_knowledge_title_is_rejected() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "保留标题", &now).unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+
+        let err = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: Some("  ".into()),
+                current_content: Some("不应保存".into()),
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::Validation { code, .. } if code == "KNOWLEDGE_TITLE_REQUIRED")
+        );
+        let unchanged = EntriesRepo::get_with_tx(&tx, &entry.id).unwrap();
+        assert_eq!(unchanged.title, entry.title);
+        assert_eq!(unchanged.current_content, entry.current_content);
+        assert_eq!(unchanged.revision, entry.revision);
+    }
+
+    #[test]
+    fn case_only_knowledge_rename_does_not_create_alias() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "Phase Two", &now).unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+        let updated = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: Some("PHASE TWO".into()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+        assert_eq!(updated.title.as_deref(), Some("PHASE TWO"));
+        assert!(updated.knowledge_aliases.is_empty());
+    }
+
+    #[test]
+    fn deleting_target_forever_keeps_unresolved_source_text() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "将删除", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let source = EntriesRepo::create(&tx, "保留 [[将删除]]", &now).unwrap();
+        let target = EntriesRepo::move_to_trash(&tx, &target.id, target.revision, &now).unwrap();
+        EntriesRepo::delete_forever(&tx, &target.id).unwrap();
+
+        let (raw, resolved): (String, Option<String>) = tx
+            .query_row(
+                "SELECT raw_target, target_entry_id FROM entry_links WHERE source_entry_id = ?1",
+                [&source.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(raw, "将删除");
+        assert!(resolved.is_none());
+        assert_eq!(
+            EntriesRepo::get_with_tx(&tx, &source.id)
+                .unwrap()
+                .current_content,
+            "保留 [[将删除]]"
+        );
     }
 
     #[test]
