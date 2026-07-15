@@ -8,6 +8,7 @@ use crate::error::{AppError, AppResult};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("schema/001_init.sql")),
     (2, include_str!("schema/002_entries_fts.sql")),
+    (3, include_str!("schema/003_knowledge_graph.sql")),
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
@@ -122,7 +123,68 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn migration_upgrades_existing_v2_entries_with_capture_defaults() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("schema/001_init.sql"))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at
+             ) VALUES ('e1', 'Title', 'user', 'body', 'body', 'idea', 'pending', 7,
+                       '2026-07-15T00:00:00Z', '2026-07-15T00:00:00Z', NULL)",
+            [],
+        )
+        .unwrap();
+        if fts5_available(&conn).unwrap() {
+            conn.execute_batch(include_str!("schema/002_entries_fts.sql"))
+                .unwrap();
+        }
+        for (version, sql) in &MIGRATIONS[..2] {
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![version, checksum(sql), now_string()],
+            )
+            .unwrap();
+        }
+
+        run_migrations(&mut conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>, i64) = conn
+            .query_row(
+                "SELECT knowledge_state, knowledge_promoted_at, knowledge_title_key, revision
+                 FROM entries WHERE id = 'e1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("capture".into(), None, None, 7));
+    }
+
+    #[test]
+    fn knowledge_title_key_is_unique() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let insert = |id: &str| {
+            conn.execute(
+                "INSERT INTO entries(
+                   id, title, title_source, original_content, current_content, type, status,
+                   revision, created_at, updated_at, deleted_at,
+                   knowledge_state, knowledge_promoted_at, knowledge_title_key
+                 ) VALUES (?1, 'Title', 'user', 'body', 'body', 'idea', 'archived', 0,
+                           '2026-07-15T00:00:00Z', '2026-07-15T00:00:00Z', NULL,
+                           'knowledge', '2026-07-15T00:00:00Z', 'title')",
+                [id],
+            )
+        };
+
+        insert("e1").unwrap();
+        assert!(insert("e2").is_err());
     }
 
     #[test]
