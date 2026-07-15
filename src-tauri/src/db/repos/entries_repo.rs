@@ -15,7 +15,7 @@ use crate::{
             EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
             EntryType, PageRequest, TitleSource,
         },
-        knowledge::KnowledgeState,
+        knowledge::{KnowledgeState, SearchSnippet, SearchSnippetPart},
         tags::Tag,
     },
 };
@@ -35,6 +35,7 @@ struct EntryRecord {
     updated_at: String,
     deleted_at: Option<String>,
     knowledge_state: KnowledgeState,
+    search_snippet: Option<SearchSnippet>,
     knowledge_promoted_at: Option<String>,
     knowledge_title_key: Option<String>,
 }
@@ -72,12 +73,14 @@ impl EntriesRepo {
         filter: &EntryListFilter,
         page: &PageRequest,
     ) -> AppResult<EntryPage> {
-        let Some(query) = normalized_query(filter) else {
+        let terms = search_terms(filter);
+        if terms.is_empty() {
             return list_with_search(conn, filter, page, SearchMode::Like);
-        };
-        if query
-            .chars()
-            .any(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
+        }
+        if terms
+            .iter()
+            .any(|term| term.chars().count() < 3 || !term.chars().all(char::is_alphanumeric))
+            || !entries_fts_is_trigram(conn)?
         {
             return list_with_search(conn, filter, page, SearchMode::Like);
         }
@@ -356,23 +359,56 @@ fn list_with_search(
     let fetch_limit = limit + 1;
 
     let (where_sql, values) = build_filter(filter, search_mode);
-    let sql = format!(
-        "
-        SELECT id, title, title_source, original_content, current_content, type, status,
-               revision, created_at, updated_at, deleted_at,
-               knowledge_state, knowledge_promoted_at, knowledge_title_key
-        FROM entries e
-        {where_sql}
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-        "
-    );
+    let (sql, map_row): (
+        String,
+        fn(&rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord>,
+    ) = match search_mode {
+        SearchMode::Like => (
+            format!(
+                "
+                SELECT id, title, title_source, original_content, current_content, type, status,
+                       revision, created_at, updated_at, deleted_at,
+                       knowledge_state, knowledge_promoted_at, knowledge_title_key
+                FROM entries e
+                {where_sql}
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                "
+            ),
+            map_record,
+        ),
+        SearchMode::Fts => (
+            format!(
+                "
+                WITH search_plan AS (
+                  SELECT e.id, e.title, e.title_source, e.original_content, e.current_content,
+                         e.type, e.status, e.revision, e.created_at, e.updated_at, e.deleted_at,
+                         e.knowledge_state, e.knowledge_promoted_at, e.knowledge_title_key,
+                         bm25(entries_fts, 0.0, 10.0, 1.0, 4.0, 3.0, 6.0) AS rank,
+                         snippet(entries_fts, -1, char(31), char(30), '…', 32) AS search_snippet
+                  FROM entries_fts
+                  JOIN entries e ON e.id = entries_fts.entry_id
+                  {where_sql}
+                  ORDER BY rank ASC, e.updated_at DESC, e.id ASC
+                  LIMIT ? OFFSET ?
+                )
+                SELECT id, title, title_source, original_content, current_content, type, status,
+                       revision, created_at, updated_at, deleted_at,
+                       knowledge_state, knowledge_promoted_at, knowledge_title_key,
+                       search_snippet
+                FROM search_plan
+                ORDER BY rank ASC, updated_at DESC, id ASC
+                "
+            ),
+            map_record_with_search_snippet,
+        ),
+    };
     let mut params = values;
     params.push(Value::Integer(i64::from(fetch_limit)));
     params.push(Value::Integer(i64::from(offset)));
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params), map_record)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), map_row)?;
     let mut records = Vec::new();
     for row in rows {
         records.push(row?);
@@ -427,12 +463,39 @@ fn normalized_query(filter: &EntryListFilter) -> Option<&str> {
         .filter(|query| !query.is_empty())
 }
 
+fn search_terms(filter: &EntryListFilter) -> Vec<&str> {
+    normalized_query(filter)
+        .map(|query| query.split_whitespace().collect())
+        .unwrap_or_default()
+}
+
 fn fts_phrase(query: &str) -> String {
     query
         .split_whitespace()
-        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(crate) fn entries_fts_is_trigram(conn: &Connection) -> AppResult<bool> {
+    let sql = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entries_fts'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else {
+        return Ok(false);
+    };
+    let normalized = sql
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    Ok(normalized.contains("usingfts5(")
+        && (normalized.contains("tokenize='trigram'")
+            || normalized.contains("tokenize=\"trigram\"")))
 }
 
 fn can_fallback_from_fts(err: &AppError) -> bool {
@@ -455,6 +518,10 @@ fn like_search_clause() -> String {
         SELECT 1 FROM entry_tags et
         JOIN tags t ON t.id = et.tag_id
         WHERE et.entry_id = e.id AND t.name LIKE ? ESCAPE '\'
+      )
+      OR EXISTS (
+        SELECT 1 FROM entry_aliases ea
+        WHERE ea.entry_id = e.id AND ea.alias LIKE ? ESCAPE '\'
       )
     )"
     .to_string()
@@ -503,27 +570,23 @@ fn build_filter(filter: &EntryListFilter, search_mode: SearchMode) -> (String, V
     }
 
     if let Some(query) = normalized_query(filter) {
-        let pattern = format!("%{}%", escape_like(query));
         match search_mode {
             SearchMode::Fts => {
-                clauses.push(
-                    "e.id IN (
-                      SELECT entry_id
-                      FROM entries_fts
-                      WHERE entries_fts MATCH ?
-                    )"
-                    .to_string(),
-                );
+                clauses.push("entries_fts MATCH ?".to_string());
                 values.push(Value::Text(fts_phrase(query)));
             }
             SearchMode::Like => {
-                clauses.push(like_search_clause());
-                values.extend([
-                    Value::Text(pattern.clone()),
-                    Value::Text(pattern.clone()),
-                    Value::Text(pattern.clone()),
-                    Value::Text(pattern),
-                ]);
+                for term in query.split_whitespace() {
+                    let pattern = format!("%{}%", escape_like(term));
+                    clauses.push(like_search_clause());
+                    values.extend([
+                        Value::Text(pattern.clone()),
+                        Value::Text(pattern.clone()),
+                        Value::Text(pattern.clone()),
+                        Value::Text(pattern.clone()),
+                        Value::Text(pattern),
+                    ]);
+                }
             }
         }
     }
@@ -553,9 +616,42 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
         deleted_at: row.get(10)?,
         knowledge_state: KnowledgeState::from_db(&row.get::<_, String>(11)?)
             .unwrap_or(KnowledgeState::Capture),
+        search_snippet: None,
         knowledge_promoted_at: row.get(12)?,
         knowledge_title_key: row.get(13)?,
     })
+}
+
+fn map_record_with_search_snippet(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
+    let mut record = map_record(row)?;
+    let snippet = row.get::<_, String>(14)?;
+    record.search_snippet = Some(parse_search_snippet(&snippet));
+    Ok(record)
+}
+
+fn parse_search_snippet(snippet: &str) -> SearchSnippet {
+    let mut parts = Vec::new();
+    let mut text = String::new();
+    let mut highlighted = false;
+
+    for ch in snippet.chars() {
+        if ch != '\u{1f}' && ch != '\u{1e}' {
+            text.push(ch);
+            continue;
+        }
+        if !text.is_empty() {
+            parts.push(SearchSnippetPart {
+                text: std::mem::take(&mut text),
+                highlighted,
+            });
+        }
+        highlighted = ch == '\u{1f}';
+    }
+    if !text.is_empty() {
+        parts.push(SearchSnippetPart { text, highlighted });
+    }
+
+    SearchSnippet { parts }
 }
 
 fn record_to_detail(conn: &Connection, record: EntryRecord) -> AppResult<EntryDetail> {
@@ -698,7 +794,7 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
         entry_type: record.entry_type,
         status: record.status,
         knowledge_state: record.knowledge_state,
-        search_snippet: None,
+        search_snippet: record.search_snippet,
         tags,
         revision: record.revision,
         created_at: record.created_at,
@@ -1024,6 +1120,165 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, entry.id);
+    }
+
+    #[test]
+    fn legacy_unicode61_index_forces_like_instead_of_false_empty_results() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "legacy searchable value", &now_string()).unwrap();
+        tx.commit().unwrap();
+        conn.execute("DROP TABLE entries_fts", []).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE entries_fts USING fts5(
+               entry_id UNINDEXED,
+               title,
+               original_content,
+               current_content,
+               tags_text,
+               aliases_text,
+               tokenize='unicode61'
+             );",
+        )
+        .unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("searchable".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, entry.id);
+    }
+
+    #[test]
+    fn mixed_short_and_long_terms_match_independently_in_like_fallback() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "知识", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let target = EntriesRepo::update(
+            &tx,
+            &target.id,
+            EntryPatch {
+                title: Some("searchable target".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            target.revision,
+            &now,
+        )
+        .unwrap();
+        EntriesRepo::create(&tx, "知识 only", &now).unwrap();
+        EntriesRepo::create(&tx, "searchable only", &now).unwrap();
+        tx.commit().unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("知识 searchable".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, target.id);
+    }
+
+    #[test]
+    fn three_character_chinese_query_uses_ranked_fts_snippet() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "知识库检索", &now).unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+        tx.commit().unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("知识库".to_string());
+        filter.knowledge_state = Some(KnowledgeState::Knowledge);
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, entry.id);
+        assert!(page.items[0]
+            .search_snippet
+            .as_ref()
+            .is_some_and(|snippet| snippet.parts.iter().any(|part| part.highlighted)));
+    }
+
+    #[test]
+    fn fts_search_orders_equal_ranks_by_updated_at_then_id() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let created_at = "2026-07-16T00:00:00Z";
+        let tx = conn.transaction().unwrap();
+        let first = EntriesRepo::create(&tx, "stableterm", created_at).unwrap();
+        let second = EntriesRepo::create(&tx, "stableterm", created_at).unwrap();
+        let newest = EntriesRepo::create(&tx, "stableterm", created_at).unwrap();
+        tx.execute(
+            "UPDATE entries SET updated_at = '2026-07-16T00:00:01Z' WHERE id = ?1",
+            [&newest.id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let mut tied_ids = vec![first.id, second.id];
+        tied_ids.sort();
+        let mut expected_ids = vec![newest.id];
+        expected_ids.extend(tied_ids);
+
+        let mut filter = default_filter();
+        filter.query = Some("stableterm".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            page.items
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+    }
+
+    #[test]
+    fn parse_search_snippet_keeps_xss_payload_as_text() {
+        let snippet = parse_search_snippet("\u{1f}<img onerror=alert(1)>\u{1e} safe");
+
+        assert_eq!(snippet.parts.len(), 2);
+        assert_eq!(snippet.parts[0].text, "<img onerror=alert(1)>");
+        assert!(snippet.parts[0].highlighted);
+        assert_eq!(snippet.parts[1].text, " safe");
+        assert!(!snippet.parts[1].highlighted);
     }
 
     #[test]
