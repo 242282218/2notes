@@ -17,18 +17,8 @@ defineEmits<{
 
 <template>
   <section class="entry-list">
-    <div
-      v-if="loading && !items.length"
-      class="empty-state"
-    >
-      加载中
-    </div>
-    <div
-      v-else-if="!items.length"
-      class="empty-state"
-    >
-      暂无条目
-    </div>
+    <div v-if="loading && !items.length" class="empty-state">加载中</div>
+    <div v-else-if="!items.length" class="empty-state">暂无条目</div>
     <EntryListItem
       v-for="item in items"
       :key="item.id"

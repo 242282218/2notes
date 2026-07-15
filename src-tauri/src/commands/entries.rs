@@ -1,92 +1,90 @@
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 use crate::{
     app_state::AppState,
-    db::{migrations::now_string, repos::EntriesRepo},
+    commands::require_main_window,
+    db::migrations::now_string,
+    db::repos::EntriesRepo,
     error::{AppErrorResponse, CommandResult},
     types::entries::{EntryDetail, EntryListFilter, EntryPage, EntryPatch, PageRequest},
 };
 
 #[tauri::command]
 pub fn entries_list(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     filter: EntryListFilter,
     page: PageRequest,
 ) -> CommandResult<EntryPage> {
-    let conn = state.conn().map_err(AppErrorResponse::from)?;
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
     EntriesRepo::list(&conn, &filter, &page).map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn entries_get(state: State<'_, AppState>, id: String) -> CommandResult<EntryDetail> {
-    let conn = state.conn().map_err(AppErrorResponse::from)?;
+pub fn entries_get(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<EntryDetail> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
     EntriesRepo::get(&conn, &id).map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
 pub fn entries_update(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     id: String,
     patch: EntryPatch,
     expected_revision: i64,
 ) -> CommandResult<EntryDetail> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let entry = EntriesRepo::update(&tx, &id, patch, expected_revision, &now_string())
-        .map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    let entry = state
+        .with_write_tx(|tx| EntriesRepo::update(tx, &id, patch, expected_revision, &now))
         .map_err(AppErrorResponse::from)?;
     log::info!("entry_updated id={}", entry.id);
     Ok(entry)
 }
 
 #[tauri::command]
-pub fn entries_move_to_trash(state: State<'_, AppState>, id: String) -> CommandResult<EntryDetail> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let entry =
-        EntriesRepo::move_to_trash(&tx, &id, &now_string()).map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    Ok(entry)
+pub fn entries_move_to_trash(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    expected_revision: i64,
+) -> CommandResult<EntryDetail> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    state
+        .with_write_tx(|tx| EntriesRepo::move_to_trash(tx, &id, expected_revision, &now))
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
 pub fn entries_restore_from_trash(
+    window: WebviewWindow,
     state: State<'_, AppState>,
     id: String,
+    expected_revision: i64,
 ) -> CommandResult<EntryDetail> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let entry =
-        EntriesRepo::restore_from_trash(&tx, &id, &now_string()).map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    Ok(entry)
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    state
+        .with_write_tx(|tx| EntriesRepo::restore_from_trash(tx, &id, expected_revision, &now))
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn entries_delete_forever(state: State<'_, AppState>, id: String) -> CommandResult<()> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    EntriesRepo::delete_forever(&tx, &id).map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    Ok(())
+pub fn entries_delete_forever(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<()> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    state
+        .with_write_tx(|tx| EntriesRepo::delete_forever(tx, &id))
+        .map_err(AppErrorResponse::from)
 }

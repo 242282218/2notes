@@ -15,14 +15,29 @@ export const useSettingsStore = defineStore("settings", () => {
     try {
       settings.value = await settingsGet();
     } catch (loadError) {
-      error.value = loadError instanceof Error ? loadError.message : "设置加载失败";
+      error.value =
+        loadError instanceof Error ? loadError.message : "设置加载失败";
     } finally {
       loading.value = false;
     }
   }
 
   async function setAutostart(enabled: boolean) {
-    settings.value = await settingsUpdate({ autostartEnabled: enabled });
+    const previous = settings.value;
+    error.value = null;
+    if (settings.value) {
+      settings.value = { ...settings.value, autostartEnabled: enabled };
+    }
+    try {
+      settings.value = await settingsUpdate({ autostartEnabled: enabled });
+    } catch (updateError) {
+      settings.value = previous;
+      error.value =
+        updateError instanceof Error
+          ? updateError.message
+          : "开机自启动设置失败";
+      throw updateError;
+    }
   }
 
   return {

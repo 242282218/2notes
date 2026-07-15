@@ -7,7 +7,9 @@ import AppShell from "../components/layout/AppShell.vue";
 import QuickCapture from "../components/quick-capture/QuickCapture.vue";
 
 const windowLabel = ref("main");
-const isQuickCaptureView = new URLSearchParams(window.location.search).get("view") === "quick-capture";
+// One-time read from URL search params; Tauri apps don't navigate via URL changes.
+const isQuickCaptureView =
+  new URLSearchParams(window.location.search).get("view") === "quick-capture";
 
 onMounted(() => {
   if (isTauri()) {

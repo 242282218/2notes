@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager};
 pub struct AppPaths {
     pub data_dir: PathBuf,
     pub log_dir: PathBuf,
+    pub backup_dir: PathBuf,
     pub database_path: PathBuf,
     #[cfg(test)]
     pub bootstrap_path: PathBuf,
@@ -23,7 +24,21 @@ struct BootstrapConfig {
 pub fn prepare_app_paths(app: &AppHandle) -> crate::error::AppResult<AppPaths> {
     let app_config_dir = app.path().app_config_dir()?;
     let app_data_dir = app.path().app_data_dir()?;
-    prepare_paths(&app_config_dir, &app_data_dir)
+    let test_root = std::env::var_os("TWONOTES_TEST_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    prepare_paths_with_test_root(&app_config_dir, &app_data_dir, test_root.as_deref())
+}
+
+fn prepare_paths_with_test_root(
+    app_config_dir: &Path,
+    app_data_dir: &Path,
+    test_root: Option<&Path>,
+) -> crate::error::AppResult<AppPaths> {
+    match test_root {
+        Some(root) => prepare_paths(&root.join("config"), root),
+        None => prepare_paths(app_config_dir, app_data_dir),
+    }
 }
 
 pub fn prepare_paths(
@@ -47,13 +62,21 @@ pub fn prepare_paths(
     };
 
     let log_dir = app_data_dir.join("logs");
+    let backup_dir = app_data_dir.join("backups");
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&log_dir)?;
+    fs::create_dir_all(&backup_dir)?;
+    let database_path = data_dir.join("2notes.sqlite");
+    let rollback_path = database_path.with_extension("restore.bak");
+    if !database_path.exists() && rollback_path.exists() {
+        fs::rename(&rollback_path, &database_path)?;
+    }
 
     Ok(AppPaths {
-        database_path: data_dir.join("2notes.sqlite"),
+        database_path,
         data_dir,
         log_dir,
+        backup_dir,
         #[cfg(test)]
         bootstrap_path,
     })
@@ -93,5 +116,41 @@ mod tests {
 
         assert_eq!(paths.data_dir, custom);
         assert!(paths.data_dir.exists());
+    }
+
+    #[test]
+    fn restores_interrupted_database_swap() {
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let paths = prepare_paths(config.path(), data.path()).unwrap();
+        let rollback_path = paths.database_path.with_extension("restore.bak");
+        fs::write(&rollback_path, "original database").unwrap();
+
+        let restored = prepare_paths(config.path(), data.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&restored.database_path).unwrap(),
+            "original database"
+        );
+        assert!(!rollback_path.exists());
+    }
+
+    #[test]
+    fn explicit_test_root_overrides_windows_app_directories() {
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        let paths =
+            prepare_paths_with_test_root(config.path(), data.path(), Some(root.path())).unwrap();
+
+        assert_eq!(paths.data_dir, root.path().join("data"));
+        assert_eq!(paths.log_dir, root.path().join("logs"));
+        assert_eq!(paths.backup_dir, root.path().join("backups"));
+        assert_eq!(
+            paths.database_path,
+            root.path().join("data").join("2notes.sqlite")
+        );
+        assert!(root.path().join("config").join("bootstrap.json").exists());
     }
 }

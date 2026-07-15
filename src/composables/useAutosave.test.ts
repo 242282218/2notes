@@ -1,8 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useAutosave } from "./useAutosave";
 
 describe("useAutosave", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("keeps newer input from being overwritten by an old response", async () => {
     vi.useFakeTimers();
     const saved: number[] = [];
@@ -32,6 +36,45 @@ describe("useAutosave", () => {
     expect(saved).toEqual([2]);
     expect(stale).toEqual([1]);
     expect(autosave.state.value).toBe("saved");
-    vi.useRealTimers();
+  });
+
+  it("rejects explicit flush when the current save fails", async () => {
+    const saveError = new Error("disk full");
+    const onFailed = vi.fn();
+    const autosave = useAutosave<string>({
+      delay: 10,
+      save: vi.fn().mockRejectedValue(saveError),
+      onFailed,
+    });
+
+    autosave.markDirty();
+
+    await expect(autosave.flush()).rejects.toThrow("disk full");
+    expect(autosave.state.value).toBe("failed");
+    expect(autosave.error.value).toBe("disk full");
+    expect(onFailed).toHaveBeenCalledWith(saveError);
+  });
+
+  it("retries after a failed save without an unhandled rejection", async () => {
+    const save = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce("ok");
+    const saved: string[] = [];
+    const autosave = useAutosave<string>({
+      delay: 10,
+      save,
+      onSaved: (value) => saved.push(value),
+    });
+
+    autosave.markDirty();
+    await expect(autosave.flush()).rejects.toThrow("offline");
+
+    autosave.retry();
+    await vi.waitFor(() => {
+      expect(autosave.state.value).toBe("saved");
+    });
+
+    expect(saved).toEqual(["ok"]);
   });
 });

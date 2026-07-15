@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import type { EntryType } from "../../types/generated";
+import { ref } from "vue";
 
 defineProps<{
   modelValue: EntryType;
+  disabled?: boolean;
 }>();
 
 defineEmits<{
   "update:modelValue": [value: EntryType];
 }>();
+
+const selectRef = ref<HTMLSelectElement | null>(null);
 
 const options: Array<{ value: EntryType; label: string }> = [
   { value: "unclear", label: "未澄清" },
@@ -20,15 +24,16 @@ const options: Array<{ value: EntryType; label: string }> = [
 
 <template>
   <select
-    class="field-select"
+    ref="selectRef"
+    class="field-select entry-type-select"
+    aria-label="类型"
     :value="modelValue"
-    @change="$emit('update:modelValue', ($event.target as HTMLSelectElement).value as EntryType)"
+    :disabled="disabled"
+    @change="
+      $emit('update:modelValue', (selectRef!.value as EntryType) ?? modelValue)
+    "
   >
-    <option
-      v-for="option in options"
-      :key="option.value"
-      :value="option.value"
-    >
+    <option v-for="option in options" :key="option.value" :value="option.value">
       {{ option.label }}
     </option>
   </select>

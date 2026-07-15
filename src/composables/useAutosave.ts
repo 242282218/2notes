@@ -1,4 +1,4 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 export type SaveState = "idle" | "dirty" | "saving" | "saved" | "failed";
 
@@ -13,6 +13,11 @@ interface AutosaveOptions<T> {
 export function useAutosave<T>(options: AutosaveOptions<T>) {
   const state = ref<SaveState>("idle");
   const error = ref<string | null>(null);
+
+  const isDirty = computed(
+    () => state.value === "dirty" || state.value === "failed",
+  );
+
   let timer: number | undefined;
   let version = 0;
   let inFlight = false;
@@ -31,7 +36,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
       window.clearTimeout(timer);
     }
     timer = window.setTimeout(() => {
-      void flush();
+      void flush().catch(() => {});
     }, options.delay);
   }
 
@@ -42,11 +47,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
     }
     if (inFlight) {
       pending = true;
-      try {
-        await activeFlush;
-      } catch {
-        // runFlush already recorded state; swallow to avoid unhandled rejection
-      }
+      await activeFlush;
       return;
     }
     if (state.value !== "dirty" && state.value !== "failed") {
@@ -55,8 +56,6 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
     activeFlush = runFlush();
     try {
       await activeFlush;
-    } catch {
-      // state already set inside runFlush; swallow to keep flush() re-entrant safe
     } finally {
       activeFlush = null;
     }
@@ -81,10 +80,9 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
         error.value =
           saveError instanceof Error ? saveError.message : "保存失败";
         options.onFailed?.(saveError);
-      } else {
-        pending = true;
+        throw saveError;
       }
-      throw saveError;
+      pending = true;
     } finally {
       inFlight = false;
       if (pending) {
@@ -96,7 +94,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
 
   function retry() {
     if (state.value === "failed" || state.value === "dirty") {
-      void flush();
+      void flush().catch(() => {});
     }
   }
 
@@ -113,6 +111,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
   return {
     state,
     error,
+    isDirty,
     markDirty,
     flush,
     retry,

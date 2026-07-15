@@ -33,6 +33,7 @@ const title = ref("");
 const currentContent = ref("");
 const entryType = ref<EntryType>("unclear");
 const status = ref<EntryStatus>("pending");
+const tagInputRef = ref<{ commitDraft: () => void } | null>(null);
 const tags = ref<string[]>([]);
 const baseRevision = ref(0);
 const editingEntryId = ref<string | null>(null);
@@ -40,12 +41,13 @@ const confirmTrash = ref(false);
 const confirmDelete = ref(false);
 let initializing = false;
 let syncVersion = 0;
+let titleDirty = false;
 
 const autosave = useAutosave<EntryDetail>({
   delay: 500,
   save: () => {
     const patch: EntryPatch = {
-      title: title.value,
+      title: titleDirty ? title.value : null,
       currentContent: currentContent.value,
       entryType: entryType.value,
       status: status.value,
@@ -59,6 +61,7 @@ const autosave = useAutosave<EntryDetail>({
   onSaved: (entry) => {
     if (props.detail?.id === entry.id) {
       baseRevision.value = entry.revision;
+      titleDirty = false;
       emit("saved", entry);
     }
   },
@@ -74,8 +77,16 @@ watch(
   async (entry) => {
     const currentSync = ++syncVersion;
     initializing = true;
-    await autosave.flush();
-    if (currentSync !== syncVersion) {
+    try {
+      // Flush must complete before we touch local refs, but stale flushes
+      // from older watcher invocations must be discarded.
+      await autosave.flush();
+      // Double-check that this watcher is still the newest.
+      if (currentSync !== syncVersion) {
+        return;
+      }
+    } catch {
+      initializing = false;
       return;
     }
     editingEntryId.value = entry?.id || null;
@@ -85,6 +96,7 @@ watch(
     status.value = entry?.status || "pending";
     tags.value = entry?.tags.map((tag) => tag.name) || [];
     baseRevision.value = entry?.revision || 0;
+    titleDirty = false;
     autosave.reset();
     await nextTick();
     initializing = false;
@@ -92,15 +104,18 @@ watch(
   { immediate: true },
 );
 
-watch(
-  [title, currentContent, entryType, status, tags],
-  () => {
-    if (!initializing && props.detail && !props.detail.deletedAt) {
-      autosave.markDirty();
-    }
-  },
-  { deep: true },
-);
+watch(title, () => {
+  if (!initializing && props.detail && !props.detail.deletedAt) {
+    titleDirty = true;
+    autosave.markDirty();
+  }
+});
+
+watch([currentContent, entryType, status, tags], () => {
+  if (!initializing && props.detail && !props.detail.deletedAt) {
+    autosave.markDirty();
+  }
+});
 
 async function confirmMoveToTrash() {
   if (!(await flushPendingSave())) {
@@ -116,8 +131,14 @@ function confirmDeleteForever() {
 }
 
 async function flushPendingSave(): Promise<boolean> {
-  await autosave.flush();
-  return autosave.state.value !== "failed";
+  try {
+    tagInputRef.value?.commitDraft();
+    await nextTick();
+    await autosave.flush();
+    return autosave.state.value !== "failed";
+  } catch {
+    return false;
+  }
 }
 
 defineExpose({
@@ -127,23 +148,14 @@ defineExpose({
 
 <template>
   <section class="entry-detail">
-    <div
-      v-if="loading"
-      class="empty-state"
-    >
-      加载中
-    </div>
-    <div
-      v-else-if="!detail"
-      class="empty-state"
-    >
-      选择一条记录
-    </div>
+    <div v-if="loading" class="empty-state">加载中</div>
+    <div v-else-if="!detail" class="empty-state">选择一条记录</div>
     <template v-else>
       <header class="detail-toolbar">
         <SaveState
           :state="autosave.state.value"
           :error="autosave.error.value"
+          @retry="autosave.retry"
         />
         <div class="toolbar-actions">
           <IconButton
@@ -174,19 +186,31 @@ defineExpose({
         class="title-input"
         type="text"
         placeholder="标题"
+        aria-label="标题"
         :disabled="Boolean(detail.deletedAt)"
-      >
+      />
 
       <div class="detail-controls">
-        <EntryTypeSelect v-model="entryType" />
-        <EntryStatusSelect v-model="status" />
+        <EntryTypeSelect
+          v-model="entryType"
+          :disabled="Boolean(detail.deletedAt)"
+        />
+        <EntryStatusSelect
+          v-model="status"
+          :disabled="Boolean(detail.deletedAt)"
+        />
       </div>
 
-      <TagInput v-model="tags" />
+      <TagInput
+        ref="tagInputRef"
+        v-model="tags"
+        :disabled="Boolean(detail.deletedAt)"
+      />
 
       <textarea
         v-model="currentContent"
         class="content-editor"
+        aria-label="正文"
         :disabled="Boolean(detail.deletedAt)"
       />
 

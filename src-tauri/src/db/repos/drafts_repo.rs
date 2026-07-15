@@ -77,7 +77,7 @@ impl DraftsRepo {
         }
     }
 
-    pub fn clear(tx: &Transaction<'_>, now: &str) -> AppResult<Draft> {
+    pub fn clear(tx: &Transaction<'_>, expected_revision: i64, now: &str) -> AppResult<Draft> {
         let revision: Option<i64> = tx
             .query_row(
                 "SELECT revision FROM drafts WHERE id = ?1",
@@ -85,7 +85,10 @@ impl DraftsRepo {
                 |row| row.get(0),
             )
             .optional()?;
-        let next = revision.unwrap_or(0) + 1;
+        if revision.unwrap_or(0) != expected_revision {
+            return Err(AppError::RevisionConflict);
+        }
+        let next = expected_revision + 1;
         tx.execute(
             "
             INSERT INTO drafts(id, content, revision, updated_at)
@@ -104,10 +107,11 @@ impl DraftsRepo {
     pub fn submit_quick_capture(
         tx: &Transaction<'_>,
         content: &str,
+        expected_revision: i64,
         now: &str,
     ) -> AppResult<Draft> {
         EntriesRepo::create(tx, content, now)?;
-        Self::clear(tx, now)
+        Self::clear(tx, expected_revision, now)
     }
 }
 
@@ -122,10 +126,10 @@ mod tests {
 
     #[test]
     fn updates_and_clears_draft() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         let draft = DraftsRepo::update(&tx, "hello", 0, &now_string()).unwrap();
-        let cleared = DraftsRepo::clear(&tx, &now_string()).unwrap();
+        let cleared = DraftsRepo::clear(&tx, draft.revision, &now_string()).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(draft.revision, 1);
@@ -134,13 +138,26 @@ mod tests {
     }
 
     #[test]
+    fn submit_quick_capture_rejects_stale_draft_revision() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        DraftsRepo::update(&tx, "old", 0, &now).unwrap();
+        let updated = DraftsRepo::update(&tx, "new", 1, &now).unwrap();
+
+        let err = DraftsRepo::submit_quick_capture(&tx, "old", 1, &now).unwrap_err();
+
+        assert!(matches!(err, AppError::RevisionConflict));
+        assert_eq!(updated.revision, 2);
+    }
+    #[test]
     fn submit_quick_capture_creates_entry_and_clears_draft_atomically() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
         DraftsRepo::update(&tx, "hello", 0, &now).unwrap();
 
-        let cleared = DraftsRepo::submit_quick_capture(&tx, "hello", &now).unwrap();
+        let cleared = DraftsRepo::submit_quick_capture(&tx, "hello", 1, &now).unwrap();
 
         tx.commit().unwrap();
         let page = EntriesRepo::list(

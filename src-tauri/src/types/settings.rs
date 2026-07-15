@@ -6,11 +6,11 @@ use ts_rs::TS;
 pub struct AppSettings {
     pub data_dir: String,
     pub log_dir: String,
+    pub backup_dir: String,
     pub shortcut: String,
     pub shortcut_registered: bool,
     pub shortcut_error: Option<String>,
     pub autostart_enabled: bool,
-    pub backup_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -41,14 +41,20 @@ const statusOptions: Array<{ value: EntryStatus | ""; label: string }> = [
   { value: "archived", label: "已归档" },
 ];
 
+const searchInputRef = ref<HTMLInputElement | null>(null);
+const typeSelectRef = ref<HTMLSelectElement | null>(null);
+const statusSelectRef = ref<HTMLSelectElement | null>(null);
+
 useAppQuitRequest(flushDetail);
 
 onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
   if (isTauri()) {
     unlistenEntriesChanged = await listen("entries-changed", async () => {
-      await entries.load();
-      await entries.refreshTags();
+      if (await flushDetail()) {
+        await entries.load();
+        await entries.refreshTags();
+      }
     });
     await entries.load();
     await entries.refreshTags();
@@ -104,15 +110,11 @@ async function setQuery(value: string) {
     await entries.setQuery(value);
   }
 }
-
 </script>
 
 <template>
   <main class="app-shell">
-    <SidebarNav
-      :view="entries.view"
-      @change="changeView"
-    />
+    <SidebarNav :view="entries.view" @change="changeView" />
 
     <section class="workspace">
       <header class="topbar">
@@ -120,19 +122,19 @@ async function setQuery(value: string) {
           <Search :size="18" />
           <input
             id="global-search"
+            ref="searchInputRef"
             :value="entries.filters.query"
             type="search"
             placeholder="搜索标题、正文、原文或标签"
             @input="setQuery(($event.target as HTMLInputElement).value)"
-          >
+          />
         </div>
         <select
+          ref="typeSelectRef"
           class="filter-select"
           :value="entries.filters.entryType"
           @change="
-            setTypeFilter(
-              ($event.target as HTMLSelectElement).value as EntryType | '',
-            )
+            setTypeFilter((typeSelectRef!.value as EntryType | '') ?? '')
           "
         >
           <option
@@ -144,12 +146,11 @@ async function setQuery(value: string) {
           </option>
         </select>
         <select
+          ref="statusSelectRef"
           class="filter-select"
           :value="entries.filters.status"
           @change="
-            setStatusFilter(
-              ($event.target as HTMLSelectElement).value as EntryStatus | '',
-            )
+            setStatusFilter((statusSelectRef!.value as EntryStatus | '') ?? '')
           "
         >
           <option
@@ -170,20 +171,22 @@ async function setQuery(value: string) {
         </button>
       </header>
 
+      <p
+        v-if="entries.error && entries.view !== 'settings'"
+        class="error-text"
+        role="alert"
+      >
+        {{ entries.error }}
+      </p>
+
       <section
         v-if="entries.view === 'settings'"
         class="content-area settings-only"
       >
         <SettingsView />
       </section>
-      <section
-        v-else
-        class="content-area"
-      >
-        <aside
-          v-if="entries.view === 'tags'"
-          class="tags-panel"
-        >
+      <section v-else class="content-area">
+        <aside v-if="entries.view === 'tags'" class="tags-panel">
           <button
             v-for="tag in entries.tags"
             :key="tag.id"

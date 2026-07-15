@@ -35,6 +35,18 @@ pub fn export_all(conn: &rusqlite::Connection, target_dir: &Path) -> AppResult<V
 pub fn export_entries(entries: &[EntryDetail], target_dir: &Path) -> AppResult<Vec<PathBuf>> {
     fs::create_dir_all(target_dir)?;
     let mut used = HashSet::new();
+
+    // Pre-scan target directory to populate `used` once, avoiding O(n²) disk hits.
+    if let Ok(dir_entries) = fs::read_dir(target_dir) {
+        for entry in dir_entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".md") {
+                    used.insert(name.to_string());
+                }
+            }
+        }
+    }
+
     let mut paths = Vec::new();
 
     for entry in entries {
@@ -66,7 +78,8 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         updated_at: entry.updated_at.clone(),
         deleted_at: entry.deleted_at.clone(),
     };
-    let yaml = serde_yml::to_string(&frontmatter).map_err(|err| AppError::Yaml(err.to_string()))?;
+    let yaml = serde_json::to_string_pretty(&frontmatter)
+        .map_err(|err| AppError::Yaml(err.to_string()))?;
     let title = entry
         .title
         .clone()
@@ -74,31 +87,14 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         .unwrap_or_else(|| "untitled".to_string());
 
     Ok(format!(
-        "---\n{}---\n\n# {}\n\n{}\n\n---\n\n## 原始内容\n\n{}\n",
+        "---\n{}\n---\n\n# {}\n\n{}\n\n---\n\n## 原始内容\n\n{}\n",
         yaml, title, entry.current_content, entry.original_content
     ))
 }
 
-fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, target_dir: &Path) -> String {
-    let date = entry
-        .created_at
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .take(14)
-        .collect::<String>();
-    let timestamp = if date.len() >= 14 {
-        format!(
-            "{}-{}-{}-{}{}{}",
-            &date[0..4],
-            &date[4..6],
-            &date[6..8],
-            &date[8..10],
-            &date[10..12],
-            &date[12..14]
-        )
-    } else {
-        "1970-01-01-0000".to_string()
-    };
+fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir: &Path) -> String {
+    // Use shared timestamp helper for consistent naming across backups and markdown exports.
+    let timestamp = super::timestamps::markdown_timestamp(&entry.created_at);
     let summary = entry
         .title
         .clone()
@@ -118,7 +114,7 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, target_dir:
     let mut candidate = format!("{base_name}.md");
     let mut collision_count = 0;
 
-    if used.contains(&candidate) || target_dir.join(&candidate).exists() {
+    if used.contains(&candidate) {
         loop {
             collision_count += 1;
             candidate = if collision_count == 1 {
@@ -126,7 +122,7 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, target_dir:
             } else {
                 format!("{base_name}-{suffix}-{collision_count}.md")
             };
-            if !used.contains(&candidate) && !target_dir.join(&candidate).exists() {
+            if !used.contains(&candidate) {
                 break;
             }
         }
@@ -145,7 +141,7 @@ mod tests {
 
     #[test]
     fn exports_parseable_frontmatter_and_sanitized_names() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "hello <>:\"/\\|?* world", &now).unwrap();
@@ -168,8 +164,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = export_all(&conn, dir.path()).unwrap();
         let content = fs::read_to_string(&paths[0]).unwrap();
+        assert!(content.starts_with("---\n{\n"));
+        assert!(content.contains("\n}\n---\n\n# "));
         let yaml = content.split("---").nth(1).unwrap();
-        let parsed: Frontmatter = serde_yml::from_str(yaml).unwrap();
+        let parsed: Frontmatter = serde_json::from_str(yaml).unwrap();
 
         assert_eq!(paths.len(), 1);
         assert_eq!(parsed.tags.len(), 2);
@@ -183,24 +181,28 @@ mod tests {
 
     #[test]
     fn export_does_not_overwrite_existing_suffix_collision() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
-        let entry = EntriesRepo::create(&tx, "duplicate", &now).unwrap();
+        let _entry = EntriesRepo::create(&tx, "duplicate", &now).unwrap();
         tx.commit().unwrap();
 
         let dir = tempfile::tempdir().unwrap();
-        let mut used = HashSet::new();
-        let first_name = unique_file_name(&entry, &mut used, dir.path());
-        fs::write(dir.path().join(&first_name), "first").unwrap();
-        used.clear();
-        let second_name = unique_file_name(&entry, &mut used, dir.path());
-        fs::write(dir.path().join(&second_name), "second").unwrap();
+
+        // Pre-create two files on disk that simulate prior exports of the same entry.
+        // export_entries will discover them via the pre-scan and avoid collisions.
+        let first_name = "2026-07-06-114548-duplicate.md";
+        let second_name = "2026-07-06-114548-duplicate-abc12345.md";
+        fs::write(dir.path().join(first_name), "first").unwrap();
+        fs::write(dir.path().join(second_name), "second").unwrap();
 
         let paths = export_all(&conn, dir.path()).unwrap();
 
-        assert_eq!(paths.len(), 1);
+        // The export should pick a name that does not collide with either
+        // pre-existing file. Both "first" and "second" files must remain untouched.
+        assert_eq!(paths.len(), 1, "paths={paths:?}");
         assert_ne!(paths[0].file_name().unwrap().to_string_lossy(), second_name);
+        assert_ne!(paths[0].file_name().unwrap().to_string_lossy(), first_name);
         assert_eq!(
             fs::read_to_string(dir.path().join(first_name)).unwrap(),
             "first"

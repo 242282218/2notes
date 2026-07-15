@@ -71,16 +71,24 @@ export type Draft = { content: string; revision: number; updatedAt: string };
 export type AppSettings = {
   dataDir: string;
   logDir: string;
+  backupDir: string;
   shortcut: string;
   shortcutRegistered: boolean;
   shortcutError: string | null;
   autostartEnabled: boolean;
-  backupError: string | null;
 };
 
 export type SettingsPatch = { autostartEnabled: boolean | null };
 
 export type ExportResult = { exportedCount: number; targetDir: string };
+
+export type BackupInfo = {
+  path: string;
+  fileName: string;
+  kind: string;
+  createdAt: string;
+  sizeBytes: number;
+};
 
 export type AppErrorResponse = {
   code: string;

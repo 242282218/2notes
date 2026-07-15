@@ -1,6 +1,5 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { onMounted, onUnmounted } from "vue";
 
 import { appQuitReady } from "../services/windowApi";
@@ -10,7 +9,9 @@ type QuitRequestPayload = {
   requestId: string;
 };
 
-export function useAppQuitRequest(prepareQuit: () => boolean | Promise<boolean>) {
+export function useAppQuitRequest(
+  prepareQuit: () => boolean | Promise<boolean>,
+) {
   let disposed = false;
   let unlisten: (() => void) | null = null;
 
@@ -25,7 +26,7 @@ export function useAppQuitRequest(prepareQuit: () => boolean | Promise<boolean>)
           await revealCurrentWindow();
           return;
         }
-        await appQuitReady(event.payload.requestId, getCurrentWindow().label);
+        await appQuitReady(event.payload.requestId);
       },
     );
 

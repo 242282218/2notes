@@ -14,7 +14,7 @@
 - 自动保存草稿和详情编辑，尽量不让内容因为窗口关闭、切换或退出丢掉。
 - 每条记录保留“原始内容 + 当前内容”，后续整理不覆盖最初的想法。
 - 用类型、状态和标签做轻量澄清，不把收集箱变成复杂管理系统。
-- 全量导出为 Markdown，数据始终在本机，能迁移、能备份、能带走。
+- 将未进入回收站的记录导出为 Markdown，数据始终在本机，能迁移、能备份、能带走。
 
 ## Demo：一次典型使用
 
@@ -22,7 +22,7 @@
 2. 输入一句想法、一个待办或一段链接备注，按 `Enter` 保存。
 3. 内容进入收集箱，默认是“未澄清 / 待处理”。
 4. 回头在主窗口里补标题、改类型、打标签、标记完成或归档。
-5. 需要迁移时，在设置页导出 Markdown 文件夹，每条记录一个 `.md` 文件，带 YAML frontmatter 和原始内容追溯区。
+5. 需要迁移时，在设置页导出未进入回收站的记录；每条导出记录生成一个 `.md` 文件，带 YAML frontmatter 和原始内容追溯区。
 
 ## 当前能力
 
@@ -32,7 +32,7 @@
 - 自动保存：详情编辑 debounce 保存，切换条目/视图/退出前会先 flush。
 - 搜索筛选：标题、当前内容、原始内容、标签名；支持类型、状态、标签筛选。
 - 回收站：普通删除先移入回收站，永久删除只允许在回收站内发生。
-- Markdown 导出：文件名自动清理和避让，不覆盖已有文件。
+- Markdown 导出：仅导出未进入回收站的记录，文件名自动清理和避让，不覆盖已有文件。
 - 本地优先：SQLite 主存储，Tauri/Rust 负责本地能力，不做远程遥测。
 - Windows 集成：系统托盘、开机自启动开关、全局快捷键、安装包构建。
 
@@ -48,8 +48,8 @@ pnpm run tauri:build
 构建完成后会生成：
 
 - 应用可执行文件：`src-tauri/target/release/two_notes.exe`
-- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_0.1.0_x64_en-US.msi`
-- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_0.1.0_x64-setup.exe`
+- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_0.2.0_x64_en-US.msi`
+- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_0.2.0_x64-setup.exe`
 
 这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证真实打包链路。
 

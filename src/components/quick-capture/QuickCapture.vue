@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Clipboard, Send, X } from "lucide-vue-next";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
+import { databaseRestoreReady } from "../../services/backupApi";
 import { useAutosave } from "../../composables/useAutosave";
 import { revealCurrentWindow } from "../../composables/useWindowReveal";
 import {
@@ -19,6 +22,8 @@ const hydrated = ref(false);
 const submitting = ref(false);
 const error = ref<string | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+let unlistenDatabaseRestored: (() => void) | null = null;
+let unlistenDatabaseRestorePrepare: (() => void) | null = null;
 
 const autosave = useAutosave({
   delay: 250,
@@ -26,6 +31,9 @@ const autosave = useAutosave({
   onSaved: (draft) => {
     revision.value = draft.revision;
     error.value = null;
+  },
+  onStaleSaved: (draft) => {
+    revision.value = draft.revision;
   },
   onFailed: (saveError) => {
     error.value =
@@ -44,7 +52,9 @@ useAppQuitRequest(async () => {
   }
 });
 
-onMounted(async () => {
+async function hydrateDraft() {
+  hydrated.value = false;
+  autosave.reset();
   try {
     const draft = await draftGet();
     content.value = draft.content;
@@ -54,9 +64,40 @@ onMounted(async () => {
       loadError instanceof Error ? loadError.message : "草稿加载失败";
   } finally {
     hydrated.value = true;
-    await autosave.reset();
     textareaRef.value?.focus();
   }
+}
+
+type DatabaseRestorePreparePayload = {
+  requestId: string;
+};
+
+async function prepareDatabaseRestore(requestId: string) {
+  try {
+    await autosave.flush();
+    await databaseRestoreReady(requestId);
+  } catch (restoreError) {
+    error.value =
+      restoreError instanceof Error ? restoreError.message : "草稿保存失败";
+    await revealCurrentWindow();
+  }
+}
+
+onMounted(async () => {
+  await hydrateDraft();
+  if (isTauri()) {
+    unlistenDatabaseRestored = await listen("database-restored", hydrateDraft);
+    unlistenDatabaseRestorePrepare =
+      await listen<DatabaseRestorePreparePayload>(
+        "database-restore-prepare",
+        (event) => prepareDatabaseRestore(event.payload.requestId),
+      );
+  }
+});
+
+onUnmounted(() => {
+  unlistenDatabaseRestored?.();
+  unlistenDatabaseRestorePrepare?.();
 });
 
 function onContentChange() {
@@ -76,7 +117,7 @@ async function submit() {
   error.value = null;
   try {
     await autosave.flush();
-    const cleared = await quickCaptureSubmit(trimmed);
+    const cleared = await quickCaptureSubmit(trimmed, revision.value);
     hydrated.value = false;
     try {
       content.value = "";
@@ -91,6 +132,14 @@ async function submit() {
   } finally {
     submitting.value = false;
   }
+}
+
+function onSubmitKeydown(event: KeyboardEvent) {
+  if (event.isComposing) {
+    return;
+  }
+  event.preventDefault();
+  void submit();
 }
 
 async function copyContent() {
@@ -112,11 +161,7 @@ async function hideQuickCapture() {
     <header>
       <strong>快速记录</strong>
       <span>{{ saving ? "草稿保存中" : "草稿已就绪" }}</span>
-      <IconButton
-        label="隐藏"
-        :icon="X"
-        @click="hideQuickCapture"
-      />
+      <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
     </header>
     <textarea
       ref="textareaRef"
@@ -125,14 +170,11 @@ async function hideQuickCapture() {
       :disabled="!hydrated || submitting"
       placeholder="记下现在这件事"
       @input="onContentChange"
-      @keydown.enter.exact.prevent="submit"
+      @keydown.enter.exact="onSubmitKeydown"
       @keydown.esc.prevent="hideQuickCapture"
     />
     <footer>
-      <p
-        v-if="error"
-        class="error-text"
-      >
+      <p v-if="error" class="error-text">
         {{ error }}
       </p>
       <span v-else />

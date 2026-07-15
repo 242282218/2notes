@@ -12,6 +12,9 @@ export function draftUpdate(
   return invokeCommand("draft_update", { content, expectedRevision });
 }
 
-export function quickCaptureSubmit(content: string): Promise<Draft> {
-  return invokeCommand("quick_capture_submit", { content });
+export function quickCaptureSubmit(
+  content: string,
+  expectedRevision: number,
+): Promise<Draft> {
+  return invokeCommand("quick_capture_submit", { content, expectedRevision });
 }

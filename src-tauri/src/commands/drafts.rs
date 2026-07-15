@@ -18,7 +18,7 @@ struct EntriesChangedPayload {
 
 #[tauri::command]
 pub fn draft_get(state: State<'_, AppState>) -> CommandResult<Draft> {
-    let conn = state.conn().map_err(AppErrorResponse::from)?;
+    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
     DraftsRepo::get(&conn).map_err(AppErrorResponse::from)
 }
 
@@ -28,17 +28,10 @@ pub fn draft_update(
     content: String,
     expected_revision: i64,
 ) -> CommandResult<Draft> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let draft = DraftsRepo::update(&tx, &content, expected_revision, &now_string())
-        .map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    Ok(draft)
+    let now = now_string();
+    state
+        .with_write_tx(|tx| DraftsRepo::update(tx, &content, expected_revision, &now))
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
@@ -46,13 +39,15 @@ pub fn quick_capture_submit(
     app: AppHandle,
     state: State<'_, AppState>,
     content: String,
+    expected_revision: i64,
 ) -> CommandResult<Draft> {
-    let mut conn = state.conn().map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    let mut conn = state.write_conn().map_err(AppErrorResponse::from)?;
     let tx = conn
         .transaction()
         .map_err(crate::error::AppError::from)
         .map_err(AppErrorResponse::from)?;
-    let draft = DraftsRepo::submit_quick_capture(&tx, &content, &now_string())
+    let draft = DraftsRepo::submit_quick_capture(&tx, &content, expected_revision, &now)
         .map_err(AppErrorResponse::from)?;
     tx.commit()
         .map_err(crate::error::AppError::from)

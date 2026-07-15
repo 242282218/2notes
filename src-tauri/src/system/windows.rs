@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -66,8 +68,26 @@ pub fn request_app_quit(app: &AppHandle) -> AppResult<()> {
     let request_id = state.start_quit_request(windows.clone())?;
     let payload = QuitRequestPayload { request_id };
     for label in windows {
-        app.emit_to(label.as_str(), APP_QUIT_REQUESTED, payload.clone())?;
+        if let Err(err) = app.emit_to(label.as_str(), APP_QUIT_REQUESTED, payload.clone()) {
+            let _ = state.cancel_quit_request(&payload.request_id);
+            return Err(err.into());
+        }
     }
+    let timeout_app = app.clone();
+    let timeout_request_id = payload.request_id;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        let Some(state) = timeout_app.try_state::<AppState>() else {
+            return;
+        };
+        if state
+            .cancel_quit_request(&timeout_request_id)
+            .unwrap_or(false)
+        {
+            log::warn!("app_quit_request_timed_out");
+            show_main_window(&timeout_app);
+        }
+    });
     Ok(())
 }
 

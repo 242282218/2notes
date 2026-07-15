@@ -29,8 +29,8 @@ pub fn run() {
         ))
         .setup(|app| {
             let paths = prepare_app_paths(app.handle())?;
-            let conn = open_database(&paths.database_path)?;
-            app.manage(AppState::new(conn, paths));
+            let (write_conn, read_conn) = open_database(&paths.database_path)?;
+            app.manage(AppState::new(write_conn, read_conn, paths));
             system::tray::create_tray(app.handle())?;
             system::shortcuts::register_default_shortcut(app.handle());
             Ok(())
@@ -58,6 +58,10 @@ pub fn run() {
             commands::drafts::draft_update,
             commands::drafts::quick_capture_submit,
             commands::export_markdown::export_markdown,
+            commands::backups::backups_create,
+            commands::backups::backups_list,
+            commands::backups::backups_restore,
+            commands::backups::database_restore_ready,
             commands::windows::window_open_quick_capture,
             commands::windows::window_hide_quick_capture,
             commands::windows::app_quit_ready,

@@ -21,6 +21,7 @@ import type {
 } from "../types/generated";
 import {
   buildEntryFilter,
+  entryMatchesCurrentFilter,
   type UiFilters,
 } from "../composables/useEntryFilters";
 
@@ -94,8 +95,12 @@ export const useEntriesStore = defineStore("entries", () => {
     if (!hasMore.value || loading.value) {
       return;
     }
-    offset.value += limit;
+    const previousOffset = offset.value;
+    offset.value = previousOffset + limit;
     await load(false);
+    if (error.value) {
+      offset.value = previousOffset;
+    }
   }
 
   async function refreshTags() {
@@ -105,7 +110,9 @@ export const useEntriesStore = defineStore("entries", () => {
   async function select(id: string) {
     const requestId = ++selectRequestId;
     selectedId.value = id;
+    detail.value = null;
     detailLoading.value = true;
+    error.value = null;
     try {
       const entry = await entriesGet(id);
       if (requestId === selectRequestId && selectedId.value === id) {
@@ -115,6 +122,8 @@ export const useEntriesStore = defineStore("entries", () => {
       if (requestId === selectRequestId) {
         error.value =
           selectError instanceof Error ? selectError.message : "加载失败";
+        selectedId.value = null;
+        detail.value = null;
       }
     } finally {
       if (requestId === selectRequestId) {
@@ -143,37 +152,65 @@ export const useEntriesStore = defineStore("entries", () => {
 
   function applySavedEntry(updated: EntryDetail) {
     detail.value = updated;
-    upsertListItem(updated);
-    void refreshTags();
+    if (view.value === "search" && filters.query.trim()) {
+      void load();
+    } else {
+      upsertListItem(updated);
+    }
+    refreshTags().catch(() => {
+      // Silently swallow tag refresh errors in autosave callback context.
+      // The tags list will be refreshed on next manual action.
+    });
   }
 
   async function moveSelectedToTrash() {
     if (!detail.value) {
       return;
     }
-    detail.value = await entriesMoveToTrash(detail.value.id);
-    await load();
-    await refreshTags();
+    error.value = null;
+    try {
+      detail.value = await entriesMoveToTrash(
+        detail.value.id,
+        detail.value.revision,
+      );
+      await load();
+      await refreshTags();
+    } catch (operationError) {
+      error.value = getErrorMessage(operationError, "移到回收站失败");
+    }
   }
 
   async function restoreSelected() {
     if (!detail.value) {
       return;
     }
-    detail.value = await entriesRestoreFromTrash(detail.value.id);
-    await load();
-    await refreshTags();
+    error.value = null;
+    try {
+      detail.value = await entriesRestoreFromTrash(
+        detail.value.id,
+        detail.value.revision,
+      );
+      await load();
+      await refreshTags();
+    } catch (operationError) {
+      error.value = getErrorMessage(operationError, "恢复失败");
+    }
   }
 
   async function deleteSelectedForever() {
     if (!detail.value) {
       return;
     }
-    await entriesDeleteForever(detail.value.id);
-    detail.value = null;
-    selectedId.value = null;
-    await load();
-    await refreshTags();
+    error.value = null;
+    try {
+      await entriesDeleteForever(detail.value.id);
+      detail.value = null;
+      selectedId.value = null;
+      await load();
+      await refreshTags();
+    } catch (operationError) {
+      error.value = getErrorMessage(operationError, "永久删除失败");
+    }
   }
 
   async function setView(nextView: AppView) {
@@ -203,15 +240,32 @@ export const useEntriesStore = defineStore("entries", () => {
     await load();
   }
 
-  async function setQuery(value: string) {
+  async function setQuery(value: string, switchView = true) {
     filters.query = value;
-    if (value.trim()) {
+    if (switchView && value.trim()) {
       view.value = "search";
     }
     await load();
   }
 
+  function getErrorMessage(operationError: unknown, fallback: string) {
+    return operationError instanceof Error ? operationError.message : fallback;
+  }
+
   function upsertListItem(updated: EntryDetail) {
+    const index = items.value.findIndex((item) => item.id === updated.id);
+    if (index < 0) {
+      return;
+    }
+    if (!matchesCurrentFilter(updated)) {
+      items.value.splice(index, 1);
+      // Clear selected detail if the entry no longer matches the current filter.
+      if (selectedId.value === updated.id) {
+        selectedId.value = null;
+        detail.value = null;
+      }
+      return;
+    }
     const listItem: EntryListItem = {
       id: updated.id,
       title: updated.title,
@@ -224,10 +278,12 @@ export const useEntriesStore = defineStore("entries", () => {
       updatedAt: updated.updatedAt,
       deletedAt: updated.deletedAt,
     };
-    const index = items.value.findIndex((item) => item.id === updated.id);
-    if (index >= 0) {
-      items.value.splice(index, 1, listItem);
-    }
+    items.value.splice(index, 1, listItem);
+  }
+
+  function matchesCurrentFilter(entry: EntryDetail) {
+    const filter = buildEntryFilter(view.value, filters);
+    return entryMatchesCurrentFilter(entry, filter);
   }
 
   return {

@@ -8,6 +8,7 @@ import type { Tag } from "../../types/generated";
 
 const props = defineProps<{
   modelValue: string[];
+  disabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -18,11 +19,14 @@ const draft = ref("");
 const suggestions = ref<Tag[]>([]);
 const selected = computed(() => normalizeTagNames(props.modelValue));
 let suggestionRequestId = 0;
-let pendingBlurSave = false;
 
 watch(draft, async (value) => {
   const requestId = ++suggestionRequestId;
   const query = value.trim();
+  if (props.disabled) {
+    suggestions.value = [];
+    return;
+  }
   try {
     const nextSuggestions = query ? await tagsSuggest(query) : [];
     if (requestId === suggestionRequestId) {
@@ -36,14 +40,19 @@ watch(draft, async (value) => {
 });
 
 function addTag(value = draft.value) {
+  if (props.disabled) {
+    return;
+  }
   const next = normalizeTagNames([...selected.value, value]);
   emit("update:modelValue", next);
   draft.value = "";
   suggestions.value = [];
-  pendingBlurSave = false;
 }
 
 function removeTag(tag: string) {
+  if (props.disabled) {
+    return;
+  }
   emit(
     "update:modelValue",
     selected.value.filter((item) => item !== tag),
@@ -51,6 +60,9 @@ function removeTag(tag: string) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (props.disabled || event.isComposing) {
+    return;
+  }
   if (event.key === "Enter" || event.key === ",") {
     event.preventDefault();
     addTag();
@@ -60,28 +72,36 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
-function onBlur() {
-  pendingBlurSave = true;
-  window.setTimeout(() => {
-    if (pendingBlurSave && draft.value.trim()) {
-      addTag();
-    }
-    pendingBlurSave = false;
-  }, 0);
+function commitDraft() {
+  if (!props.disabled && draft.value.trim()) {
+    addTag();
+  }
 }
+
+function onBlur(event: FocusEvent) {
+  if (props.disabled) {
+    return;
+  }
+  if (
+    event.relatedTarget instanceof HTMLElement &&
+    event.relatedTarget.closest(".suggestions")
+  ) {
+    return;
+  }
+  commitDraft();
+}
+
+defineExpose({ commitDraft });
 </script>
 
 <template>
   <div class="tag-input">
-    <span
-      v-for="tag in selected"
-      :key="tag"
-      class="tag-pill"
-    >
+    <span v-for="tag in selected" :key="tag" class="tag-pill">
       {{ tag }}
       <button
         type="button"
         :title="`移除 ${tag}`"
+        :disabled="disabled"
         @click="removeTag(tag)"
       >
         <X :size="13" />
@@ -91,18 +111,18 @@ function onBlur() {
       v-model="draft"
       type="text"
       placeholder="添加标签"
+      aria-label="标签"
+      :disabled="disabled"
       @keydown="onKeydown"
       @blur="onBlur"
-    >
-    <div
-      v-if="suggestions.length"
-      class="suggestions"
-    >
+    />
+    <div v-if="suggestions.length" class="suggestions">
       <button
         v-for="tag in suggestions"
         :key="tag.id"
         type="button"
-        @mousedown.prevent="addTag(tag.name)"
+        :disabled="disabled"
+        @click="addTag(tag.name)"
       >
         {{ tag.name }}
       </button>

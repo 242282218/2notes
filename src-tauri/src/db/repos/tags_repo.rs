@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn normalized_names_are_reused() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         let tags = TagsRepo::resolve_many(
             &tx,
@@ -171,11 +171,11 @@ mod tests {
 
     #[test]
     fn tag_counts_ignore_trashed_entries() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "hello", &now).unwrap();
-        EntriesRepo::update(
+        let updated = EntriesRepo::update(
             &tx,
             &entry.id,
             EntryPatch {
@@ -189,7 +189,7 @@ mod tests {
             &now,
         )
         .unwrap();
-        EntriesRepo::move_to_trash(&tx, &entry.id, &now).unwrap();
+        EntriesRepo::move_to_trash(&tx, &entry.id, updated.revision, &now).unwrap();
         tx.commit().unwrap();
 
         let tags = TagsRepo::list(&conn).unwrap();

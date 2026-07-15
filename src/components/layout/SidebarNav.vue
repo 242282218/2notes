@@ -29,10 +29,7 @@ const navItems: Array<{ view: AppView; label: string; icon: unknown }> = [
       :class="{ active: item.view === view }"
       @click="$emit('change', item.view)"
     >
-      <component
-        :is="item.icon"
-        :size="18"
-      />
+      <component :is="item.icon" :size="18" />
       <span>{{ item.label }}</span>
     </button>
   </nav>

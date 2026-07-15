@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rusqlite::{params, types::Value, Connection, OptionalExtension, Transaction};
 use uuid::Uuid;
 
@@ -60,44 +62,23 @@ impl EntriesRepo {
         filter: &EntryListFilter,
         page: &PageRequest,
     ) -> AppResult<EntryPage> {
-        let limit = page.limit.unwrap_or(50).clamp(1, 200);
-        let offset = page.offset.unwrap_or(0).min(100_000);
-        let fetch_limit = limit + 1;
-
-        let (where_sql, values) = build_filter(filter);
-        let sql = format!(
-            "
-            SELECT id, title, title_source, original_content, current_content, type, status,
-                   revision, created_at, updated_at, deleted_at
-            FROM entries e
-            {where_sql}
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            "
-        );
-        let mut params = values;
-        params.push(Value::Integer(i64::from(fetch_limit)));
-        params.push(Value::Integer(i64::from(offset)));
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), map_record)?;
-        let mut items = Vec::new();
-        for row in rows {
-            let record = row?;
-            items.push(record_to_list_item(conn, record)?);
+        let Some(query) = normalized_query(filter) else {
+            return list_with_search(conn, filter, page, SearchMode::Like);
+        };
+        if query
+            .chars()
+            .any(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
+        {
+            return list_with_search(conn, filter, page, SearchMode::Like);
         }
 
-        let has_more = items.len() > limit as usize;
-        if has_more {
-            items.pop();
+        match list_with_search(conn, filter, page, SearchMode::Fts) {
+            Ok(page) => Ok(page),
+            Err(err) if can_fallback_from_fts(&err) => {
+                list_with_search(conn, filter, page, SearchMode::Like)
+            }
+            Err(err) => Err(err),
         }
-
-        Ok(EntryPage {
-            items,
-            limit,
-            offset,
-            has_more,
-        })
     }
 
     pub fn get(conn: &Connection, id: &str) -> AppResult<EntryDetail> {
@@ -116,6 +97,12 @@ impl EntriesRepo {
             Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
         if current.revision != expected_revision {
             return Err(AppError::RevisionConflict);
+        }
+        if current.deleted_at.is_some() {
+            return Err(AppError::validation(
+                "ENTRY_IN_TRASH",
+                "回收站中的条目不能编辑",
+            ));
         }
 
         let EntryPatch {
@@ -183,9 +170,17 @@ impl EntriesRepo {
         Self::get_with_tx(tx, id)
     }
 
-    pub fn move_to_trash(tx: &Transaction<'_>, id: &str, now: &str) -> AppResult<EntryDetail> {
+    pub fn move_to_trash(
+        tx: &Transaction<'_>,
+        id: &str,
+        expected_revision: i64,
+        now: &str,
+    ) -> AppResult<EntryDetail> {
         let current =
             Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
+        if current.revision != expected_revision || current.deleted_at.is_some() {
+            return Err(AppError::RevisionConflict);
+        }
         tx.execute(
             "UPDATE entries SET deleted_at = ?1, revision = revision + 1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
@@ -194,8 +189,17 @@ impl EntriesRepo {
         Self::get_with_tx(tx, &current.id)
     }
 
-    pub fn restore_from_trash(tx: &Transaction<'_>, id: &str, now: &str) -> AppResult<EntryDetail> {
-        Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
+    pub fn restore_from_trash(
+        tx: &Transaction<'_>,
+        id: &str,
+        expected_revision: i64,
+        now: &str,
+    ) -> AppResult<EntryDetail> {
+        let current =
+            Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
+        if current.revision != expected_revision || current.deleted_at.is_none() {
+            return Err(AppError::RevisionConflict);
+        }
         tx.execute(
             "UPDATE entries SET deleted_at = NULL, revision = revision + 1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
@@ -232,14 +236,16 @@ impl EntriesRepo {
             SELECT id, title, title_source, original_content, current_content, type, status,
                    revision, created_at, updated_at, deleted_at
             FROM entries
+            WHERE deleted_at IS NULL
             ORDER BY created_at DESC
             ",
         )?;
         let rows = stmt.query_map([], map_record)?;
-        let mut entries = Vec::new();
+        let mut records = Vec::new();
         for row in rows {
-            entries.push(record_to_detail(conn, row?)?);
+            records.push(row?);
         }
+        let entries = records_to_details(conn, records)?;
         Ok(entries)
     }
 
@@ -280,8 +286,65 @@ impl EntriesRepo {
     }
 }
 
-pub fn escape_like(input: &str) -> String {
-    let mut escaped = String::new();
+#[derive(Clone, Copy)]
+enum SearchMode {
+    Fts,
+    Like,
+}
+
+fn list_with_search(
+    conn: &Connection,
+    filter: &EntryListFilter,
+    page: &PageRequest,
+    search_mode: SearchMode,
+) -> AppResult<EntryPage> {
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).min(100_000);
+    let fetch_limit = limit + 1;
+
+    let (where_sql, values) = build_filter(filter, search_mode);
+    let sql = format!(
+        "
+        SELECT id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at
+        FROM entries e
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+        "
+    );
+    let mut params = values;
+    params.push(Value::Integer(i64::from(fetch_limit)));
+    params.push(Value::Integer(i64::from(offset)));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), map_record)?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+
+    let mut items = records_to_list_items(conn, records)?;
+
+    let has_more = items.len() > limit as usize;
+    if has_more {
+        items.pop();
+    }
+
+    Ok(EntryPage {
+        items,
+        limit,
+        offset,
+        has_more,
+    })
+}
+
+pub fn escape_like(input: &str) -> std::borrow::Cow<'_, str> {
+    let needs_escape = input.chars().any(|ch| ch == '%' || ch == '_' || ch == '\\');
+    if !needs_escape {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let mut escaped = String::with_capacity(input.len() * 2);
     for ch in input.chars() {
         match ch {
             '%' | '_' | '\\' => {
@@ -291,7 +354,7 @@ pub fn escape_like(input: &str) -> String {
             _ => escaped.push(ch),
         }
     }
-    escaped
+    std::borrow::Cow::Owned(escaped)
 }
 
 pub fn auto_title(content: &str) -> Option<String> {
@@ -302,7 +365,48 @@ pub fn auto_title(content: &str) -> Option<String> {
     Some(compact.chars().take(80).collect())
 }
 
-fn build_filter(filter: &EntryListFilter) -> (String, Vec<Value>) {
+fn normalized_query(filter: &EntryListFilter) -> Option<&str> {
+    filter
+        .query
+        .as_ref()
+        .map(|query| query.trim())
+        .filter(|query| !query.is_empty())
+}
+
+fn fts_phrase(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn can_fallback_from_fts(err: &AppError) -> bool {
+    let AppError::Db(db_error) = err else {
+        return false;
+    };
+    let message = db_error.to_string();
+    message.contains("entries_fts")
+        || message.contains("fts5")
+        || message.contains("MATCH")
+        || message.contains("no such module")
+}
+
+fn like_search_clause() -> String {
+    r"(
+      COALESCE(e.title, '') LIKE ? ESCAPE '\'
+      OR e.current_content LIKE ? ESCAPE '\'
+      OR e.original_content LIKE ? ESCAPE '\'
+      OR EXISTS (
+        SELECT 1 FROM entry_tags et
+        JOIN tags t ON t.id = et.tag_id
+        WHERE et.entry_id = e.id AND t.name LIKE ? ESCAPE '\'
+      )
+    )"
+    .to_string()
+}
+
+fn build_filter(filter: &EntryListFilter, search_mode: SearchMode) -> (String, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
 
@@ -339,32 +443,30 @@ fn build_filter(filter: &EntryListFilter) -> (String, Vec<Value>) {
         values.push(Value::Text(normalize_name(tag)));
     }
 
-    if let Some(query) = filter
-        .query
-        .as_ref()
-        .map(|query| query.trim())
-        .filter(|query| !query.is_empty())
-    {
-        clauses.push(
-            "(
-              COALESCE(e.title, '') LIKE ? ESCAPE '\\'
-              OR e.current_content LIKE ? ESCAPE '\\'
-              OR e.original_content LIKE ? ESCAPE '\\'
-              OR EXISTS (
-                SELECT 1 FROM entry_tags et
-                JOIN tags t ON t.id = et.tag_id
-                WHERE et.entry_id = e.id AND t.name LIKE ? ESCAPE '\\'
-              )
-            )"
-            .to_string(),
-        );
+    if let Some(query) = normalized_query(filter) {
         let pattern = format!("%{}%", escape_like(query));
-        values.extend([
-            Value::Text(pattern.clone()),
-            Value::Text(pattern.clone()),
-            Value::Text(pattern.clone()),
-            Value::Text(pattern),
-        ]);
+        match search_mode {
+            SearchMode::Fts => {
+                clauses.push(
+                    "e.id IN (
+                      SELECT entry_id
+                      FROM entries_fts
+                      WHERE entries_fts MATCH ?
+                    )"
+                    .to_string(),
+                );
+                values.push(Value::Text(fts_phrase(query)));
+            }
+            SearchMode::Like => {
+                clauses.push(like_search_clause());
+                values.extend([
+                    Value::Text(pattern.clone()),
+                    Value::Text(pattern.clone()),
+                    Value::Text(pattern.clone()),
+                    Value::Text(pattern),
+                ]);
+            }
+        }
     }
 
     if clauses.is_empty() {
@@ -393,14 +495,83 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
     })
 }
 
-fn record_to_list_item(conn: &Connection, record: EntryRecord) -> AppResult<EntryListItem> {
-    let tags = TagsRepo::tags_for_entry(conn, &record.id)?;
-    Ok(list_item(record, tags))
-}
-
 fn record_to_detail(conn: &Connection, record: EntryRecord) -> AppResult<EntryDetail> {
     let tags = TagsRepo::tags_for_entry(conn, &record.id)?;
     Ok(detail(record, tags))
+}
+
+fn records_to_list_items(
+    conn: &Connection,
+    records: Vec<EntryRecord>,
+) -> AppResult<Vec<EntryListItem>> {
+    let tags_by_entry = tags_for_entries(conn, &records)?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let tags = tags_by_entry.get(&record.id).cloned().unwrap_or_default();
+            list_item(record, tags)
+        })
+        .collect())
+}
+
+fn records_to_details(conn: &Connection, records: Vec<EntryRecord>) -> AppResult<Vec<EntryDetail>> {
+    let tags_by_entry = tags_for_entries(conn, &records)?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let tags = tags_by_entry.get(&record.id).cloned().unwrap_or_default();
+            detail(record, tags)
+        })
+        .collect())
+}
+
+fn tags_for_entries(
+    conn: &Connection,
+    records: &[EntryRecord],
+) -> AppResult<HashMap<String, Vec<Tag>>> {
+    if records.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", records.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "
+        SELECT et.entry_id, t.id, t.name, t.normalized_name, t.created_at, COUNT(e2.id) AS entry_count
+        FROM entry_tags et
+        JOIN tags t ON t.id = et.tag_id
+        LEFT JOIN entry_tags et2 ON et2.tag_id = t.id
+        LEFT JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
+        WHERE et.entry_id IN ({placeholders})
+        GROUP BY et.entry_id, t.id
+        ORDER BY et.entry_id, t.name COLLATE NOCASE
+        "
+    );
+    let values = records
+        .iter()
+        .map(|record| Value::Text(record.id.clone()))
+        .collect::<Vec<_>>();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Tag {
+                id: row.get(1)?,
+                name: row.get(2)?,
+                normalized_name: row.get(3)?,
+                created_at: row.get(4)?,
+                entry_count: row.get(5)?,
+            },
+        ))
+    })?;
+
+    let mut tags_by_entry: HashMap<String, Vec<Tag>> = HashMap::new();
+    for row in rows {
+        let (entry_id, tag) = row?;
+        tags_by_entry.entry(entry_id).or_default().push(tag);
+    }
+    Ok(tags_by_entry)
 }
 
 fn record_to_detail_tx(tx: &Transaction<'_>, record: EntryRecord) -> AppResult<EntryDetail> {
@@ -495,7 +666,7 @@ mod tests {
 
     #[test]
     fn creates_entry_with_defaults() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "hello world", &now_string()).unwrap();
         tx.commit().unwrap();
@@ -507,7 +678,7 @@ mod tests {
 
     #[test]
     fn update_does_not_overwrite_original_content() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "first", &now).unwrap();
@@ -533,7 +704,7 @@ mod tests {
 
     #[test]
     fn search_hits_content_original_and_tags_with_chinese() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "原始 中文 taggable", &now).unwrap();
@@ -575,7 +746,7 @@ mod tests {
 
     #[test]
     fn like_wildcards_are_escaped() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         EntriesRepo::create(&tx, "100% literal", &now_string()).unwrap();
         EntriesRepo::create(&tx, "1000 literal", &now_string()).unwrap();
@@ -598,8 +769,148 @@ mod tests {
     }
 
     #[test]
+    fn fts_index_matches_full_terms() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "alpha searchable", &now_string()).unwrap();
+        tx.commit().unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("searchable".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, entry.id);
+    }
+
+    #[test]
+    fn search_falls_back_to_like_when_fts_table_is_missing() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "substring-search-value", &now_string()).unwrap();
+        tx.commit().unwrap();
+        conn.execute("DROP TABLE entries_fts", []).unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("search-value".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: None,
+                offset: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].summary, "substring-search-value");
+    }
+
+    #[test]
+    fn fts_tag_update_rebuilds_each_entry_tags_independently() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let first = EntriesRepo::create(&tx, "first", &now).unwrap();
+        let second = EntriesRepo::create(&tx, "second", &now).unwrap();
+        EntriesRepo::update(
+            &tx,
+            &first.id,
+            EntryPatch {
+                title: None,
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: Some(vec!["shared".to_string(), "only-a".to_string()]),
+            },
+            first.revision,
+            &now,
+        )
+        .unwrap();
+        EntriesRepo::update(
+            &tx,
+            &second.id,
+            EntryPatch {
+                title: None,
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: Some(vec!["shared".to_string(), "only-b".to_string()]),
+            },
+            second.revision,
+            &now,
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE tags SET name = 'renamed' WHERE normalized_name = 'shared'",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let first_tags: String = conn
+            .query_row(
+                "SELECT tags_text FROM entries_fts WHERE entry_id = ?1",
+                params![first.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let second_tags: String = conn
+            .query_row(
+                "SELECT tags_text FROM entries_fts WHERE entry_id = ?1",
+                params![second.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(first_tags.contains("only-a"));
+        assert!(!first_tags.contains("only-b"));
+        assert!(second_tags.contains("only-b"));
+        assert!(!second_tags.contains("only-a"));
+    }
+    #[test]
+    fn fts_search_paginates_beyond_one_thousand_matches() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for index in 0..1005 {
+            let timestamp = format!(
+                "2026-01-01T{:02}:{:02}:{:02}Z",
+                index / 3600,
+                (index / 60) % 60,
+                index % 60
+            );
+            EntriesRepo::create(&tx, &format!("bulkterm note {index}"), &timestamp).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let mut filter = default_filter();
+        filter.query = Some("bulkterm".to_string());
+        let page = EntriesRepo::list(
+            &conn,
+            &filter,
+            &PageRequest {
+                limit: Some(10),
+                offset: Some(1000),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 5);
+        assert!(!page.has_more);
+    }
+
+    #[test]
     fn revision_conflict_is_reported() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "hello", &now_string()).unwrap();
         let err = EntriesRepo::update(
@@ -621,15 +932,95 @@ mod tests {
     }
 
     #[test]
+    fn update_rejects_trashed_entry() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "hello", &now_string()).unwrap();
+        let trashed =
+            EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision, &now_string()).unwrap();
+        let err = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: None,
+                current_content: Some("changed".to_string()),
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            trashed.revision,
+            &now_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "ENTRY_IN_TRASH"));
+    }
+
+    #[test]
     fn delete_forever_requires_trash() {
-        let mut conn = open_in_memory().unwrap();
+        let (mut conn, _) = open_in_memory().unwrap();
         let tx = conn.transaction().unwrap();
         let entry = EntriesRepo::create(&tx, "hello", &now_string()).unwrap();
         let err = EntriesRepo::delete_forever(&tx, &entry.id).unwrap_err();
-        EntriesRepo::move_to_trash(&tx, &entry.id, &now_string()).unwrap();
+        EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision, &now_string()).unwrap();
         EntriesRepo::delete_forever(&tx, &entry.id).unwrap();
         tx.commit().unwrap();
 
         assert!(matches!(err, AppError::Validation { code, .. } if code == "ENTRY_NOT_IN_TRASH"));
+    }
+
+    #[test]
+    fn exportable_entries_exclude_trash() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let kept = EntriesRepo::create(&tx, "keep", &now_string()).unwrap();
+        let trashed = EntriesRepo::create(&tx, "trash", &now_string()).unwrap();
+        EntriesRepo::move_to_trash(&tx, &trashed.id, trashed.revision, &now_string()).unwrap();
+        tx.commit().unwrap();
+
+        let entries = EntriesRepo::list_exportable(&conn).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, kept.id);
+    }
+
+    #[test]
+    fn trash_and_restore_require_current_revision_and_state() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "hello", &now_string()).unwrap();
+        let stale_err =
+            EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision + 1, &now_string())
+                .unwrap_err();
+        let trashed =
+            EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision, &now_string()).unwrap();
+        let repeat_trash_err =
+            EntriesRepo::move_to_trash(&tx, &entry.id, trashed.revision, &now_string())
+                .unwrap_err();
+        let restore_stale_err =
+            EntriesRepo::restore_from_trash(&tx, &entry.id, entry.revision, &now_string())
+                .unwrap_err();
+        let restored =
+            EntriesRepo::restore_from_trash(&tx, &entry.id, trashed.revision, &now_string())
+                .unwrap();
+        let repeat_restore_err =
+            EntriesRepo::restore_from_trash(&tx, &entry.id, restored.revision, &now_string())
+                .unwrap_err();
+
+        assert!(matches!(stale_err, AppError::RevisionConflict));
+        assert!(matches!(repeat_trash_err, AppError::RevisionConflict));
+        assert!(matches!(restore_stale_err, AppError::RevisionConflict));
+        assert!(matches!(repeat_restore_err, AppError::RevisionConflict));
+    }
+
+    #[test]
+    fn fts_filter_does_not_mix_in_like_scan() {
+        let mut filter = default_filter();
+        filter.query = Some("search term".to_string());
+
+        let (where_sql, _) = build_filter(&filter, SearchMode::Fts);
+
+        assert!(where_sql.contains("entries_fts MATCH"));
+        assert!(!where_sql.contains(" LIKE "));
     }
 }

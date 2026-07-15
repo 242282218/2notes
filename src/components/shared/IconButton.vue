@@ -23,10 +23,7 @@ defineEmits<{
     type="button"
     @click="$emit('click')"
   >
-    <component
-      :is="icon"
-      :size="18"
-    />
+    <component :is="icon" :size="18" />
     <span class="sr-only">{{ label }}</span>
   </button>
 </template>

@@ -30,12 +30,18 @@ export function entriesUpdate(
   });
 }
 
-export function entriesMoveToTrash(id: string): Promise<EntryDetail> {
-  return invokeCommand("entries_move_to_trash", { id });
+export function entriesMoveToTrash(
+  id: string,
+  expectedRevision: number,
+): Promise<EntryDetail> {
+  return invokeCommand("entries_move_to_trash", { id, expectedRevision });
 }
 
-export function entriesRestoreFromTrash(id: string): Promise<EntryDetail> {
-  return invokeCommand("entries_restore_from_trash", { id });
+export function entriesRestoreFromTrash(
+  id: string,
+  expectedRevision: number,
+): Promise<EntryDetail> {
+  return invokeCommand("entries_restore_from_trash", { id, expectedRevision });
 }
 
 export function entriesDeleteForever(id: string): Promise<void> {

@@ -10,7 +10,14 @@ pub fn create_tray(app: &AppHandle) -> AppResult<()> {
     let open_main = MenuItem::with_id(app, "open_main", "打开主窗口", true, None::<&str>)?;
     let quick_capture = MenuItem::with_id(app, "quick_capture", "快速记录", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_main, &quick_capture, &quit])?;
+    let force_quit = MenuItem::with_id(
+        app,
+        "force_quit",
+        "强制退出（放弃未保存内容）",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(app, &[&open_main, &quick_capture, &quit, &force_quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main-tray")
         .tooltip("2notes")
@@ -28,6 +35,7 @@ pub fn create_tray(app: &AppHandle) -> AppResult<()> {
                     log::error!("app_quit_request_failed source={err}");
                 }
             }
+            "force_quit" => app.exit(0),
             _ => {}
         });
 

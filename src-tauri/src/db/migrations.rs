@@ -5,9 +5,13 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::error::{AppError, AppResult};
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("schema/001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("schema/001_init.sql")),
+    (2, include_str!("schema/002_entries_fts.sql")),
+];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
+    let fts5_available = fts5_available(conn)?;
     let tx = conn.transaction()?;
     let applied = load_applied(&tx)?;
     let current_max = MIGRATIONS.last().map(|(version, _)| *version).unwrap_or(0);
@@ -28,6 +32,15 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
                     "数据库迁移校验失败",
                 ));
             }
+            continue;
+        }
+
+        if *version == 2 && !fts5_available {
+            log::warn!("fts5_unavailable migration=2 fallback=like_search");
+            tx.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+                params![version, checksum, now_string()],
+            )?;
             continue;
         }
 
@@ -65,6 +78,19 @@ fn load_applied(conn: &Connection) -> AppResult<HashMap<i64, String>> {
     Ok(applied)
 }
 
+fn fts5_available(conn: &Connection) -> AppResult<bool> {
+    match conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE temp.__fts5_probe USING fts5(value);
+        DROP TABLE temp.__fts5_probe;
+        ",
+    ) {
+        Ok(()) => Ok(true),
+        Err(err) if err.to_string().contains("no such module") => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub fn checksum(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in input.as_bytes() {
@@ -96,7 +122,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
     }
 
     #[test]

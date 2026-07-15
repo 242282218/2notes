@@ -4,7 +4,12 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "src-tauri/target/**", "src/types/generated.ts"],
+    ignores: [
+      "dist/**",
+      "src-tauri/target/**",
+      "src/types/generated.ts",
+      "参考项目/**",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -14,6 +19,10 @@ export default tseslint.config(
       globals: {
         crypto: "readonly",
         document: "readonly",
+        Event: "readonly",
+        FocusEvent: "readonly",
+        HTMLElement: "readonly",
+        HTMLButtonElement: "readonly",
         HTMLInputElement: "readonly",
         HTMLSelectElement: "readonly",
         HTMLTextAreaElement: "readonly",
@@ -21,6 +30,16 @@ export default tseslint.config(
         navigator: "readonly",
         URLSearchParams: "readonly",
         window: "readonly",
+      },
+    },
+  },
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        fetch: "readonly",
+        process: "readonly",
       },
     },
   },
@@ -33,11 +52,16 @@ export default tseslint.config(
     },
   },
   {
-  rules: {
-    "@typescript-eslint/no-empty-object-type": "off",
-    "@typescript-eslint/no-explicit-any": "warn",
-    "vue/multi-word-component-names": "off",
-    "vue/no-v-html": "off",
-  },
+    rules: {
+      "@typescript-eslint/no-empty-object-type": "off",
+      "@typescript-eslint/no-explicit-any": "warn",
+      "vue/html-closing-bracket-newline": "off",
+      "vue/html-indent": "off",
+      "vue/html-self-closing": "off",
+      "vue/max-attributes-per-line": "off",
+      "vue/multi-word-component-names": "off",
+      "vue/no-v-html": "off",
+      "vue/singleline-html-element-content-newline": "off",
+    },
   },
 );

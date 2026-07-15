@@ -1,3 +1,4 @@
+pub mod backups;
 pub mod entries;
 pub mod settings;
 pub mod tags;
@@ -7,6 +8,7 @@ mod tests {
     use ts_rs::{Config, TS};
 
     use super::{
+        backups::BackupInfo,
         entries::{
             EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
             EntryType, PageRequest, TitleSource,
@@ -33,6 +35,7 @@ mod tests {
             AppSettings::decl(&config),
             SettingsPatch::decl(&config),
             ExportResult::decl(&config),
+            BackupInfo::decl(&config),
             AppErrorResponse::decl(&config),
         ]
         .map(|declaration| format!("export {declaration}"));

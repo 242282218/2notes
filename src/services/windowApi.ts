@@ -8,9 +8,6 @@ export function windowHideQuickCapture(): Promise<void> {
   return invokeCommand("window_hide_quick_capture");
 }
 
-export function appQuitReady(
-  requestId: string,
-  windowLabel: string,
-): Promise<void> {
-  return invokeCommand("app_quit_ready", { requestId, windowLabel });
+export function appQuitReady(requestId: string): Promise<void> {
+  return invokeCommand("app_quit_ready", { requestId });
 }
