@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::knowledge::KnowledgeState;
+use super::knowledge::{KnowledgeState, SearchSnippet};
 use super::tags::Tag;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -94,6 +94,7 @@ pub struct EntryListFilter {
     pub query: Option<String>,
     pub entry_type: Option<EntryType>,
     pub status: Option<EntryStatus>,
+    pub knowledge_state: Option<KnowledgeState>,
     pub tag: Option<String>,
     pub include_deleted: bool,
     pub trash_only: bool,
@@ -124,6 +125,7 @@ pub struct EntryListItem {
     pub entry_type: EntryType,
     pub status: EntryStatus,
     pub knowledge_state: KnowledgeState,
+    pub search_snippet: Option<SearchSnippet>,
     pub tags: Vec<Tag>,
     #[ts(type = "number")]
     pub revision: i64,

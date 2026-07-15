@@ -1,8 +1,37 @@
+export type KnowledgeState = "capture" | "knowledge";
+
 export type EntryType = "unclear" | "idea" | "task" | "material" | "question";
 
 export type EntryStatus = "pending" | "done" | "archived";
 
 export type TitleSource = "auto" | "user";
+
+export type KnowledgeSuggestion = {
+  id: string;
+  title: string;
+  matchedAlias: string | null;
+};
+export type RelatedEntry = {
+  id: string;
+  title: string | null;
+  summary: string;
+  occurrenceCount: number;
+  deletedAt: string | null;
+};
+export type UnresolvedWikiLink = { rawTarget: string; occurrenceCount: number };
+export type KnowledgeRelations = {
+  outgoing: Array<RelatedEntry>;
+  backlinks: Array<RelatedEntry>;
+  unresolved: Array<UnresolvedWikiLink>;
+};
+export type SearchSnippetPart = { text: string; highlighted: boolean };
+export type SearchSnippet = { parts: Array<SearchSnippetPart> };
+export type KnowledgeIndexReport = {
+  indexedSources: number;
+  linkOccurrences: number;
+  unresolvedOccurrences: number;
+  searchIndexAvailable: boolean;
+};
 
 export type Tag = {
   id: string;
@@ -16,6 +45,7 @@ export type EntryListFilter = {
   query: string | null;
   entryType: EntryType | null;
   status: EntryStatus | null;
+  knowledgeState: KnowledgeState | null;
   tag: string | null;
   includeDeleted: boolean;
   trashOnly: boolean;
@@ -29,6 +59,8 @@ export type EntryListItem = {
   summary: string;
   entryType: EntryType;
   status: EntryStatus;
+  knowledgeState: KnowledgeState;
+  searchSnippet: SearchSnippet | null;
   tags: Array<Tag>;
   revision: number;
   createdAt: string;
@@ -51,6 +83,9 @@ export type EntryDetail = {
   currentContent: string;
   entryType: EntryType;
   status: EntryStatus;
+  knowledgeState: KnowledgeState;
+  knowledgePromotedAt: string | null;
+  knowledgeAliases: Array<string>;
   tags: Array<Tag>;
   revision: number;
   createdAt: string;

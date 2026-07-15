@@ -558,6 +558,7 @@ mod tests {
             query: None,
             entry_type: None,
             status: None,
+            knowledge_state: None,
             tag: None,
             include_deleted: false,
             trash_only: false,

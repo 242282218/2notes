@@ -14,6 +14,10 @@ mod tests {
             EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
             EntryType, PageRequest, TitleSource,
         },
+        knowledge::{
+            KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
+            RelatedEntry, SearchSnippet, SearchSnippetPart, UnresolvedWikiLink,
+        },
         settings::{AppSettings, Draft, ExportResult, SettingsPatch},
         tags::Tag,
     };
@@ -22,9 +26,17 @@ mod tests {
     fn generated_typescript() -> String {
         let config = Config::default();
         let declarations = [
+            KnowledgeState::decl(&config),
             EntryType::decl(&config),
             EntryStatus::decl(&config),
             TitleSource::decl(&config),
+            KnowledgeSuggestion::decl(&config),
+            RelatedEntry::decl(&config),
+            UnresolvedWikiLink::decl(&config),
+            KnowledgeRelations::decl(&config),
+            SearchSnippetPart::decl(&config),
+            SearchSnippet::decl(&config),
+            KnowledgeIndexReport::decl(&config),
             Tag::decl(&config),
             EntryListFilter::decl(&config),
             PageRequest::decl(&config),

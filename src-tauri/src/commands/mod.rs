@@ -2,6 +2,7 @@ pub mod backups;
 pub mod drafts;
 pub mod entries;
 pub mod export_markdown;
+pub mod knowledge;
 pub mod settings;
 pub mod tags;
 pub mod windows;
@@ -41,5 +42,13 @@ mod tests {
     fn main_window_guard_rejects_quick_capture() {
         assert!(super::require_main_window("main").is_ok());
         assert!(super::require_main_window("quick-capture").is_err());
+    }
+
+    #[test]
+    fn knowledge_commands_reject_quick_capture_window() {
+        let err = super::require_main_window("quick-capture").unwrap_err();
+        assert!(
+            matches!(err, crate::error::AppError::Validation { code, .. } if code == "COMMAND_FORBIDDEN")
+        );
     }
 }

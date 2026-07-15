@@ -8,6 +8,23 @@ pub enum KnowledgeState {
     Knowledge,
 }
 
+impl KnowledgeState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Capture => "capture",
+            Self::Knowledge => "knowledge",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "capture" => Some(Self::Capture),
+            "knowledge" => Some(Self::Knowledge),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeSuggestion {

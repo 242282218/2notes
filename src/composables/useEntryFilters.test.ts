@@ -40,6 +40,9 @@ describe("entryMatchesCurrentFilter", () => {
     currentContent: "当前",
     entryType: "idea",
     status: "pending",
+    knowledgeState: "capture",
+    knowledgePromotedAt: null,
+    knowledgeAliases: [],
     tags: [
       {
         id: "t1",

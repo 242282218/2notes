@@ -51,6 +51,8 @@ pub fn run() {
             commands::entries::entries_move_to_trash,
             commands::entries::entries_restore_from_trash,
             commands::entries::entries_delete_forever,
+            commands::knowledge::knowledge_promote,
+            commands::knowledge::knowledge_demote,
             commands::tags::tags_suggest,
             commands::tags::tags_list,
             commands::settings::settings_get,

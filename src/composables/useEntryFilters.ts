@@ -21,6 +21,7 @@ export function buildEntryFilter(
     query: filters.query.trim() || null,
     entryType: filters.entryType || null,
     status: filters.status || (view === "inbox" ? "pending" : null),
+    knowledgeState: null,
     tag: filters.tag.trim() || null,
     includeDeleted: view === "trash",
     trashOnly: view === "trash",
@@ -57,6 +58,9 @@ export function entryMatchesCurrentFilter(
     return false;
   }
   if (filter.status && entry.status !== filter.status) {
+    return false;
+  }
+  if (filter.knowledgeState && entry.knowledgeState !== filter.knowledgeState) {
     return false;
   }
   if (filter.entryType && entry.entryType !== filter.entryType) {

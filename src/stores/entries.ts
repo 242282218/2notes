@@ -272,6 +272,8 @@ export const useEntriesStore = defineStore("entries", () => {
       summary: updated.currentContent.split(/\s+/).join(" ").slice(0, 120),
       entryType: updated.entryType,
       status: updated.status,
+      knowledgeState: updated.knowledgeState,
+      searchSnippet: null,
       tags: updated.tags,
       revision: updated.revision,
       createdAt: updated.createdAt,

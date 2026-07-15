@@ -546,10 +546,8 @@ fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         deleted_at: row.get(10)?,
-        knowledge_state: match row.get::<_, String>(11)?.as_str() {
-            "knowledge" => KnowledgeState::Knowledge,
-            _ => KnowledgeState::Capture,
-        },
+        knowledge_state: KnowledgeState::from_db(&row.get::<_, String>(11)?)
+            .unwrap_or(KnowledgeState::Capture),
         knowledge_promoted_at: row.get(12)?,
         knowledge_title_key: row.get(13)?,
     })
@@ -695,6 +693,7 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
         entry_type: record.entry_type,
         status: record.status,
         knowledge_state: record.knowledge_state,
+        search_snippet: None,
         tags,
         revision: record.revision,
         created_at: record.created_at,
@@ -733,6 +732,7 @@ mod tests {
             query: None,
             entry_type: None,
             status: None,
+            knowledge_state: None,
             tag: None,
             include_deleted: false,
             trash_only: false,
