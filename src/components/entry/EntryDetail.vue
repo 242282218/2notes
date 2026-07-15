@@ -4,6 +4,7 @@ import { RotateCcw, Trash2 } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
 import { entriesUpdate } from "../../services/entryApi";
+import { knowledgeDemote, knowledgePromote } from "../../services/knowledgeApi";
 import type {
   EntryDetail,
   EntryPatch,
@@ -39,6 +40,7 @@ const baseRevision = ref(0);
 const editingEntryId = ref<string | null>(null);
 const confirmTrash = ref(false);
 const confirmDelete = ref(false);
+const knowledgeError = ref("");
 let initializing = false;
 let syncVersion = 0;
 let titleDirty = false;
@@ -141,6 +143,36 @@ async function flushPendingSave(): Promise<boolean> {
   }
 }
 
+async function promoteToKnowledge() {
+  knowledgeError.value = "";
+  if (!(await flushPendingSave()) || !editingEntryId.value) return;
+  try {
+    const updated = await knowledgePromote(
+      editingEntryId.value,
+      baseRevision.value,
+    );
+    baseRevision.value = updated.revision;
+    emit("saved", updated);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : "沉淀失败";
+  }
+}
+
+async function demoteFromKnowledge() {
+  knowledgeError.value = "";
+  if (!(await flushPendingSave()) || !editingEntryId.value) return;
+  try {
+    const updated = await knowledgeDemote(
+      editingEntryId.value,
+      baseRevision.value,
+    );
+    baseRevision.value = updated.revision;
+    emit("saved", updated);
+  } catch (error) {
+    knowledgeError.value = error instanceof Error ? error.message : "移出失败";
+  }
+}
+
 defineExpose({
   flushPendingSave,
 });
@@ -158,6 +190,25 @@ defineExpose({
           @retry="autosave.retry"
         />
         <div class="toolbar-actions">
+          <button
+            v-if="!detail.deletedAt && detail.knowledgeState === 'capture'"
+            type="button"
+            class="secondary-button"
+            aria-label="沉淀为知识"
+            :disabled="!title.trim()"
+            @click="promoteToKnowledge"
+          >
+            沉淀
+          </button>
+          <button
+            v-if="!detail.deletedAt && detail.knowledgeState === 'knowledge'"
+            type="button"
+            class="secondary-button"
+            aria-label="移出知识库"
+            @click="demoteFromKnowledge"
+          >
+            移出知识库
+          </button>
           <IconButton
             v-if="detail.deletedAt"
             label="恢复"
@@ -180,6 +231,10 @@ defineExpose({
           />
         </div>
       </header>
+
+      <p v-if="knowledgeError" class="error-text" role="alert">
+        {{ knowledgeError }}
+      </p>
 
       <input
         v-model="title"

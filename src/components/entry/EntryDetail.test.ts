@@ -2,11 +2,19 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { entriesUpdate } from "../../services/entryApi";
+import { knowledgePromote } from "../../services/knowledgeApi";
 import type { EntryDetail as EntryDetailType } from "../../types/generated";
 import EntryDetail from "./EntryDetail.vue";
 
 vi.mock("../../services/entryApi", () => ({
   entriesUpdate: vi.fn(),
+}));
+
+vi.mock("../../services/knowledgeApi", () => ({
+  knowledgePromote: vi.fn(),
+  knowledgeDemote: vi.fn(),
+  knowledgeRelationsGet: vi.fn(),
+  knowledgeSuggest: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("../../services/tagApi", () => ({
@@ -17,6 +25,7 @@ describe("EntryDetail", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.mocked(entriesUpdate).mockReset();
+    vi.mocked(knowledgePromote).mockReset();
   });
 
   it("does not convert an untouched automatic title into a user title", async () => {
@@ -105,6 +114,41 @@ describe("EntryDetail", () => {
     expect(
       wrapper.get("select.entry-status-select").attributes("aria-label"),
     ).toBe("状态");
+  });
+
+  it("flushes edits before promoting the same entry", async () => {
+    const detail = entry();
+    vi.mocked(entriesUpdate).mockResolvedValue({
+      ...detail,
+      title: "确认后的标题",
+      titleSource: "user",
+      revision: 1,
+    });
+    vi.mocked(knowledgePromote).mockResolvedValue({
+      ...detail,
+      title: "确认后的标题",
+      titleSource: "user",
+      knowledgeState: "knowledge",
+      knowledgePromotedAt: "2026-07-15T00:00:00Z",
+      revision: 2,
+    });
+    const wrapper = mount(EntryDetail, { props: { detail, loading: false } });
+    await flushPromises();
+    await wrapper.get("input.title-input").setValue("确认后的标题");
+    await wrapper.get('button[aria-label="沉淀为知识"]').trigger("click");
+    await flushPromises();
+    expect(entriesUpdate).toHaveBeenCalled();
+    expect(knowledgePromote).toHaveBeenCalledWith(detail.id, 1);
+  });
+
+  it("disables promotion for an empty title", async () => {
+    const wrapper = mount(EntryDetail, {
+      props: { detail: { ...entry(), title: null }, loading: false },
+    });
+    await flushPromises();
+    expect(
+      wrapper.get('button[aria-label="沉淀为知识"]').attributes(),
+    ).toHaveProperty("disabled");
   });
 });
 
