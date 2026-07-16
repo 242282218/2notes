@@ -8,10 +8,10 @@ use rusqlite::{params, Connection};
 
 use crate::{
     app_state::AppState,
-    db::connection::open_database,
+    db::{connection::open_database, repos::KnowledgeRepo},
     error::{AppError, AppResult},
     files::{paths::AppPaths, timestamps::now_string},
-    types::backups::BackupInfo,
+    types::{backups::BackupInfo, knowledge::KnowledgeIndexReport},
 };
 
 const BACKUP_PREFIX: &str = "2notes";
@@ -57,14 +57,27 @@ pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<Backu
         let before_restore = create_backup(&paths, &current_write, "before_restore")?;
         let snapshot_path: PathBuf = PathBuf::from(&before_restore.path);
         let rollback_path = paths.database_path.with_extension("restore.bak");
-        let old_write = std::mem::replace(&mut *current_write, Connection::open_in_memory()?);
-        let old_read = std::mem::replace(&mut *current_read, Connection::open_in_memory()?);
+        let placeholder_write = Connection::open_in_memory()?;
+        let placeholder_read = Connection::open_in_memory()?;
+        let (old_write, old_read) = swap_live_connections(
+            &mut current_write,
+            &mut current_read,
+            placeholder_write,
+            placeholder_read,
+        );
         drop(old_read);
         drop(old_write);
 
         match replace_database_file(&paths.database_path, &restore_temp) {
-            Ok(_) => match open_database(&paths.database_path) {
-                Ok((write_conn, read_conn)) => {
+            Ok(_) => match reopen_restored_database(&paths.database_path) {
+                Ok((write_conn, read_conn, report)) => {
+                    log::info!(
+                        "backup_restore_indexes_rebuilt indexed_sources={} links={} unresolved={} search={}",
+                        report.indexed_sources,
+                        report.link_occurrences,
+                        report.unresolved_occurrences,
+                        report.search_index_available,
+                    );
                     *current_write = write_conn;
                     *current_read = read_conn;
                     if let Err(err) = cleanup_rollback(&rollback_path) {
@@ -109,6 +122,18 @@ pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<Backu
     backup_info(&source, infer_kind(&source).unwrap_or("manual"))
 }
 
+fn swap_live_connections(
+    current_write: &mut Connection,
+    current_read: &mut Connection,
+    placeholder_write: Connection,
+    placeholder_read: Connection,
+) -> (Connection, Connection) {
+    (
+        std::mem::replace(current_write, placeholder_write),
+        std::mem::replace(current_read, placeholder_read),
+    )
+}
+
 fn recover_live_connections(
     paths: &AppPaths,
     rollback_path: &Path,
@@ -116,25 +141,60 @@ fn recover_live_connections(
     current_write: &mut Connection,
     current_read: &mut Connection,
 ) -> AppResult<()> {
-    if paths.database_path.is_file() {
-        if let Ok((write_conn, read_conn)) = open_database(&paths.database_path) {
-            *current_write = write_conn;
-            *current_read = read_conn;
-            return Ok(());
+    let mut recovery_error = None;
+    if rollback_path.is_file() {
+        match rollback_database_file(&paths.database_path, rollback_path)
+            .and_then(|_| open_database(&paths.database_path))
+        {
+            Ok((write_conn, read_conn)) => {
+                *current_write = write_conn;
+                *current_read = read_conn;
+                return Ok(());
+            }
+            Err(err) => {
+                log::error!("backup_restore_rollback_recovery_failed source={err}");
+                recovery_error = Some(err);
+            }
         }
     }
-    if rollback_path.is_file() {
-        rollback_database_file(&paths.database_path, rollback_path)?;
-        let (write_conn, read_conn) = open_database(&paths.database_path)?;
-        *current_write = write_conn;
-        *current_read = read_conn;
-        return Ok(());
+    if snapshot_path.is_file() {
+        match restore_from_snapshot(&paths.database_path, snapshot_path)
+            .and_then(|_| open_database(&paths.database_path))
+        {
+            Ok((write_conn, read_conn)) => {
+                *current_write = write_conn;
+                *current_read = read_conn;
+                return Ok(());
+            }
+            Err(err) => {
+                log::error!("backup_restore_snapshot_recovery_failed source={err}");
+                recovery_error = Some(err);
+            }
+        }
     }
-    restore_from_snapshot(&paths.database_path, snapshot_path)?;
-    let (write_conn, read_conn) = open_database(&paths.database_path)?;
-    *current_write = write_conn;
-    *current_read = read_conn;
-    Ok(())
+    if paths.database_path.is_file() {
+        match open_database(&paths.database_path) {
+            Ok((write_conn, read_conn)) => {
+                *current_write = write_conn;
+                *current_read = read_conn;
+                return Ok(());
+            }
+            Err(err) => {
+                log::error!("backup_restore_current_recovery_failed source={err}");
+                recovery_error = Some(err);
+            }
+        }
+    }
+    Err(recovery_error
+        .unwrap_or_else(|| AppError::system("BACKUP_RECOVERY_FAILED", "恢复数据库连接失败")))
+}
+
+fn reopen_restored_database(
+    database_path: &Path,
+) -> AppResult<(Connection, Connection, KnowledgeIndexReport)> {
+    let (mut write_conn, read_conn) = open_database(database_path)?;
+    let report = KnowledgeRepo::rebuild_all_indexes(&mut write_conn)?;
+    Ok((write_conn, read_conn, report))
 }
 
 fn normalize_kind(kind: &str) -> AppResult<&'static str> {
@@ -362,8 +422,15 @@ mod tests {
     use super::*;
     use crate::{
         app_state::AppState,
-        db::{connection::open_database, migrations::now_string, repos::EntriesRepo},
-        types::entries::{EntryListFilter, PageRequest},
+        db::{
+            connection::{open_database, open_in_memory},
+            migrations::{checksum, now_string},
+            repos::{EntriesRepo, KnowledgeRepo},
+        },
+        types::{
+            entries::{EntryListFilter, EntryPatch, PageRequest},
+            knowledge::KnowledgeState,
+        },
     };
 
     #[test]
@@ -401,6 +468,165 @@ mod tests {
         let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "before backup");
+    }
+
+    #[test]
+    fn restores_legacy_v2_backup_and_migrates_knowledge_schema() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        let (write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let legacy = paths.backup_dir.join("2notes-legacy-manual.sqlite");
+        create_legacy_v2_database(&legacy);
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        restore_backup(&state, &legacy.display().to_string()).unwrap();
+
+        let conn = state.read_conn().unwrap();
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let row: (String, String, i64, String) = conn
+            .query_row(
+                "SELECT current_content, original_content, revision, knowledge_state
+                 FROM entries WHERE id = 'legacy-entry'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let knowledge_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('entry_aliases', 'entry_links')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(version, 4);
+        assert_eq!(
+            row,
+            (
+                "current legacy".into(),
+                "original legacy".into(),
+                7,
+                "capture".into()
+            )
+        );
+        assert_eq!(knowledge_tables, 2);
+    }
+
+    #[test]
+    fn restore_rebuilds_knowledge_indexes_from_truth_data() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let (mut write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let now = now_string();
+        let tx = write_conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "旧标题", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let target = EntriesRepo::update(
+            &tx,
+            &target.id,
+            EntryPatch {
+                title: Some("新标题".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            target.revision,
+            &now,
+        )
+        .unwrap();
+        let source = EntriesRepo::create(&tx, "[[旧标题]] 再次 [[旧标题]]", &now).unwrap();
+        tx.commit().unwrap();
+        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup_conn = Connection::open(&backup.path).unwrap();
+        backup_conn.execute("DELETE FROM entry_links", []).unwrap();
+        backup_conn
+            .execute(
+                "INSERT INTO entry_links(
+                   source_entry_id, ordinal, raw_target, normalized_target, target_entry_id
+                 ) VALUES (?1, 99, '坏数据', '坏数据', NULL)",
+                [&source.id],
+            )
+            .unwrap();
+        backup_conn.execute("DELETE FROM entries_fts", []).unwrap();
+        backup_conn
+            .execute(
+                "INSERT INTO entries_fts(
+                   entry_id, title, original_content, current_content, tags_text, aliases_text
+                 ) VALUES ('bogus', '坏数据', '坏数据', '坏数据', '', '')",
+                [],
+            )
+            .unwrap();
+        drop(backup_conn);
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        restore_backup(&state, &backup.path).unwrap();
+
+        let conn = state.read_conn().unwrap();
+        let restored = EntriesRepo::get(&conn, &target.id).unwrap();
+        let relations = KnowledgeRepo::relations(&conn, &target.id).unwrap();
+        let mut filter = default_filter();
+        filter.query = Some("旧标题".to_string());
+        filter.knowledge_state = Some(KnowledgeState::Knowledge);
+        let search = EntriesRepo::list(&conn, &filter, &default_page()).unwrap();
+        let bogus_links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_links WHERE raw_target = '坏数据'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let bogus_search: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE entry_id = 'bogus'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(restored.knowledge_state, KnowledgeState::Knowledge);
+        assert_eq!(restored.knowledge_aliases, vec!["旧标题"]);
+        assert_eq!(relations.backlinks.len(), 1);
+        assert_eq!(relations.backlinks[0].id, source.id);
+        assert_eq!(relations.backlinks[0].occurrence_count, 2);
+        assert!(search.items.iter().any(|entry| entry.id == target.id));
+        assert_eq!(bogus_links, 0);
+        assert_eq!(bogus_search, 0);
+    }
+
+    #[test]
+    fn restore_rebuild_failure_rolls_back_live_database() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let (mut write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "live entry", &now_string()).unwrap();
+        tx.commit().unwrap();
+        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "live only after backup", &now_string()).unwrap();
+        tx.commit().unwrap();
+        let backup_conn = Connection::open(&backup.path).unwrap();
+        backup_conn.execute("DROP TABLE entry_links", []).unwrap();
+        drop(backup_conn);
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        let result = restore_backup(&state, &backup.path);
+
+        assert!(result.is_err());
+        let conn = state.read_conn().unwrap();
+        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page
+            .items
+            .iter()
+            .any(|entry| entry.summary == "live only after backup"));
     }
 
     #[test]
@@ -524,6 +750,61 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "rollback entry");
     }
+
+    #[test]
+    fn recovery_prefers_snapshot_over_openable_candidate_when_rollback_is_missing() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let (mut write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "snapshot entry", &now_string()).unwrap();
+        tx.commit().unwrap();
+        let snapshot = create_backup(&paths, &write_conn, "before_restore").unwrap();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "candidate only", &now_string()).unwrap();
+        tx.commit().unwrap();
+        drop(read_conn);
+        drop(write_conn);
+        let rollback_path = paths.database_path.with_extension("restore.bak");
+        assert!(!rollback_path.exists());
+        let mut current_write = Connection::open_in_memory().unwrap();
+        let mut current_read = Connection::open_in_memory().unwrap();
+
+        recover_live_connections(
+            &paths,
+            &rollback_path,
+            Path::new(&snapshot.path),
+            &mut current_write,
+            &mut current_read,
+        )
+        .unwrap();
+
+        let page = EntriesRepo::list(&current_read, &default_filter(), &default_page()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].summary, "snapshot entry");
+    }
+
+    #[test]
+    fn live_connection_swap_installs_both_prebuilt_placeholders() {
+        let (mut current_write, mut current_read) = open_in_memory().unwrap();
+        let tx = current_write.transaction().unwrap();
+        EntriesRepo::create(&tx, "old live entry", &now_string()).unwrap();
+        tx.commit().unwrap();
+        let placeholder_write = Connection::open_in_memory().unwrap();
+        let placeholder_read = Connection::open_in_memory().unwrap();
+
+        let (_old_write, old_read) = swap_live_connections(
+            &mut current_write,
+            &mut current_read,
+            placeholder_write,
+            placeholder_read,
+        );
+
+        let page = EntriesRepo::list(&old_read, &default_filter(), &default_page()).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert!(current_read.prepare("SELECT 1 FROM entries").is_err());
+    }
+
     #[test]
     fn backup_metadata_parses_timestamp_and_collision_kind() {
         let paths = test_paths();
@@ -542,6 +823,33 @@ mod tests {
         )
         .is_ok());
     }
+
+    fn create_legacy_v2_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        let migration_1 = include_str!("../db/schema/001_init.sql");
+        let migration_2 = include_str!("../db/schema/002_entries_fts.sql");
+        conn.execute_batch(migration_1).unwrap();
+        conn.execute_batch(migration_2).unwrap();
+        let now = "2026-07-01T00:00:00Z";
+        conn.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at)
+             VALUES (1, ?1, ?3), (2, ?2, ?3)",
+            params![checksum(migration_1), checksum(migration_2), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content,
+               type, status, revision, created_at, updated_at, deleted_at
+             ) VALUES (
+               'legacy-entry', 'Legacy', 'user', 'original legacy', 'current legacy',
+               'material', 'archived', 7, ?1, ?1, NULL
+             )",
+            [now],
+        )
+        .unwrap();
+    }
+
     fn test_paths() -> AppPaths {
         let temp = tempfile::tempdir().unwrap().keep();
         AppPaths {

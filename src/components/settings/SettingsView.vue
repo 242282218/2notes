@@ -106,13 +106,27 @@ async function confirmRestore() {
   backupMessage.value = "";
   backupError.value = "";
   try {
-    await backupsRestore(backup.path);
+    try {
+      await backupsRestore(backup.path);
+    } catch (error) {
+      backupError.value =
+        error instanceof Error ? error.message : "恢复备份失败";
+      return;
+    }
     backupMessage.value = `已恢复备份：${backup.fileName}`;
-    await loadBackups();
-    await entriesStore.load();
-    await entriesStore.refreshTags();
-  } catch (error) {
-    backupError.value = error instanceof Error ? error.message : "恢复备份失败";
+    entriesStore.noteExternalChange();
+    try {
+      await Promise.all([
+        loadBackups(),
+        entriesStore.load(),
+        entriesStore.refreshTags(),
+      ]);
+      if (entriesStore.error) {
+        throw new Error(entriesStore.error);
+      }
+    } catch {
+      backupError.value = "恢复成功，但界面刷新失败";
+    }
   } finally {
     backupBusy.value = false;
     pendingRestoreBackup.value = null;

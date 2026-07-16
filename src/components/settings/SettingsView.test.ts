@@ -2,10 +2,15 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { backupsList } from "../../services/backupApi";
+import { backupsList, backupsRestore } from "../../services/backupApi";
 import { knowledgeRebuildIndex } from "../../services/knowledgeApi";
 import { settingsGet } from "../../services/settingsApi";
-import type { AppSettings, KnowledgeIndexReport } from "../../types/generated";
+import { useEntriesStore } from "../../stores/entries";
+import type {
+  AppSettings,
+  BackupInfo,
+  KnowledgeIndexReport,
+} from "../../types/generated";
 import SettingsView from "./SettingsView.vue";
 
 vi.mock("../../services/backupApi", () => ({
@@ -35,6 +40,7 @@ describe("SettingsView", () => {
     setActivePinia(createPinia());
     vi.mocked(settingsGet).mockResolvedValue(baseSettings);
     vi.mocked(backupsList).mockResolvedValue([]);
+    vi.mocked(backupsRestore).mockReset();
     vi.mocked(knowledgeRebuildIndex).mockReset();
   });
 
@@ -89,6 +95,38 @@ describe("SettingsView", () => {
 
     expect(wrapper.get('[role="alert"]').text()).toBe("索引失败");
   });
+
+  it("keeps restored data invalidated when interface refresh fails", async () => {
+    vi.mocked(backupsList).mockResolvedValue([backup]);
+    vi.mocked(backupsRestore).mockResolvedValue(backup);
+    const entriesStore = useEntriesStore();
+    const load = vi.spyOn(entriesStore, "load").mockImplementation(async () => {
+      entriesStore.error = "加载失败";
+    });
+    const refreshTags = vi
+      .spyOn(entriesStore, "refreshTags")
+      .mockResolvedValue(undefined);
+    const noteExternalChange = vi.spyOn(entriesStore, "noteExternalChange");
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "恢复")!
+      .trigger("click");
+    await wrapper
+      .findAll(".modal-actions button")
+      .find((button) => button.text() === "确认恢复")!
+      .trigger("click");
+    await flushPromises();
+
+    expect(backupsRestore).toHaveBeenCalledWith(backup.path);
+    expect(noteExternalChange).toHaveBeenCalledOnce();
+    expect(load).toHaveBeenCalledOnce();
+    expect(refreshTags).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain(`已恢复备份：${backup.fileName}`);
+    expect(wrapper.text()).toContain("恢复成功，但界面刷新失败");
+  });
 });
 
 const baseSettings: AppSettings = {
@@ -99,6 +137,14 @@ const baseSettings: AppSettings = {
   shortcutRegistered: true,
   shortcutError: null,
   autostartEnabled: false,
+};
+
+const backup: BackupInfo = {
+  path: "backups/backup.sqlite",
+  fileName: "backup.sqlite",
+  kind: "manual",
+  createdAt: "2026-07-16T00:00:00Z",
+  sizeBytes: 1024,
 };
 
 function report(searchIndexAvailable: boolean): KnowledgeIndexReport {

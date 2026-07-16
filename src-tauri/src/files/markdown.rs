@@ -20,6 +20,9 @@ struct Frontmatter {
     #[serde(rename = "type")]
     entry_type: String,
     status: String,
+    knowledge_state: String,
+    knowledge_promoted_at: Option<String>,
+    aliases: Vec<String>,
     tags: Vec<String>,
     created_at: String,
     updated_at: String,
@@ -73,6 +76,9 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         id: entry.id.clone(),
         entry_type: entry.entry_type.as_str().to_string(),
         status: entry.status.as_str().to_string(),
+        knowledge_state: entry.knowledge_state.as_str().to_string(),
+        knowledge_promoted_at: entry.knowledge_promoted_at.clone(),
+        aliases: entry.knowledge_aliases.clone(),
         tags: entry.tags.iter().map(|tag| tag.name.clone()).collect(),
         created_at: entry.created_at.clone(),
         updated_at: entry.updated_at.clone(),
@@ -135,7 +141,11 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir
 mod tests {
     use super::*;
     use crate::{
-        db::{connection::open_in_memory, migrations::now_string, repos::EntriesRepo},
+        db::{
+            connection::open_in_memory,
+            migrations::now_string,
+            repos::{EntriesRepo, KnowledgeRepo},
+        },
         types::entries::{EntryPatch, EntryStatus},
     };
 
@@ -177,6 +187,57 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .contains('<'));
+    }
+
+    #[test]
+    fn exports_knowledge_metadata() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "[[关联标题]] 正文", &now).unwrap();
+        let entry = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: Some("旧标题".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+        EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: Some("新标题".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = export_all(&conn, dir.path()).unwrap();
+        let content = fs::read_to_string(&paths[0]).unwrap();
+        let parsed: Frontmatter =
+            serde_json::from_str(content.split("---").nth(1).unwrap()).unwrap();
+
+        assert_eq!(parsed.knowledge_state, "knowledge");
+        assert_eq!(parsed.knowledge_promoted_at.as_deref(), Some(now.as_str()));
+        assert_eq!(parsed.aliases, vec!["旧标题"]);
+        assert!(content.contains("\"aliases\""));
+        assert!(!content.contains("\"knowledge_aliases\""));
+        assert!(content.contains("\n\n[[关联标题]] 正文\n\n---"));
     }
 
     #[test]
