@@ -40,17 +40,26 @@ export const useEntriesStore = defineStore("entries", () => {
   const loading = ref(false);
   const detailLoading = ref(false);
   const error = ref<string | null>(null);
+  const externalChangeToken = ref(0);
   const hasMore = ref(false);
   const offset = ref(0);
   const limit = 50;
   let loadRequestId = 0;
   let selectRequestId = 0;
+  let openRequestId = 0;
 
   const selectedItem = computed(() =>
     items.value.find((item) => item.id === selectedId.value),
   );
 
   async function load(resetPage = true) {
+    await loadEntries(resetPage);
+  }
+
+  async function loadEntries(
+    resetPage = true,
+    isCurrent: () => boolean = () => true,
+  ) {
     const requestId = ++loadRequestId;
     loading.value = true;
     error.value = null;
@@ -64,7 +73,7 @@ export const useEntriesStore = defineStore("entries", () => {
         limit,
         offset: requestOffset,
       });
-      if (requestId !== loadRequestId) {
+      if (requestId !== loadRequestId || !isCurrent()) {
         return;
       }
       items.value = resetPage ? page.items : [...items.value, ...page.items];
@@ -80,7 +89,7 @@ export const useEntriesStore = defineStore("entries", () => {
         selectedId.value = null;
       }
     } catch (loadError) {
-      if (requestId === loadRequestId) {
+      if (requestId === loadRequestId && isCurrent()) {
         error.value =
           loadError instanceof Error ? loadError.message : "加载失败";
       }
@@ -108,6 +117,7 @@ export const useEntriesStore = defineStore("entries", () => {
   }
 
   async function select(id: string) {
+    openRequestId += 1;
     const requestId = ++selectRequestId;
     selectedId.value = id;
     detail.value = null;
@@ -127,6 +137,53 @@ export const useEntriesStore = defineStore("entries", () => {
       }
     } finally {
       if (requestId === selectRequestId) {
+        detailLoading.value = false;
+      }
+    }
+  }
+
+  function noteExternalChange() {
+    externalChangeToken.value += 1;
+  }
+
+  async function openEntry(id: string) {
+    const requestId = ++openRequestId;
+    const selectionRequestId = ++selectRequestId;
+    error.value = null;
+    detailLoading.value = true;
+    try {
+      const entry = await entriesGet(id);
+      if (requestId !== openRequestId) {
+        return;
+      }
+      view.value = entry.deletedAt
+        ? "trash"
+        : entry.knowledgeState === "knowledge"
+          ? "knowledge"
+          : entry.status === "pending"
+            ? "inbox"
+            : "search";
+      Object.assign(filters, { query: "", entryType: "", status: "", tag: "" });
+      selectedId.value = id;
+      detail.value = null;
+      await loadEntries(true, () => requestId === openRequestId);
+      if (
+        requestId !== openRequestId ||
+        selectionRequestId !== selectRequestId
+      ) {
+        return;
+      }
+      selectedId.value = id;
+      detail.value = entry;
+      if (!items.value.some((item) => item.id === id)) {
+        items.value = [toListItem(entry), ...items.value];
+      }
+    } catch (openError) {
+      if (requestId === openRequestId) {
+        error.value = getErrorMessage(openError, "打开关联条目失败");
+      }
+    } finally {
+      if (requestId === openRequestId) {
         detailLoading.value = false;
       }
     }
@@ -266,7 +323,11 @@ export const useEntriesStore = defineStore("entries", () => {
       }
       return;
     }
-    const listItem: EntryListItem = {
+    items.value.splice(index, 1, toListItem(updated));
+  }
+
+  function toListItem(updated: EntryDetail): EntryListItem {
+    return {
       id: updated.id,
       title: updated.title,
       summary: updated.currentContent.split(/\s+/).join(" ").slice(0, 120),
@@ -280,7 +341,6 @@ export const useEntriesStore = defineStore("entries", () => {
       updatedAt: updated.updatedAt,
       deletedAt: updated.deletedAt,
     };
-    items.value.splice(index, 1, listItem);
   }
 
   function matchesCurrentFilter(entry: EntryDetail) {
@@ -299,11 +359,14 @@ export const useEntriesStore = defineStore("entries", () => {
     loading,
     detailLoading,
     error,
+    externalChangeToken,
     hasMore,
     load,
     loadMore,
     refreshTags,
     select,
+    openEntry,
+    noteExternalChange,
     updateSelected,
     applySavedEntry,
     moveSelectedToTrash,

@@ -347,6 +347,56 @@ button:disabled {
   white-space: pre-wrap;
 }
 
+.knowledge-relations {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dbe2e6;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.knowledge-relations h3,
+.knowledge-relations h4,
+.knowledge-relations ul,
+.knowledge-relations p {
+  margin: 0;
+}
+
+.relation-group,
+.relation-group ul {
+  display: grid;
+  gap: 6px;
+}
+
+.relation-group ul {
+  padding: 0;
+  list-style: none;
+}
+
+.relation-group button,
+.unresolved-relation {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #e3eaee;
+  border-radius: 6px;
+  color: #172026;
+  background: #f9fbfb;
+  text-align: left;
+}
+
+.relation-group button:hover {
+  border-color: #b8cbd1;
+  background: #eef6f6;
+}
+
+.relation-group small,
+.knowledge-relations-state {
+  color: #718188;
+}
+
 .tag-input {
   position: relative;
   display: flex;

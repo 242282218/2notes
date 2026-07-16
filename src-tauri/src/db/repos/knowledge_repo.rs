@@ -3,14 +3,20 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::{
-    db::{migrations::now_string, repos::EntriesRepo},
+    db::{
+        migrations::now_string,
+        repos::{entries_repo::entry_summary, EntriesRepo},
+    },
     error::{AppError, AppResult},
     knowledge::wiki_links::{
         canonicalize_knowledge_title, normalize_knowledge_title, parse_wiki_links,
     },
     types::{
         entries::EntryDetail,
-        knowledge::{KnowledgeIndexReport, KnowledgeSuggestion},
+        knowledge::{
+            KnowledgeIndexReport, KnowledgeRelations, KnowledgeSuggestion, RelatedEntry,
+            UnresolvedWikiLink,
+        },
     },
 };
 
@@ -76,6 +82,93 @@ impl KnowledgeRepo {
             stmt.query_map(params![normalized, pattern, limit], map_suggestion)?,
         );
         suggestions
+    }
+
+    pub fn relations(conn: &Connection, entry_id: &str) -> AppResult<KnowledgeRelations> {
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM entries WHERE id = ?1",
+                [entry_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(AppError::not_found("条目不存在"));
+        }
+
+        let mut stmt = conn.prepare(
+            "WITH grouped AS (
+                 SELECT target_entry_id, COUNT(*) AS occurrence_count,
+                        MIN(ordinal) AS first_ordinal
+                 FROM entry_links
+                 WHERE source_entry_id = ?1 AND target_entry_id IS NOT NULL
+                 GROUP BY target_entry_id
+             )
+             SELECT e.id, e.title, e.current_content, grouped.occurrence_count, e.deleted_at
+             FROM grouped
+             JOIN entries e ON e.id = grouped.target_entry_id
+             ORDER BY grouped.first_ordinal, e.id",
+        )?;
+        let outgoing = stmt
+            .query_map([entry_id], |row| {
+                let content: String = row.get(2)?;
+                Ok(RelatedEntry {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    summary: entry_summary(&content),
+                    occurrence_count: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = conn.prepare(
+            "WITH grouped AS (
+                 SELECT source_entry_id, COUNT(*) AS occurrence_count
+                 FROM entry_links
+                 WHERE target_entry_id = ?1
+                 GROUP BY source_entry_id
+             )
+             SELECT e.id, e.title, e.current_content, grouped.occurrence_count, e.deleted_at
+             FROM grouped
+             JOIN entries e ON e.id = grouped.source_entry_id
+             ORDER BY e.updated_at DESC, e.id",
+        )?;
+        let backlinks = stmt
+            .query_map([entry_id], |row| {
+                let content: String = row.get(2)?;
+                Ok(RelatedEntry {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    summary: entry_summary(&content),
+                    occurrence_count: row.get(3)?,
+                    deleted_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT raw_target, COUNT(*) AS occurrence_count, MIN(ordinal) AS first_ordinal
+             FROM entry_links
+             WHERE source_entry_id = ?1 AND target_entry_id IS NULL
+             GROUP BY normalized_target, raw_target
+             ORDER BY first_ordinal, normalized_target, raw_target",
+        )?;
+        let unresolved = stmt
+            .query_map([entry_id], |row| {
+                Ok(UnresolvedWikiLink {
+                    raw_target: row.get(0)?,
+                    occurrence_count: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(KnowledgeRelations {
+            outgoing,
+            backlinks,
+            unresolved,
+        })
     }
 
     pub fn promote(
@@ -527,6 +620,48 @@ mod tests {
         assert!(
             matches!(err, AppError::Validation { code, .. } if code == "KNOWLEDGE_TITLE_INVALID")
         );
+    }
+
+    #[test]
+    fn relations_group_occurrences_and_keep_unresolved_links() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "目标", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let source = EntriesRepo::create(
+            &tx,
+            "[[目标]] 再次 [[目标]] 以及 [[缺失]] [[缺失]] [[MISSING]] [[missing]]",
+            &now,
+        )
+        .unwrap();
+        let target = EntriesRepo::move_to_trash(&tx, &target.id, target.revision, &now).unwrap();
+        tx.commit().unwrap();
+
+        let target_relations = KnowledgeRepo::relations(&conn, &target.id).unwrap();
+        assert_eq!(target_relations.backlinks.len(), 1);
+        assert_eq!(target_relations.backlinks[0].id, source.id);
+        assert_eq!(target_relations.backlinks[0].occurrence_count, 2);
+
+        let source_relations = KnowledgeRepo::relations(&conn, &source.id).unwrap();
+        assert_eq!(source_relations.outgoing.len(), 1);
+        assert_eq!(source_relations.outgoing[0].id, target.id);
+        assert_eq!(source_relations.outgoing[0].occurrence_count, 2);
+        assert_eq!(source_relations.outgoing[0].deleted_at, target.deleted_at);
+        assert_eq!(source_relations.unresolved.len(), 3);
+        assert_eq!(source_relations.unresolved[0].raw_target, "缺失");
+        assert_eq!(source_relations.unresolved[0].occurrence_count, 2);
+        assert_eq!(source_relations.unresolved[1].raw_target, "MISSING");
+        assert_eq!(source_relations.unresolved[2].raw_target, "missing");
+    }
+
+    #[test]
+    fn relations_return_not_found_for_missing_entry() {
+        let (conn, _) = open_in_memory().unwrap();
+
+        let err = KnowledgeRepo::relations(&conn, "missing").unwrap_err();
+
+        assert!(matches!(err, AppError::NotFound { .. }));
     }
 
     #[test]

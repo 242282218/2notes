@@ -26,19 +26,25 @@ import IconButton from "../shared/IconButton.vue";
 import SaveState from "../shared/SaveState.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
 import EntryTypeSelect from "./EntryTypeSelect.vue";
+import KnowledgeRelations from "./KnowledgeRelations.vue";
 import TagInput from "./TagInput.vue";
 import WikiLinkSuggestions from "./WikiLinkSuggestions.vue";
 
-const props = defineProps<{
-  detail: EntryDetail | null;
-  loading: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    detail: EntryDetail | null;
+    loading: boolean;
+    refreshToken?: number;
+  }>(),
+  { refreshToken: 0 },
+);
 
 const emit = defineEmits<{
   saved: [entry: EntryDetail];
   trash: [];
   restore: [];
   deleteForever: [];
+  openRelated: [id: string];
 }>();
 
 const title = ref("");
@@ -425,6 +431,13 @@ defineExpose({
         <summary>原始内容</summary>
         <pre>{{ detail.originalContent }}</pre>
       </details>
+
+      <KnowledgeRelations
+        :entry-id="detail.id"
+        :revision="detail.revision"
+        :refresh-token="props.refreshToken"
+        @open-related="emit('openRelated', $event)"
+      />
 
       <ConfirmDialog
         :open="confirmTrash"

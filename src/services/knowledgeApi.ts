@@ -1,11 +1,19 @@
 import { invokeCommand } from "./invoke";
-import type { EntryDetail, KnowledgeSuggestion } from "../types/generated";
+import type {
+  EntryDetail,
+  KnowledgeRelations,
+  KnowledgeSuggestion,
+} from "../types/generated";
 
 export function knowledgeSuggest(
   query: string,
   limit = 10,
 ): Promise<KnowledgeSuggestion[]> {
   return invokeCommand("knowledge_suggest", { query, limit });
+}
+
+export function knowledgeRelationsGet(id: string): Promise<KnowledgeRelations> {
+  return invokeCommand("knowledge_relations_get", { id });
 }
 
 export function knowledgePromote(

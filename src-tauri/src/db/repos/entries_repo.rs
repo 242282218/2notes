@@ -778,19 +778,21 @@ fn tags_for_entry_tx(tx: &Transaction<'_>, entry_id: &str) -> AppResult<Vec<Tag>
     Ok(tags)
 }
 
-fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
-    let summary = record
-        .current_content
+pub(crate) fn entry_summary(content: &str) -> String {
+    content
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
         .take(120)
-        .collect();
+        .collect()
+}
+
+fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
     EntryListItem {
         id: record.id,
         title: record.title,
-        summary,
+        summary: entry_summary(&record.current_content),
         entry_type: record.entry_type,
         status: record.status,
         knowledge_state: record.knowledge_state,
@@ -850,6 +852,16 @@ mod tests {
         assert_eq!(entry.entry_type, EntryType::Unclear);
         assert_eq!(entry.status, EntryStatus::Pending);
         assert_eq!(entry.original_content, "hello world");
+    }
+
+    #[test]
+    fn entry_summary_normalizes_whitespace() {
+        assert_eq!(entry_summary("  一\n二\t三  "), "一 二 三");
+    }
+
+    #[test]
+    fn entry_summary_limits_unicode_characters() {
+        assert_eq!(entry_summary(&"界".repeat(121)), "界".repeat(120));
     }
 
     #[test]

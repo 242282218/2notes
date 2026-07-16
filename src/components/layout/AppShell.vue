@@ -81,6 +81,12 @@ async function selectEntry(id: string) {
   }
 }
 
+async function openRelatedEntry(id: string) {
+  if (await flushDetail()) {
+    await entries.openEntry(id);
+  }
+}
+
 async function changeView(view: AppView) {
   if (await flushDetail()) {
     await entries.setView(view);
@@ -212,10 +218,12 @@ async function setQuery(value: string) {
           ref="detailRef"
           :detail="entries.detail"
           :loading="entries.detailLoading"
+          :refresh-token="entries.externalChangeToken"
           @saved="entries.applySavedEntry"
           @trash="entries.moveSelectedToTrash"
           @restore="entries.restoreSelected"
           @delete-forever="entries.deleteSelectedForever"
+          @open-related="openRelatedEntry"
         />
       </section>
     </section>
