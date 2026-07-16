@@ -564,11 +564,17 @@ fn resolve_target_id(tx: &Transaction<'_>, key: &str) -> AppResult<Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
     use crate::{
-        db::{connection::open_in_memory, migrations::now_string, repos::EntriesRepo},
+        db::{
+            connection::{open_database, open_in_memory},
+            migrations::now_string,
+            repos::EntriesRepo,
+        },
         error::AppError,
         types::{
-            entries::{EntryPatch, EntryStatus},
+            entries::{EntryListFilter, EntryPatch, EntryStatus, PageRequest},
             knowledge::KnowledgeState,
         },
     };
@@ -862,6 +868,117 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sentinel_count, 1);
+    }
+
+    #[test]
+    #[ignore = "10k on-disk scale verification"]
+    fn knowledge_scale_10000_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write_conn, read_conn) = open_database(&database_path).unwrap();
+        let journal_mode: String = write_conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+
+        let now = now_string();
+        let body = "知识库性能验证正文".repeat(55);
+        let tx = write_conn.transaction().unwrap();
+        for index in 0..10_000 {
+            let content =
+                format!("{body} 条目{index} [[知识标题0]] [[知识标题1]] [[缺失目标{index}]]");
+            let entry = EntriesRepo::create(&tx, &content, &now).unwrap();
+            if index < 100 {
+                let titled = EntriesRepo::update(
+                    &tx,
+                    &entry.id,
+                    EntryPatch {
+                        title: Some(format!("知识标题{index}")),
+                        current_content: None,
+                        entry_type: None,
+                        status: None,
+                        tags: None,
+                    },
+                    entry.revision,
+                    &now,
+                )
+                .unwrap();
+                KnowledgeRepo::promote(&tx, &titled.id, titled.revision, &now).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        let rebuild_started = Instant::now();
+        let report = KnowledgeRepo::rebuild_all_indexes(&mut write_conn).unwrap();
+        let rebuild_elapsed = rebuild_started.elapsed();
+        assert_eq!(report.indexed_sources, 10_000);
+        assert_eq!(report.link_occurrences, 30_000);
+
+        let page = PageRequest {
+            limit: Some(50),
+            offset: Some(0),
+        };
+        let search_filter = scale_filter(Some("知识库"), None);
+        let knowledge_filter = scale_filter(None, Some(KnowledgeState::Knowledge));
+        assert!(!EntriesRepo::list(&read_conn, &search_filter, &page)
+            .unwrap()
+            .items
+            .is_empty());
+        assert_eq!(
+            EntriesRepo::list(&read_conn, &knowledge_filter, &page)
+                .unwrap()
+                .items
+                .len(),
+            50
+        );
+
+        let mut search_samples = Vec::with_capacity(20);
+        let mut knowledge_list_samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let result = EntriesRepo::list(&read_conn, &search_filter, &page).unwrap();
+            search_samples.push(started.elapsed());
+            assert!(!result.items.is_empty());
+
+            let started = Instant::now();
+            let result = EntriesRepo::list(&read_conn, &knowledge_filter, &page).unwrap();
+            knowledge_list_samples.push(started.elapsed());
+            assert_eq!(result.items.len(), 50);
+        }
+        let search_p95 = p95(&mut search_samples);
+        let knowledge_list_p95 = p95(&mut knowledge_list_samples);
+        eprintln!(
+            "knowledge_scale_10000_entries rebuild_ms={:.2} search_p95_ms={:.2} knowledge_list_p95_ms={:.2}",
+            rebuild_elapsed.as_secs_f64() * 1000.0,
+            search_p95.as_secs_f64() * 1000.0,
+            knowledge_list_p95.as_secs_f64() * 1000.0,
+        );
+
+        if cfg!(not(debug_assertions)) {
+            assert!(search_p95 < Duration::from_millis(300));
+            assert!(knowledge_list_p95 < Duration::from_millis(300));
+        }
+    }
+
+    fn scale_filter(
+        query: Option<&str>,
+        knowledge_state: Option<KnowledgeState>,
+    ) -> EntryListFilter {
+        EntryListFilter {
+            query: query.map(str::to_string),
+            entry_type: None,
+            status: None,
+            knowledge_state,
+            tag: None,
+            include_deleted: false,
+            trash_only: false,
+        }
+    }
+
+    fn p95(samples: &mut [Duration]) -> Duration {
+        assert!(!samples.is_empty());
+        samples.sort_unstable();
+        samples[(samples.len() * 95 - 1) / 100]
     }
 
     fn entry_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {

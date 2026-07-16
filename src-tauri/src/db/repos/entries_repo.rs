@@ -359,9 +359,10 @@ fn list_with_search(
     let fetch_limit = limit + 1;
 
     let (where_sql, values) = build_filter(filter, search_mode);
-    let (sql, map_row): (
+    let (sql, map_row, snippet_query): (
         String,
         fn(&rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord>,
+        Option<Value>,
     ) = match search_mode {
         SearchMode::Like => (
             format!(
@@ -376,36 +377,23 @@ fn list_with_search(
                 "
             ),
             map_record,
+            None,
         ),
-        SearchMode::Fts => (
-            format!(
-                "
-                WITH search_plan AS (
-                  SELECT e.id, e.title, e.title_source, e.original_content, e.current_content,
-                         e.type, e.status, e.revision, e.created_at, e.updated_at, e.deleted_at,
-                         e.knowledge_state, e.knowledge_promoted_at, e.knowledge_title_key,
-                         bm25(entries_fts, 0.0, 10.0, 1.0, 4.0, 3.0, 6.0) AS rank,
-                         snippet(entries_fts, -1, char(31), char(30), '…', 32) AS search_snippet
-                  FROM entries_fts
-                  JOIN entries e ON e.id = entries_fts.entry_id
-                  {where_sql}
-                  ORDER BY rank ASC, e.updated_at DESC, e.id ASC
-                  LIMIT ? OFFSET ?
-                )
-                SELECT id, title, title_source, original_content, current_content, type, status,
-                       revision, created_at, updated_at, deleted_at,
-                       knowledge_state, knowledge_promoted_at, knowledge_title_key,
-                       search_snippet
-                FROM search_plan
-                ORDER BY rank ASC, updated_at DESC, id ASC
-                "
-            ),
-            map_record_with_search_snippet,
-        ),
+        SearchMode::Fts => {
+            let snippet_query = values.last().cloned();
+            (
+                fts_list_sql(&where_sql),
+                map_record_with_search_snippet,
+                snippet_query,
+            )
+        }
     };
     let mut params = values;
     params.push(Value::Integer(i64::from(fetch_limit)));
     params.push(Value::Integer(i64::from(offset)));
+    if let Some(snippet_query) = snippet_query {
+        params.push(snippet_query);
+    }
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), map_row)?;
@@ -427,6 +415,32 @@ fn list_with_search(
         offset,
         has_more,
     })
+}
+
+fn fts_list_sql(where_sql: &str) -> String {
+    format!(
+        "
+        WITH ranked AS MATERIALIZED (
+          SELECT entries_fts.rowid AS search_rowid, e.id, e.updated_at,
+                 bm25(entries_fts, 0.0, 10.0, 1.0, 4.0, 3.0, 6.0) AS rank
+          FROM entries_fts
+          JOIN entries e ON e.id = entries_fts.entry_id
+          {where_sql}
+          ORDER BY rank ASC, e.updated_at DESC, e.id ASC
+          LIMIT ? OFFSET ?
+        )
+        SELECT e.id, e.title, e.title_source, e.original_content, e.current_content,
+               e.type, e.status, e.revision, e.created_at, e.updated_at, e.deleted_at,
+               e.knowledge_state, e.knowledge_promoted_at, e.knowledge_title_key,
+               (SELECT snippet(entries_fts, -1, char(31), char(30), '…', 32)
+                FROM entries_fts
+                WHERE entries_fts.rowid = ranked.search_rowid
+                  AND entries_fts MATCH ?) AS search_snippet
+        FROM ranked
+        JOIN entries e ON e.id = ranked.id
+        ORDER BY ranked.rank ASC, ranked.updated_at DESC, ranked.id ASC
+        "
+    )
 }
 
 pub fn escape_like(input: &str) -> std::borrow::Cow<'_, str> {
@@ -828,7 +842,13 @@ fn detail(record: EntryRecord, tags: Vec<Tag>, knowledge_aliases: Vec<String>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{connection::open_in_memory, migrations::now_string, repos::KnowledgeRepo};
+    use std::time::{Duration, Instant};
+
+    use crate::db::{
+        connection::{open_database, open_in_memory},
+        migrations::now_string,
+        repos::KnowledgeRepo,
+    };
 
     fn default_filter() -> EntryListFilter {
         EntryListFilter {
@@ -840,6 +860,12 @@ mod tests {
             include_deleted: false,
             trash_only: false,
         }
+    }
+
+    fn p95(samples: &mut [Duration]) -> Duration {
+        assert!(!samples.is_empty());
+        samples.sort_unstable();
+        samples[(samples.len() * 95 - 1) / 100]
     }
 
     #[test]
@@ -1513,6 +1539,147 @@ mod tests {
         assert!(matches!(repeat_trash_err, AppError::RevisionConflict));
         assert!(matches!(restore_stale_err, AppError::RevisionConflict));
         assert!(matches!(repeat_restore_err, AppError::RevisionConflict));
+    }
+
+    #[test]
+    fn search_query_plan_uses_trigram_fts_and_short_queries_use_like() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write_conn, read_conn) = open_database(&database_path).unwrap();
+        let journal_mode: String = read_conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        let tx = write_conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "知识库查询计划证据", &now_string()).unwrap();
+        tx.commit().unwrap();
+
+        let mut fts_filter = default_filter();
+        fts_filter.query = Some("知识库".to_string());
+        let (where_sql, mut values) = build_filter(&fts_filter, SearchMode::Fts);
+        let snippet_query = values.last().cloned().unwrap();
+        let fts_sql = fts_list_sql(&where_sql);
+        values.push(Value::Integer(51));
+        values.push(Value::Integer(0));
+        values.push(snippet_query);
+        let explain_sql = format!("EXPLAIN QUERY PLAN {fts_sql}");
+        let mut stmt = read_conn.prepare(&explain_sql).unwrap();
+        let plan = stmt
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        eprintln!("fts_query_plan={}", plan.join(" | "));
+        assert!(fts_sql.contains("WITH ranked AS MATERIALIZED"));
+        assert!(!fts_sql.contains(" LIKE "));
+        assert!(fts_sql.find("LIMIT ? OFFSET ?").unwrap() < fts_sql.find("snippet(").unwrap());
+        assert!(
+            fts_sql.find("LIMIT ? OFFSET ?").unwrap() < fts_sql.find("e.original_content").unwrap()
+        );
+        assert!(plan
+            .iter()
+            .any(|detail| detail.to_ascii_uppercase().contains("VIRTUAL TABLE")));
+        drop(stmt);
+
+        read_conn
+            .execute("DELETE FROM entries_fts WHERE entry_id = ?1", [&entry.id])
+            .unwrap();
+        let mut short_filter = default_filter();
+        short_filter.query = Some("知识".to_string());
+        let (short_where_sql, _) = build_filter(&short_filter, SearchMode::Like);
+        eprintln!("short_query_filter={short_where_sql}");
+        let result = EntriesRepo::list(
+            &read_conn,
+            &short_filter,
+            &PageRequest {
+                limit: Some(50),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert!(short_where_sql.contains(" LIKE "));
+        assert!(!short_where_sql.contains(" MATCH "));
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, entry.id);
+    }
+
+    #[test]
+    #[ignore = "100-link on-disk save latency verification"]
+    fn saves_one_hundred_wiki_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write_conn, read_conn) = open_database(&database_path).unwrap();
+        let journal_mode: String = write_conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        let links = (0..100)
+            .map(|index| format!("[[目标{index}]]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let tx = write_conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "预热条目", &now_string()).unwrap();
+        tx.commit().unwrap();
+        let tx = write_conn.transaction().unwrap();
+        let mut entry = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: None,
+                current_content: Some(format!("{links}\n预热")),
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now_string(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let mut samples = Vec::with_capacity(20);
+        for index in 0..20 {
+            let content = format!("{links}\n尾缀{index}");
+            let started = Instant::now();
+            let tx = write_conn.transaction().unwrap();
+            entry = EntriesRepo::update(
+                &tx,
+                &entry.id,
+                EntryPatch {
+                    title: None,
+                    current_content: Some(content),
+                    entry_type: None,
+                    status: None,
+                    tags: None,
+                },
+                entry.revision,
+                &now_string(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            samples.push(started.elapsed());
+        }
+
+        let save_p95 = p95(&mut samples);
+        let link_count: i64 = read_conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_links WHERE source_entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        eprintln!(
+            "saves_one_hundred_wiki_links p95_ms={:.2}",
+            save_p95.as_secs_f64() * 1000.0
+        );
+        assert_eq!(entry.revision, 21);
+        assert_eq!(link_count, 100);
+        if cfg!(not(debug_assertions)) {
+            assert!(save_p95 < Duration::from_millis(100));
+        }
     }
 
     #[test]
