@@ -28,12 +28,14 @@
 
 - 快速记录窗口：快捷键呼出、Enter 提交、Esc 隐藏、单份草稿恢复。
 - 主窗口：收集箱、搜索、标签、回收站、设置。
+- 知识库：同一条目可直接沉淀或移出知识库，不复制正文；支持唯一标题和历史标题别名。
+- WikiLink：纯文本正文支持 `[[标题]]` 补全，并展示出链、反向链接及未解析链接。
 - 条目模型：标题、原始内容、当前内容、类型、状态、标签、修订号。
 - 自动保存：详情编辑 debounce 保存，切换条目/视图/退出前会先 flush。
-- 搜索筛选：标题、当前内容、原始内容、标签名；支持类型、状态、标签筛选。
+- 搜索筛选：标题、当前内容、原始内容、标签和历史标题；三字及以上查询使用 trigram FTS 排名与安全片段，一到两字按词回退 LIKE。
 - 回收站：普通删除先移入回收站，永久删除只允许在回收站内发生。
 - Markdown 导出：仅导出未进入回收站的记录，文件名自动清理和避让，不覆盖已有文件。
-- 本地优先：SQLite 主存储，Tauri/Rust 负责本地能力，不做远程遥测。
+- 本地优先：SQLite 是唯一内容真相源；Markdown 仍是单向导出，不与 SQLite 形成双主存储。
 - Windows 集成：系统托盘、开机自启动开关、全局快捷键、安装包构建。
 
 ## 构建产物
@@ -48,8 +50,8 @@ pnpm run tauri:build
 构建完成后会生成：
 
 - 应用可执行文件：`src-tauri/target/release/two_notes.exe`
-- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_0.2.0_x64_en-US.msi`
-- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_0.2.0_x64-setup.exe`
+- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_0.3.0_x64_en-US.msi`
+- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_0.3.0_x64-setup.exe`
 
 这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证真实打包链路。
 
@@ -87,7 +89,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 
 ## 项目状态
 
-第一阶段已完成快速捕获、收集箱、自动保存、搜索筛选、标签、回收站、Markdown 导出、设置页、系统托盘、全局快捷键和 Windows 安装包构建。
+第二阶段已完成本地知识库最小闭环：捕获条目沉淀、`[[标题]]` 补全、出链与反链、历史标题、未解析链接、trigram 搜索、安全命中片段及索引重建；快速捕获和不丢内容仍是基础链路。
 
 最近一次本地验证通过：
 
@@ -101,4 +103,4 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 
 ## 暂不做
 
-第一阶段刻意不做 AI、云同步、多人协作、富文本、附件、提醒日程、账号体系、自动更新和远程上报。先把“快速捕获 + 不丢内容 + 可回捞整理”这条主线做稳。
+当前仍不做块编辑器、图谱、AI、云同步、多人协作、插件、MCP、剪贴板流水、Markdown 双主存储、附件和富文本。先保持“快速捕获 + 不丢内容 + 本地知识闭环”简单可靠。

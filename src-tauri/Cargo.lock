@@ -4503,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "two_notes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "log",
  "rusqlite",

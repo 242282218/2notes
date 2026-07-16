@@ -1,6 +1,6 @@
 [package]
 name = "two_notes"
-version = "0.2.0"
+version = "0.3.0"
 description = "Personal quick capture notes"
 authors = ["2notes"]
 edition = "2021"
