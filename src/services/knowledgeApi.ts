@@ -1,6 +1,7 @@
 import { invokeCommand } from "./invoke";
 import type {
   EntryDetail,
+  KnowledgeIndexReport,
   KnowledgeRelations,
   KnowledgeSuggestion,
 } from "../types/generated";
@@ -14,6 +15,10 @@ export function knowledgeSuggest(
 
 export function knowledgeRelationsGet(id: string): Promise<KnowledgeRelations> {
   return invokeCommand("knowledge_relations_get", { id });
+}
+
+export function knowledgeRebuildIndex(): Promise<KnowledgeIndexReport> {
+  return invokeCommand("knowledge_rebuild_index");
 }
 
 export function knowledgePromote(

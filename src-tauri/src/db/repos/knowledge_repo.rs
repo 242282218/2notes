@@ -5,7 +5,10 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use crate::{
     db::{
         migrations::now_string,
-        repos::{entries_repo::entry_summary, EntriesRepo},
+        repos::{
+            entries_repo::{entries_fts_is_trigram, entry_summary},
+            EntriesRepo,
+        },
     },
     error::{AppError, AppResult},
     knowledge::wiki_links::{
@@ -85,6 +88,7 @@ impl KnowledgeRepo {
     }
 
     pub fn relations(conn: &Connection, entry_id: &str) -> AppResult<KnowledgeRelations> {
+        ensure_link_index_ready(conn)?;
         let exists = conn
             .query_row(
                 "SELECT 1 FROM entries WHERE id = ?1",
@@ -169,6 +173,36 @@ impl KnowledgeRepo {
             backlinks,
             unresolved,
         })
+    }
+
+    pub fn rebuild_all_indexes(conn: &mut Connection) -> AppResult<KnowledgeIndexReport> {
+        match Self::rebuild_all_indexes_inner(conn) {
+            Ok(report) => Ok(report),
+            Err(err) => {
+                log::error!("knowledge_index_rebuild_failed source={err}");
+                Err(AppError::system(
+                    "KNOWLEDGE_INDEX_REBUILD_FAILED",
+                    "知识索引重建失败",
+                ))
+            }
+        }
+    }
+
+    fn rebuild_all_indexes_inner(conn: &mut Connection) -> AppResult<KnowledgeIndexReport> {
+        let search_index_available = entries_fts_is_trigram(conn)?;
+        let tx = conn.transaction()?;
+        let mut report = Self::rebuild_links(&tx)?;
+        if search_index_available {
+            rebuild_fts(&tx)?;
+        }
+        report.search_index_available = search_index_available;
+        tx.execute(
+            "INSERT INTO settings(key, value, updated_at) VALUES (?1, '1', ?2)
+             ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = ?2",
+            params![LINK_INDEX_VERSION_KEY, now_string()],
+        )?;
+        tx.commit()?;
+        Ok(report)
     }
 
     pub fn promote(
@@ -374,11 +408,7 @@ impl KnowledgeRepo {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let search_index_available = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries_fts')",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let search_index_available = entries_fts_is_trigram(tx)?;
         Ok(KnowledgeIndexReport {
             indexed_sources: sources.len() as u32,
             link_occurrences: links as u32,
@@ -398,16 +428,53 @@ impl KnowledgeRepo {
         if current.as_deref() == Some("1") {
             return Ok(());
         }
-        let tx = conn.transaction()?;
-        Self::rebuild_links(&tx)?;
-        tx.execute(
-            "INSERT INTO settings(key, value, updated_at) VALUES (?1, '1', ?2)
-             ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = ?2",
-            params![LINK_INDEX_VERSION_KEY, now_string()],
-        )?;
-        tx.commit()?;
-        Ok(())
+        Self::rebuild_all_indexes(conn).map(|_| ())
     }
+}
+
+fn ensure_link_index_ready(conn: &Connection) -> AppResult<()> {
+    let current = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [LINK_INDEX_VERSION_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if current.as_deref() == Some("1") {
+        return Ok(());
+    }
+    Err(AppError::system(
+        "KNOWLEDGE_INDEX_REBUILD_FAILED",
+        "知识索引未就绪，请重建索引",
+    ))
+}
+
+fn rebuild_fts(tx: &Transaction<'_>) -> AppResult<()> {
+    tx.execute("DELETE FROM entries_fts", [])?;
+    tx.execute(
+        "INSERT INTO entries_fts(
+             entry_id, title, original_content, current_content, tags_text, aliases_text
+         )
+         SELECT
+             e.id,
+             COALESCE(e.title, ''),
+             e.original_content,
+             e.current_content,
+             (
+                 SELECT COALESCE(GROUP_CONCAT(t.name, ' '), '')
+                 FROM entry_tags et
+                 JOIN tags t ON t.id = et.tag_id
+                 WHERE et.entry_id = e.id
+             ),
+             (
+                 SELECT COALESCE(GROUP_CONCAT(ea.alias, ' '), '')
+                 FROM entry_aliases ea
+                 WHERE ea.entry_id = e.id
+             )
+         FROM entries e",
+        [],
+    )?;
+    Ok(())
 }
 
 fn collect_suggestions(
@@ -500,7 +567,10 @@ mod tests {
     use crate::{
         db::{connection::open_in_memory, migrations::now_string, repos::EntriesRepo},
         error::AppError,
-        types::entries::EntryPatch,
+        types::{
+            entries::{EntryPatch, EntryStatus},
+            knowledge::KnowledgeState,
+        },
     };
 
     #[test]
@@ -674,5 +744,138 @@ mod tests {
         assert_eq!(report.indexed_sources, 1);
         assert_eq!(report.link_occurrences, 2);
         assert_eq!(report.unresolved_occurrences, 2);
+    }
+
+    #[test]
+    fn rebuild_all_indexes_does_not_change_entry_rows() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "目标", &now).unwrap();
+        let target = KnowledgeRepo::promote(&tx, &target.id, target.revision, &now).unwrap();
+        let source = EntriesRepo::create(&tx, "[[目标]] 正文", &now).unwrap();
+        EntriesRepo::update(
+            &tx,
+            &source.id,
+            EntryPatch {
+                title: Some("来源".to_string()),
+                current_content: None,
+                entry_type: None,
+                status: Some(EntryStatus::Done),
+                tags: None,
+            },
+            source.revision,
+            &now,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let before = entry_rows(&conn);
+        let report = KnowledgeRepo::rebuild_all_indexes(&mut conn).unwrap();
+        let after = entry_rows(&conn);
+
+        assert_eq!(before, after);
+        assert_eq!(report.indexed_sources, 2);
+        assert_eq!(report.link_occurrences, 1);
+        assert_eq!(target.knowledge_state, KnowledgeState::Knowledge);
+    }
+
+    #[test]
+    fn relations_report_index_not_ready_instead_of_silent_empty() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "正文", &now_string()).unwrap();
+        tx.commit().unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [LINK_INDEX_VERSION_KEY],
+        )
+        .unwrap();
+
+        let err = KnowledgeRepo::relations(&conn, &entry.id).unwrap_err();
+
+        assert!(matches!(
+            err,
+            AppError::System { code, .. } if code == "KNOWLEDGE_INDEX_REBUILD_FAILED"
+        ));
+    }
+
+    #[test]
+    fn rebuild_all_indexes_failure_does_not_write_version_key() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            [LINK_INDEX_VERSION_KEY],
+        )
+        .unwrap();
+        conn.execute("DROP TABLE entry_links", []).unwrap();
+
+        let err = KnowledgeRepo::rebuild_all_indexes(&mut conn).unwrap_err();
+
+        assert!(matches!(
+            err,
+            AppError::System { code, .. } if code == "KNOWLEDGE_INDEX_REBUILD_FAILED"
+        ));
+        let key: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [LINK_INDEX_VERSION_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(key, None);
+    }
+
+    #[test]
+    fn rebuild_all_indexes_does_not_write_legacy_fts() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "legacy search", &now_string()).unwrap();
+        tx.commit().unwrap();
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS entries_fts_entries_insert;
+             DROP TRIGGER IF EXISTS entries_fts_entries_update;
+             DROP TRIGGER IF EXISTS entries_fts_entries_delete;
+             DROP TRIGGER IF EXISTS entries_fts_entry_tags_insert;
+             DROP TRIGGER IF EXISTS entries_fts_entry_tags_delete;
+             DROP TRIGGER IF EXISTS entries_fts_tags_update;
+             DROP TRIGGER IF EXISTS entries_fts_entry_aliases_insert;
+             DROP TRIGGER IF EXISTS entries_fts_entry_aliases_delete;
+             DROP TABLE entries_fts;
+             CREATE VIRTUAL TABLE entries_fts USING fts5(
+               entry_id UNINDEXED, title, original_content, current_content, tags_text
+             );
+             INSERT INTO entries_fts(entry_id, title, original_content, current_content, tags_text)
+             VALUES ('sentinel', 'keep', 'keep', 'keep', 'keep');",
+        )
+        .unwrap();
+
+        let report = KnowledgeRepo::rebuild_all_indexes(&mut conn).unwrap();
+
+        assert!(!report.search_index_available);
+        let sentinel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries_fts WHERE entry_id = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel_count, 1);
+    }
+
+    fn entry_rows(conn: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, title_source, original_content, current_content,
+                        type, status, revision, created_at, updated_at, deleted_at,
+                        knowledge_state, knowledge_promoted_at, knowledge_title_key
+                 FROM entries ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |row| (0..14).map(|index| row.get(index)).collect())
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
     }
 }

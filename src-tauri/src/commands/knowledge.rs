@@ -1,13 +1,13 @@
-use tauri::{State, WebviewWindow};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use crate::{
     app_state::AppState,
-    commands::require_main_window,
+    commands::{require_main_window, run_blocking},
     db::{migrations::now_string, repos::KnowledgeRepo},
     error::{AppErrorResponse, CommandResult},
     types::{
         entries::EntryDetail,
-        knowledge::{KnowledgeRelations, KnowledgeSuggestion},
+        knowledge::{KnowledgeIndexReport, KnowledgeRelations, KnowledgeSuggestion},
     },
 };
 
@@ -33,6 +33,21 @@ pub fn knowledge_relations_get(
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     let conn = state.read_conn().map_err(AppErrorResponse::from)?;
     KnowledgeRepo::relations(&conn, &id).map_err(AppErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn knowledge_rebuild_index(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> CommandResult<KnowledgeIndexReport> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        let mut conn = state.write_conn()?;
+        KnowledgeRepo::rebuild_all_indexes(&mut conn)
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]

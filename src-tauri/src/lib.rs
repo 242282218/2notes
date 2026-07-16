@@ -53,6 +53,7 @@ pub fn run() {
             commands::entries::entries_delete_forever,
             commands::knowledge::knowledge_suggest,
             commands::knowledge::knowledge_relations_get,
+            commands::knowledge::knowledge_rebuild_index,
             commands::knowledge::knowledge_promote,
             commands::knowledge::knowledge_demote,
             commands::tags::tags_suggest,

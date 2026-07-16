@@ -10,9 +10,10 @@ import {
   backupsRestore,
 } from "../../services/backupApi";
 import { exportMarkdown } from "../../services/exportApi";
+import { knowledgeRebuildIndex } from "../../services/knowledgeApi";
 import { useEntriesStore } from "../../stores/entries";
 import { useSettingsStore } from "../../stores/settings";
-import type { BackupInfo } from "../../types/generated";
+import type { BackupInfo, KnowledgeIndexReport } from "../../types/generated";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import IconButton from "../shared/IconButton.vue";
 
@@ -26,6 +27,9 @@ const backupBusy = ref(false);
 const backups = ref<BackupInfo[]>([]);
 const restoreConfirm = ref(false);
 const pendingRestoreBackup = ref<BackupInfo | null>(null);
+const indexBusy = ref(false);
+const indexReport = ref<KnowledgeIndexReport | null>(null);
+const indexError = ref("");
 
 const restoreMessage = computed(() =>
   pendingRestoreBackup.value
@@ -114,6 +118,21 @@ async function confirmRestore() {
     pendingRestoreBackup.value = null;
   }
 }
+
+async function rebuildKnowledgeIndexes() {
+  indexBusy.value = true;
+  indexReport.value = null;
+  indexError.value = "";
+  try {
+    indexReport.value = await knowledgeRebuildIndex();
+    entriesStore.noteExternalChange();
+  } catch (error) {
+    indexError.value = error instanceof Error ? error.message : "索引重建失败";
+  } finally {
+    indexBusy.value = false;
+  }
+}
+
 async function updateAutostart(event: Event) {
   const target = event.target as HTMLInputElement;
   try {
@@ -233,6 +252,30 @@ async function updateAutostart(event: Event) {
       </p>
       <p v-if="backupError" class="error-text">
         {{ backupError }}
+      </p>
+
+      <div class="settings-row">
+        <div>
+          <strong>知识索引</strong>
+          <span>只重建搜索和关联索引，不修改条目正文</span>
+        </div>
+        <button
+          type="button"
+          class="secondary-button"
+          aria-label="重建知识索引"
+          :disabled="indexBusy"
+          @click="rebuildKnowledgeIndexes"
+        >
+          {{ indexBusy ? "重建中…" : "重建索引" }}
+        </button>
+      </div>
+      <p v-if="indexReport" class="success-text">
+        {{
+          `重建完成：来源 ${indexReport.indexedSources}，链接 ${indexReport.linkOccurrences}，未解析 ${indexReport.unresolvedOccurrences}，${indexReport.searchIndexAvailable ? "搜索索引可用" : "搜索索引不可用"}`
+        }}
+      </p>
+      <p v-if="indexError" class="error-text" role="alert">
+        {{ indexError }}
       </p>
 
       <div class="settings-row">
