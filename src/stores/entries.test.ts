@@ -201,6 +201,27 @@ describe("entries store", () => {
     expect(store.detail?.id).toBe("entry-a");
   });
 
+  it("coalesces rapid search queries before calling the backend", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = useEntriesStore();
+      vi.mocked(entriesList).mockResolvedValue(emptyPage());
+
+      void store.setQuery("知");
+      void store.setQuery("知识");
+      void store.setQuery("知识库");
+
+      expect(store.filters.query).toBe("知识库");
+      expect(entriesList).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(entriesList).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the selected entry and exposes trash failures", async () => {
     const store = selectedStore();
     vi.mocked(entriesMoveToTrash).mockRejectedValue(new Error("trash failed"));

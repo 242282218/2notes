@@ -22,6 +22,8 @@ use crate::{
 
 pub struct EntriesRepo;
 
+type EntryRowMapper = fn(&rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord>;
+
 struct EntryRecord {
     id: String,
     title: Option<String>,
@@ -359,11 +361,7 @@ fn list_with_search(
     let fetch_limit = limit + 1;
 
     let (where_sql, values) = build_filter(filter, search_mode);
-    let (sql, map_row, snippet_query): (
-        String,
-        fn(&rusqlite::Row<'_>) -> rusqlite::Result<EntryRecord>,
-        Option<Value>,
-    ) = match search_mode {
+    let (sql, map_row, snippet_query): (String, EntryRowMapper, Option<Value>) = match search_mode {
         SearchMode::Like => (
             format!(
                 "
@@ -422,11 +420,12 @@ fn fts_list_sql(where_sql: &str) -> String {
         "
         WITH ranked AS MATERIALIZED (
           SELECT entries_fts.rowid AS search_rowid, e.id, e.updated_at,
-                 bm25(entries_fts, 0.0, 10.0, 1.0, 4.0, 3.0, 6.0) AS rank
+                 entries_fts.rank AS score
           FROM entries_fts
           JOIN entries e ON e.id = entries_fts.entry_id
           {where_sql}
-          ORDER BY rank ASC, e.updated_at DESC, e.id ASC
+            AND entries_fts.rank MATCH 'bm25(0.0, 10.0, 1.0, 4.0, 3.0, 6.0)'
+          ORDER BY score ASC, e.updated_at DESC, e.id ASC
           LIMIT ? OFFSET ?
         )
         SELECT e.id, e.title, e.title_source, e.original_content, e.current_content,
@@ -438,7 +437,7 @@ fn fts_list_sql(where_sql: &str) -> String {
                   AND entries_fts MATCH ?) AS search_snippet
         FROM ranked
         JOIN entries e ON e.id = ranked.id
-        ORDER BY ranked.rank ASC, ranked.updated_at DESC, ranked.id ASC
+        ORDER BY ranked.score ASC, ranked.updated_at DESC, ranked.id ASC
         "
     )
 }
@@ -803,6 +802,10 @@ pub(crate) fn entry_summary(content: &str) -> String {
 }
 
 fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
+    debug_assert_eq!(
+        record.knowledge_title_key.is_some(),
+        record.knowledge_state == KnowledgeState::Knowledge
+    );
     EntryListItem {
         id: record.id,
         title: record.title,
@@ -820,6 +823,10 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
 }
 
 fn detail(record: EntryRecord, tags: Vec<Tag>, knowledge_aliases: Vec<String>) -> EntryDetail {
+    debug_assert_eq!(
+        record.knowledge_title_key.is_some(),
+        record.knowledge_state == KnowledgeState::Knowledge
+    );
     EntryDetail {
         id: record.id,
         title: record.title,

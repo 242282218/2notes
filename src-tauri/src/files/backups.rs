@@ -257,6 +257,16 @@ fn validate_restore_candidate(path: &Path) -> AppResult<()> {
     validate_2notes_schema(path)?;
     let (write_conn, read_conn) = open_database(path)?;
     drop(read_conn);
+    let foreign_key_violations: i64 =
+        write_conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_violations > 0 {
+        return Err(AppError::validation(
+            "BACKUP_FOREIGN_KEY_FAILED",
+            "备份文件外键一致性校验失败",
+        ));
+    }
     write_conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     drop(write_conn);
     remove_if_exists(&sidecar_path(path, "-wal"))?;
@@ -697,6 +707,26 @@ mod tests {
         let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "still here");
+    }
+
+    #[test]
+    fn restore_rejects_foreign_key_violations() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        let backup = paths.backup_dir.join("2notes-orphan-manual.sqlite");
+        let (conn, read_conn) = open_database(&backup).unwrap();
+        drop(read_conn);
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        conn.execute(
+            "INSERT INTO entry_tags(entry_id, tag_id) VALUES ('missing-entry', 'missing-tag')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = validate_restore_candidate(&backup);
+
+        assert!(result.is_err());
     }
 
     #[test]

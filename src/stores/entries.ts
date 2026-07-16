@@ -25,6 +25,8 @@ import {
   type UiFilters,
 } from "../composables/useEntryFilters";
 
+const SEARCH_DEBOUNCE_MS = 150;
+
 export const useEntriesStore = defineStore("entries", () => {
   const view = ref<AppView>("inbox");
   const filters = reactive<UiFilters>({
@@ -47,6 +49,7 @@ export const useEntriesStore = defineStore("entries", () => {
   let loadRequestId = 0;
   let selectRequestId = 0;
   let openRequestId = 0;
+  let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   const selectedItem = computed(() =>
     items.value.find((item) => item.id === selectedId.value),
@@ -297,12 +300,18 @@ export const useEntriesStore = defineStore("entries", () => {
     await load();
   }
 
-  async function setQuery(value: string, switchView = true) {
+  function setQuery(value: string, switchView = true) {
     filters.query = value;
     if (switchView && value.trim()) {
       view.value = "search";
     }
-    await load();
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+    }
+    searchTimer = setTimeout(() => {
+      searchTimer = null;
+      void load();
+    }, SEARCH_DEBOUNCE_MS);
   }
 
   function getErrorMessage(operationError: unknown, fallback: string) {

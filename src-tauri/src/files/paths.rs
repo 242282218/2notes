@@ -68,7 +68,18 @@ pub fn prepare_paths(
     fs::create_dir_all(&backup_dir)?;
     let database_path = data_dir.join("2notes.sqlite");
     let rollback_path = database_path.with_extension("restore.bak");
-    if !database_path.exists() && rollback_path.exists() {
+    if rollback_path.exists() {
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = database_path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            if sidecar.exists() {
+                fs::remove_file(sidecar)?;
+            }
+        }
+        if database_path.exists() {
+            fs::remove_file(&database_path)?;
+        }
         fs::rename(&rollback_path, &database_path)?;
     }
 
@@ -133,6 +144,30 @@ mod tests {
             "original database"
         );
         assert!(!rollback_path.exists());
+    }
+
+    #[test]
+    fn rolls_back_restore_when_live_and_rollback_databases_both_exist() {
+        let config = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let paths = prepare_paths(config.path(), data.path()).unwrap();
+        let rollback_path = paths.database_path.with_extension("restore.bak");
+        let wal_path = PathBuf::from(format!("{}-wal", paths.database_path.display()));
+        let shm_path = PathBuf::from(format!("{}-shm", paths.database_path.display()));
+        fs::write(&paths.database_path, "partially restored database").unwrap();
+        fs::write(&rollback_path, "original database").unwrap();
+        fs::write(&wal_path, "stale wal").unwrap();
+        fs::write(&shm_path, "stale shm").unwrap();
+
+        let restored = prepare_paths(config.path(), data.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&restored.database_path).unwrap(),
+            "original database"
+        );
+        assert!(!rollback_path.exists());
+        assert!(!wal_path.exists());
+        assert!(!shm_path.exists());
     }
 
     #[test]
