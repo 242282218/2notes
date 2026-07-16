@@ -54,6 +54,7 @@ onMounted(async () => {
       if (await flushDetail()) {
         await entries.load();
         await entries.refreshTags();
+        entries.noteExternalChange();
       }
     });
     await entries.load();
