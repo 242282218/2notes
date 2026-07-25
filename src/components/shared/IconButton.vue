@@ -16,8 +16,8 @@ defineEmits<{
 
 <template>
   <button
-    class="icon-button"
-    :class="{ active, danger }"
+    class="btn-icon"
+    :class="{ 'border-brand text-brand bg-brand-subtle hover:bg-brand-subtle hover:text-brand': active, 'btn-icon-danger': danger }"
     :disabled="disabled"
     :title="label"
     type="button"

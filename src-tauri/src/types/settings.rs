@@ -11,12 +11,14 @@ pub struct AppSettings {
     pub shortcut_registered: bool,
     pub shortcut_error: Option<String>,
     pub autostart_enabled: bool,
+    pub theme_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPatch {
     pub autostart_enabled: Option<bool>,
+    pub theme_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

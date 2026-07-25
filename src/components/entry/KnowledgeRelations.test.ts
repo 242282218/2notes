@@ -51,7 +51,7 @@ describe("KnowledgeRelations", () => {
     await flushPromises();
 
     expect(wrapper.get('[role="alert"]').text()).toBe("加载失败");
-    expect(wrapper.find(".knowledge-relations").exists()).toBe(true);
+    expect(wrapper.find("section").exists()).toBe(true);
   });
 
   it("reports malformed API payloads instead of throwing during render", async () => {

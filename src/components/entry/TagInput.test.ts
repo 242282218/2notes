@@ -98,8 +98,70 @@ describe("TagInput", () => {
     await wrapper.get("input").setValue("wo");
     await flushPromises();
 
-    await wrapper.get(".suggestions button").trigger("click");
+    await wrapper.get("[role='listbox'] button").trigger("click");
 
     expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["work"]]);
+  });
+
+  it("navigates and selects suggestions with the keyboard", async () => {
+    tagsSuggest.mockResolvedValue([
+      {
+        id: "tag-1",
+        name: "work",
+        normalizedName: "work",
+        createdAt: "2026-07-15T00:00:00Z",
+        entryCount: 1,
+      },
+      {
+        id: "tag-2",
+        name: "workshop",
+        normalizedName: "workshop",
+        createdAt: "2026-07-15T00:00:00Z",
+        entryCount: 1,
+      },
+    ]);
+    const wrapper = mount(TagInput, {
+      props: {
+        modelValue: [],
+      },
+    });
+    const input = wrapper.get("input");
+    await input.setValue("wo");
+    await flushPromises();
+
+    const options = wrapper.findAll("[role='option']");
+    expect(options[0].attributes("aria-selected")).toBe("true");
+
+    await input.trigger("keydown", { key: "ArrowDown" });
+    expect(options[1].attributes("aria-selected")).toBe("true");
+
+    await input.trigger("keydown", { key: "Enter" });
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["workshop"]]);
+  });
+
+  it("closes suggestions with Escape", async () => {
+    tagsSuggest.mockResolvedValue([
+      {
+        id: "tag-1",
+        name: "work",
+        normalizedName: "work",
+        createdAt: "2026-07-15T00:00:00Z",
+        entryCount: 1,
+      },
+    ]);
+    const wrapper = mount(TagInput, {
+      props: {
+        modelValue: [],
+      },
+    });
+    await wrapper.get("input").setValue("wo");
+    await flushPromises();
+
+    expect(wrapper.find("[role='listbox']").exists()).toBe(true);
+
+    await wrapper.get("input").trigger("keydown", { key: "Escape" });
+    await flushPromises();
+
+    expect(wrapper.find("[role='listbox']").exists()).toBe(false);
   });
 });

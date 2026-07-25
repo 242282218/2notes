@@ -23,15 +23,22 @@ const label = computed(() => {
 </script>
 
 <template>
-  <span v-if="label" class="save-state" :class="state">
-    <Loader2 v-if="state === 'saving'" :size="14" class="spin" />
+  <span
+    v-if="label"
+    class="inline-flex items-center gap-1.5 rounded-full border border-border-subtle glass-panel px-3.5 py-1.5 text-[13px] font-medium text-text-secondary transition-all duration-150"
+    :class="{
+      'text-success bg-success-subtle border-success/20 animate-pulse-saved': state === 'saved',
+      'text-danger bg-danger/10 border-danger/25': state === 'failed'
+    }"
+  >
+    <Loader2 v-if="state === 'saving'" :size="14" class="animate-spin" />
     <AlertCircle v-else-if="state === 'failed'" :size="14" />
     <CheckCircle2 v-else-if="state === 'saved'" :size="14" />
-    {{ label }}
+    <span>{{ label }}</span>
     <button
       v-if="state === 'failed'"
       type="button"
-      class="save-retry"
+      class="ml-1 font-semibold underline bg-transparent border-none p-0 cursor-pointer text-inherit"
       @click="$emit('retry')"
     >
       重试

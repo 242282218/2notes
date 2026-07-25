@@ -157,44 +157,49 @@ async function hideQuickCapture() {
 </script>
 
 <template>
-  <main class="quick-capture">
-    <header>
-      <strong>快速记录</strong>
-      <span>{{ saving ? "草稿保存中" : "草稿已就绪" }}</span>
-      <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
-    </header>
-    <textarea
-      ref="textareaRef"
-      v-model="content"
-      autofocus
-      :disabled="!hydrated || submitting"
-      placeholder="记下现在这件事"
-      @input="onContentChange"
-      @keydown.enter.exact="onSubmitKeydown"
-      @keydown.esc.prevent="hideQuickCapture"
-    />
-    <footer>
-      <p v-if="error" class="error-text">
-        {{ error }}
-      </p>
-      <span v-else />
-      <div class="quick-actions">
-        <IconButton
-          label="复制"
-          :icon="Clipboard"
-          :disabled="!hydrated"
-          @click="copyContent"
-        />
-        <button
-          type="button"
-          class="primary-button"
-          :disabled="!hydrated || !content.trim() || submitting"
-          @click="submit"
-        >
-          <Send :size="16" />
-          保存
-        </button>
-      </div>
-    </footer>
+  <main class="flex h-screen w-screen items-center justify-center bg-[#101516]/45 p-5 backdrop-blur-[12px] backdrop-brightness-85 animate-fade-in">
+    <section class="grid w-full max-w-[640px] max-h-[calc(100vh-24px)] grid-rows-[auto_minmax(140px,1fr)_auto] gap-4 rounded-2xl border border-border-subtle p-5 glass-panel shadow-[var(--shadow-xl),var(--color-brand-glow)] animate-scale-spring">
+      <header class="flex items-center justify-between gap-3">
+        <div class="flex items-baseline gap-2">
+          <strong class="text-[17px] font-semibold text-text-primary">快速记录</strong>
+          <span class="text-[13px] text-text-tertiary">{{ saving ? "草稿保存中" : "就绪" }}</span>
+        </div>
+        <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
+      </header>
+      <textarea
+        ref="textareaRef"
+        v-model="content"
+        autofocus
+        :disabled="!hydrated || submitting"
+        placeholder="记下现在这件事"
+        class="input-base resize-none p-4 text-[15px] leading-relaxed"
+        @input="onContentChange"
+        @keydown.enter.exact="onSubmitKeydown"
+        @keydown.esc.prevent="hideQuickCapture"
+      />
+      <footer class="flex items-center justify-between gap-3">
+        <p v-if="error" class="text-danger m-0">
+          {{ error }}
+        </p>
+        <span v-else />
+        <div class="flex items-center justify-end gap-2">
+          <IconButton
+            label="复制"
+            :icon="Clipboard"
+            :disabled="!hydrated"
+            @click="copyContent"
+          />
+          <button
+            type="button"
+            class="btn-primary"
+            :disabled="!hydrated || !content.trim() || submitting"
+            @click="submit"
+          >
+            <Send :size="16" />
+            保存
+          </button>
+        </div>
+      </footer>
+    </section>
   </main>
 </template>

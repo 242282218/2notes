@@ -137,6 +137,7 @@ const baseSettings: AppSettings = {
   shortcutRegistered: true,
   shortcutError: null,
   autostartEnabled: false,
+  themeMode: "system",
 };
 
 const backup: BackupInfo = {

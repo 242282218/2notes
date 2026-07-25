@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { RotateCcw, Trash2 } from "lucide-vue-next";
+import { FileText, RotateCcw, Trash2 } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
 import {
@@ -22,6 +22,7 @@ import type {
   KnowledgeSuggestion,
 } from "../../types/generated";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
+import EmptyState from "../shared/EmptyState.vue";
 import IconButton from "../shared/IconButton.vue";
 import SaveState from "../shared/SaveState.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
@@ -311,31 +312,32 @@ defineExpose({
 </script>
 
 <template>
-  <section class="entry-detail">
-    <div v-if="loading" class="empty-state">加载中</div>
-    <div v-else-if="!detail" class="empty-state">选择一条记录</div>
+  <section class="flex flex-col min-w-0 min-h-0 overflow-auto bg-bg-base p-5 gap-4 md:p-6 lg:p-8">
+    <EmptyState v-if="loading" title="加载中" />
+    <EmptyState
+      v-else-if="!detail"
+      :icon="FileText"
+      title="选择一条记录"
+      description="从左侧列表选择一条记录以查看详情"
+    />
     <template v-else>
-      <header class="detail-toolbar">
-        <SaveState
-          :state="autosave.state.value"
-          :error="autosave.error.value"
-          @retry="autosave.retry"
-        />
-        <div class="toolbar-actions">
+      <header class="flex items-center justify-between gap-2">
+        <div class="flex-1"></div>
+        <div class="flex items-center justify-end gap-2">
           <button
             v-if="!detail.deletedAt && detail.knowledgeState === 'capture'"
             type="button"
-            class="secondary-button"
+            class="btn-primary"
             aria-label="沉淀为知识"
             :disabled="!title.trim()"
             @click="promoteToKnowledge"
           >
-            沉淀
+            沉淀为知识
           </button>
           <button
             v-if="!detail.deletedAt && detail.knowledgeState === 'knowledge'"
             type="button"
-            class="secondary-button"
+            class="btn-secondary"
             aria-label="移出知识库"
             @click="demoteFromKnowledge"
           >
@@ -364,72 +366,78 @@ defineExpose({
         </div>
       </header>
 
-      <p v-if="knowledgeError" class="error-text" role="alert">
+      <p v-if="knowledgeError" class="text-danger" role="alert">
         {{ knowledgeError }}
       </p>
 
-      <input
-        v-model="title"
-        class="title-input"
-        type="text"
-        placeholder="标题"
-        aria-label="标题"
-        :disabled="Boolean(detail.deletedAt)"
-      />
-
-      <div class="detail-controls">
-        <EntryTypeSelect
-          v-model="entryType"
+      <article class="grid gap-4 rounded-xl border border-border-subtle bg-bg-elevated p-5 shadow-sm">
+        <input
+          v-model="title"
+          class="h-[48px] w-full bg-transparent text-[24px] font-bold tracking-tight text-text-primary placeholder:text-text-placeholder outline-none ring-focus transition-all duration-150 focus-visible:bg-bg-hover focus-visible:-mx-2 focus-visible:px-2 focus-visible:rounded-md disabled:opacity-55"
+          type="text"
+          placeholder="标题"
+          aria-label="标题"
           :disabled="Boolean(detail.deletedAt)"
         />
-        <EntryStatusSelect
-          v-model="status"
+
+        <div class="grid grid-cols-2 gap-3">
+          <EntryTypeSelect
+            v-model="entryType"
+            :disabled="Boolean(detail.deletedAt)"
+          />
+          <EntryStatusSelect
+            v-model="status"
+            :disabled="Boolean(detail.deletedAt)"
+          />
+        </div>
+
+        <TagInput
+          ref="tagInputRef"
+          v-model="tags"
           :disabled="Boolean(detail.deletedAt)"
         />
-      </div>
 
-      <TagInput
-        ref="tagInputRef"
-        v-model="tags"
-        :disabled="Boolean(detail.deletedAt)"
-      />
+        <div class="relative min-h-[220px]">
+          <textarea
+            ref="contentEditorRef"
+            v-model="currentContent"
+            class="input-base min-h-[240px] resize-y p-4 text-[14px] leading-relaxed font-sans"
+            role="combobox"
+            aria-label="正文"
+            :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
+            :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
+            :aria-controls="
+              wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
+            "
+            :aria-activedescendant="
+              wikiLinkSuggestionsOpen
+                ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
+                : undefined
+            "
+            :disabled="Boolean(detail.deletedAt)"
+            @input="refreshWikiLinkCompletion"
+            @click="refreshWikiLinkCompletion"
+            @keyup="handleWikiLinkKeyup"
+            @keydown="handleWikiLinkKeydown"
+            @blur="resetWikiLinkCompletion"
+          />
+          <WikiLinkSuggestions
+            v-if="wikiLinkSuggestionsOpen"
+            :suggestions="wikiLinkSuggestions"
+            :active-index="wikiLinkActiveIndex"
+            :listbox-id="wikiLinkListboxId"
+            @select="selectWikiLinkSuggestion"
+          />
+        </div>
+      </article>
 
-      <div class="content-editor-wrap">
-        <textarea
-          ref="contentEditorRef"
-          v-model="currentContent"
-          class="content-editor"
-          role="combobox"
-          aria-label="正文"
-          :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
-          :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
-          :aria-controls="
-            wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
-          "
-          :aria-activedescendant="
-            wikiLinkSuggestionsOpen
-              ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
-              : undefined
-          "
-          :disabled="Boolean(detail.deletedAt)"
-          @input="refreshWikiLinkCompletion"
-          @click="refreshWikiLinkCompletion"
-          @keyup="handleWikiLinkKeyup"
-          @keydown="handleWikiLinkKeydown"
-          @blur="resetWikiLinkCompletion"
-        />
-        <WikiLinkSuggestions
-          v-if="wikiLinkSuggestionsOpen"
-          :suggestions="wikiLinkSuggestions"
-          :active-index="wikiLinkActiveIndex"
-          :listbox-id="wikiLinkListboxId"
-          @select="selectWikiLinkSuggestion"
-        />
-      </div>
-
-      <details class="original-content">
-        <summary>原始内容</summary>
-        <pre>{{ detail.originalContent }}</pre>
+      <details class="rounded-xl border border-border bg-bg-elevated p-4 shadow-sm group">
+        <summary class="cursor-pointer select-none list-none text-[13px] font-medium text-text-secondary outline-none ring-focus rounded-sm marker:hidden [&::-webkit-details-marker]:hidden">
+          <span class="inline-flex items-center gap-1 group-open:text-text-primary">
+            <span class="i-lucide-chevron-right transition-transform group-open:rotate-90"></span>原始内容
+          </span>
+        </summary>
+        <pre class="mt-3 overflow-auto whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary font-mono">{{ detail.originalContent }}</pre>
       </details>
 
       <KnowledgeRelations
@@ -437,6 +445,13 @@ defineExpose({
         :revision="detail.revision"
         :refresh-token="props.refreshToken"
         @open-related="emit('openRelated', $event)"
+      />
+
+      <SaveState
+        class="fixed bottom-6 right-6 z-10 shadow-md"
+        :state="autosave.state.value"
+        :error="autosave.error.value"
+        @retry="autosave.retry"
       />
 
       <ConfirmDialog

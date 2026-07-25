@@ -50,7 +50,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea.content-editor").setValue("updated content");
+    await wrapper.get("textarea").setValue("updated content");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
@@ -109,13 +109,13 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    expect(wrapper.get("input.title-input").attributes("aria-label")).toBe(
+    expect(wrapper.get('input[placeholder="标题"]').attributes("aria-label")).toBe(
       "标题",
     );
     expect(
-      wrapper.get("textarea.content-editor").attributes("aria-label"),
+      wrapper.get("textarea").attributes("aria-label"),
     ).toBe("正文");
-    expect(wrapper.get("textarea.content-editor").attributes("role")).toBe(
+    expect(wrapper.get("textarea").attributes("role")).toBe(
       "combobox",
     );
     expect(
@@ -144,7 +144,7 @@ describe("EntryDetail", () => {
     });
     const wrapper = mount(EntryDetail, { props: { detail, loading: false } });
     await flushPromises();
-    await wrapper.get("input.title-input").setValue("确认后的标题");
+    await wrapper.get('input[placeholder="标题"]').setValue("确认后的标题");
     await wrapper.get('button[aria-label="沉淀为知识"]').trigger("click");
     await flushPromises();
     expect(entriesUpdate).toHaveBeenCalled();
@@ -170,7 +170,7 @@ describe("EntryDetail", () => {
       suggestion("one", "Canonical One"),
       suggestion("two", "Canonical Two"),
     ]);
-    const editor = wrapper.get("textarea.content-editor");
+    const editor = wrapper.get("textarea");
 
     expect(editor.attributes()).toMatchObject({
       "aria-autocomplete": "list",
@@ -212,8 +212,8 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
     await openSuggestions(wrapper, "[[ca", [suggestion("one", "Canonical")]);
-    const editor = wrapper.get("textarea.content-editor");
-    const title = wrapper.get("input.title-input");
+    const editor = wrapper.get("textarea");
+    const title = wrapper.get('input[placeholder="标题"]');
     (editor.element as HTMLTextAreaElement).focus();
 
     (title.element as HTMLInputElement).focus();
@@ -232,7 +232,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
     await openSuggestions(wrapper, "[[ca", [suggestion("one", "Canonical")]);
-    const editor = wrapper.get("textarea.content-editor");
+    const editor = wrapper.get("textarea");
     const enter = new KeyboardEvent("keydown", {
       key: "Enter",
       isComposing: true,
@@ -255,7 +255,7 @@ describe("EntryDetail", () => {
     await flushPromises();
     const value = "[[first]]\n[[second";
     await setEditor(wrapper, value, 4);
-    const editor = wrapper.get("textarea.content-editor");
+    const editor = wrapper.get("textarea");
     const element = editor.element as HTMLTextAreaElement;
     element.setSelectionRange(value.length, value.length);
 
@@ -311,7 +311,7 @@ describe("EntryDetail", () => {
       [suggestion("canonical", "Canonical", "Legacy")],
       12,
     );
-    const editor = wrapper.get("textarea.content-editor");
+    const editor = wrapper.get("textarea");
 
     await wrapper.get('[role="option"]').trigger("click");
     await flushPromises();
@@ -351,7 +351,7 @@ async function setEditor(
   value: string,
   caret = value.length,
 ) {
-  const editor = wrapper.get("textarea.content-editor");
+  const editor = wrapper.get("textarea");
   const element = editor.element as HTMLTextAreaElement;
   element.value = value;
   element.setSelectionRange(caret, caret);

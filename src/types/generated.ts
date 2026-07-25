@@ -111,9 +111,13 @@ export type AppSettings = {
   shortcutRegistered: boolean;
   shortcutError: string | null;
   autostartEnabled: boolean;
+  themeMode: string;
 };
 
-export type SettingsPatch = { autostartEnabled: boolean | null };
+export type SettingsPatch = {
+  autostartEnabled: boolean | null;
+  themeMode: string | null;
+};
 
 export type ExportResult = { exportedCount: number; targetDir: string };
 
