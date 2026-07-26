@@ -7,7 +7,6 @@
     "core:default",
     "opener:default",
     "opener:allow-open-path",
-    "dialog:default",
     "log:default",
     "window-state:default"
   ]

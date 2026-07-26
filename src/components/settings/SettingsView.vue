@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { Download, ExternalLink, FolderOpen } from "lucide-vue-next";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
@@ -130,15 +129,10 @@ async function chooseExportDir() {
   exportError.value = "";
   exportBusy.value = true;
   try {
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: "选择 Markdown 导出目录",
-    });
-    if (typeof selected !== "string") {
+    const result = await exportMarkdown();
+    if (result == null) {
       return;
     }
-    const result = await exportMarkdown(selected);
     exportMessage.value = `已导出 ${result.exportedCount} 个文件`;
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : "导出失败";
