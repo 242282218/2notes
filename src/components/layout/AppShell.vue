@@ -33,8 +33,10 @@ const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
 const tagPanelOpen = ref(false);
 const filterPanelOpen = ref(false);
 const detailMenuOpen = ref(false);
+const tagPanelRef = ref<HTMLElement | null>(null);
 const filterMenuRef = ref<HTMLElement | null>(null);
 const detailMenuRef = ref<HTMLElement | null>(null);
+const tagButtonRef = ref<HTMLButtonElement | null>(null);
 const filterButtonRef = ref<HTMLButtonElement | null>(null);
 const detailMenuButtonRef = ref<HTMLButtonElement | null>(null);
 const toolbarState = ref<EntryDetailToolbarState>({
@@ -48,17 +50,44 @@ const toolbarState = ref<EntryDetailToolbarState>({
 let unlistenEntriesChanged: (() => void) | null = null;
 let disposed = false;
 
+function closeDetailMenu(returnFocus = false) {
+  if (!detailMenuOpen.value) return;
+  detailMenuOpen.value = false;
+  if (returnFocus) {
+    void nextTick(() => detailMenuButtonRef.value?.focus());
+  }
+}
+
+function closeFilterPanel(returnFocus = false) {
+  if (!filterPanelOpen.value) return;
+  filterPanelOpen.value = false;
+  if (returnFocus) {
+    void nextTick(() => filterButtonRef.value?.focus());
+  }
+}
+
+function closeTagPanel(returnFocus = false) {
+  if (!tagPanelOpen.value) return;
+  tagPanelOpen.value = false;
+  if (returnFocus) {
+    void nextTick(() => tagButtonRef.value?.focus());
+  }
+}
+
 function onGlobalKeydown(event: KeyboardEvent) {
   if (event.key === "Escape" && detailMenuOpen.value) {
     event.preventDefault();
-    detailMenuOpen.value = false;
-    void nextTick(() => detailMenuButtonRef.value?.focus());
+    closeDetailMenu(true);
     return;
   }
   if (event.key === "Escape" && filterPanelOpen.value) {
     event.preventDefault();
-    filterPanelOpen.value = false;
-    void nextTick(() => filterButtonRef.value?.focus());
+    closeFilterPanel(true);
+    return;
+  }
+  if (event.key === "Escape" && tagPanelOpen.value) {
+    event.preventDefault();
+    closeTagPanel(true);
     return;
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
@@ -80,10 +109,17 @@ function onGlobalKeydown(event: KeyboardEvent) {
 function onDocumentPointerDown(event: globalThis.PointerEvent) {
   const target = event.target as globalThis.Node;
   if (filterPanelOpen.value && !filterMenuRef.value?.contains(target)) {
-    filterPanelOpen.value = false;
+    closeFilterPanel();
   }
   if (detailMenuOpen.value && !detailMenuRef.value?.contains(target)) {
-    detailMenuOpen.value = false;
+    closeDetailMenu();
+  }
+  if (
+    tagPanelOpen.value &&
+    !tagPanelRef.value?.contains(target) &&
+    !tagButtonRef.value?.contains(target)
+  ) {
+    closeTagPanel();
   }
 }
 
@@ -269,9 +305,11 @@ function setQuery(value: string) {
         >
           <button
           v-if="entries.view === 'tags'"
+          ref="tagButtonRef"
           type="button"
           class="btn-secondary min-w-0 px-2.5 text-ui"
-          :aria-expanded="tagPanelOpen"
+          aria-haspopup="true"
+          :aria-expanded="tagPanelOpen ? 'true' : 'false'"
           aria-controls="tag-panel"
           @click="tagPanelOpen = !tagPanelOpen"
         >
@@ -317,7 +355,8 @@ function setQuery(value: string) {
             ref="filterButtonRef"
             type="button"
             class="btn-secondary min-w-0 px-2.5 text-ui"
-            :aria-expanded="filterPanelOpen"
+            aria-haspopup="true"
+            :aria-expanded="filterPanelOpen ? 'true' : 'false'"
             aria-controls="entry-filter-popover"
             @click="filterPanelOpen = !filterPanelOpen"
           >
@@ -435,7 +474,8 @@ function setQuery(value: string) {
               type="button"
               class="btn-icon"
               aria-label="更多详情操作"
-              :aria-expanded="detailMenuOpen"
+              aria-haspopup="true"
+              :aria-expanded="detailMenuOpen ? 'true' : 'false'"
               aria-controls="detail-actions-menu"
               @click="detailMenuOpen = !detailMenuOpen"
             >
@@ -560,6 +600,7 @@ function setQuery(value: string) {
           <aside
             v-if="entries.view === 'tags' && tagPanelOpen"
             id="tag-panel"
+            ref="tagPanelRef"
             class="elevation-2 absolute inset-y-0 left-0 z-40 flex w-[236px] flex-col bg-bg-elevated"
             aria-label="标签筛选"
           >
@@ -571,7 +612,7 @@ function setQuery(value: string) {
                 type="button"
                 class="btn-icon"
                 aria-label="关闭标签面板"
-                @click="tagPanelOpen = false"
+                @click="closeTagPanel(true)"
               >
                 <X :size="16" aria-hidden="true" />
               </button>

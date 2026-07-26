@@ -1,8 +1,39 @@
 import { defineComponent, h, reactive } from "vue";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
+import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell from "./AppShell.vue";
+
+vi.mock("../../services/settingsApi", () => ({
+  settingsGet: vi.fn().mockResolvedValue({
+    dataDir: "data",
+    logDir: "logs",
+    backupDir: "backups",
+    shortcut: "Ctrl+Alt+N",
+    shortcutRegistered: true,
+    shortcutError: null,
+    autostartEnabled: false,
+    themeMode: "system",
+  }),
+  settingsUpdate: vi.fn(),
+}));
+
+vi.mock("../../services/backupApi", () => ({
+  backupsList: vi.fn().mockResolvedValue([]),
+  backupsCreate: vi.fn(),
+  backupsRestore: vi.fn(),
+}));
+
+vi.mock("../../services/knowledgeApi", () => ({
+  knowledgeRebuildIndex: vi.fn(),
+}));
+
+vi.mock("../../services/exportApi", () => ({
+  exportMarkdown: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-opener", () => ({ openPath: vi.fn() }));
 
 const tauriMocks = vi.hoisted(() => ({
   isTauri: vi.fn(() => false),
@@ -298,5 +329,106 @@ describe("AppShell search input race", () => {
 
     resolveFlush?.(true);
     await flushPromises();
+  });
+});
+
+describe("AppShell accessibility semantics", () => {
+  beforeEach(() => {
+    detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.requestMoveToTrash.mockReset();
+    entries.view = "inbox";
+    entries.selectedId = "entry-1";
+    entries.filters.query = "";
+    entries.filters.tag = "";
+    entries.error = null;
+    entries.detail = {
+      id: "entry-1",
+      title: "记录",
+      knowledgeState: "capture",
+      deletedAt: null,
+    };
+    entries.setView.mockReset();
+    entries.setTagFilter.mockReset();
+    tauriMocks.isTauri.mockReset().mockReturnValue(false);
+    tauriMocks.listen.mockReset();
+  });
+
+  afterEach(() => {
+    while (wrappers.length > 0) {
+      wrappers.pop()?.unmount();
+    }
+  });
+
+  it("keeps a single main landmark when settings is open", async () => {
+    setActivePinia(createPinia());
+    entries.view = "settings";
+    const wrapper = mount(AppShell, {
+      global: {
+        stubs: {
+          SidebarNav: true,
+          EntryList: EntryListStub,
+          EntryDetail: EntryDetailStub,
+          AppearanceSettings: true,
+          ConfirmDialog: true,
+        },
+      },
+    });
+    wrappers.push(wrapper);
+    await flushPromises();
+
+    expect(wrapper.findAll("main")).toHaveLength(1);
+    expect(wrapper.find('section[aria-label="设置内容"]').exists()).toBe(true);
+  });
+
+  it("closes the detail menu with Escape and returns focus to its trigger", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const wrapper = mountShell(host);
+    await flushPromises();
+
+    const trigger = wrapper.get('button[aria-label="更多详情操作"]');
+    expect(trigger.attributes("aria-haspopup")).toBe("true");
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    expect(trigger.attributes("aria-controls")).toBe("detail-actions-menu");
+
+    (trigger.element as HTMLButtonElement).focus();
+    await trigger.trigger("click");
+    expect(trigger.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.find("#detail-actions-menu").exists()).toBe(true);
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await flushPromises();
+
+    expect(wrapper.find("#detail-actions-menu").exists()).toBe(false);
+    expect(trigger.attributes("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger.element);
+    host.remove();
+  });
+
+  it("hides decorative icons inside IconButton and SaveState", async () => {
+    const wrapper = mountShell();
+    await flushPromises();
+
+    const entryDetail = wrapper.findComponent(EntryDetailStub);
+    await entryDetail.vm.$emit("toolbar-change", {
+      saveState: "saving",
+      saveError: null,
+      showPromote: true,
+      canPromote: true,
+      canDemote: false,
+      deleted: false,
+    });
+    await flushPromises();
+
+    const saveState = wrapper.get('[data-testid="save-state"]');
+    expect(saveState.find("svg").attributes("aria-hidden")).toBe("true");
+
+    const trashButton = wrapper
+      .findAll("button")
+      .find((button) => button.attributes("aria-label") === "移到回收站");
+    expect(trashButton).toBeDefined();
+    expect(trashButton!.find("svg").attributes("aria-hidden")).toBe("true");
   });
 });

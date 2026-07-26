@@ -471,7 +471,7 @@ defineExpose({
 
 <template>
   <section class="min-h-0 min-w-0 overflow-auto bg-bg-secondary">
-    <EmptyState v-if="loading" title="加载中" />
+    <EmptyState v-if="loading" title="加载中" busy />
     <EmptyState
       v-else-if="!hasEditingEntry"
       :icon="FileText"
@@ -529,7 +529,7 @@ defineExpose({
               role="combobox"
               aria-label="正文"
               :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
-              :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
+              :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : 'false'"
               :aria-controls="
                 wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
               "

@@ -14,6 +14,20 @@ describe("KnowledgeRelations", () => {
     vi.mocked(knowledgeRelationsGet).mockReset();
   });
 
+  it("exposes loading as a busy status region", async () => {
+    const pending = deferred<KnowledgeRelations>();
+    vi.mocked(knowledgeRelationsGet).mockReturnValue(pending.promise);
+    const wrapper = mountPanel();
+    await flushPromises();
+
+    const status = wrapper.get('[role="status"]');
+    expect(status.attributes("aria-busy")).toBe("true");
+    expect(status.text()).toContain("加载关联中");
+
+    pending.resolve(emptyRelations());
+    await flushPromises();
+  });
+
   it("loads and renders all relation groups with occurrence counts", async () => {
     vi.mocked(knowledgeRelationsGet).mockResolvedValue(relations());
     const wrapper = mountPanel();

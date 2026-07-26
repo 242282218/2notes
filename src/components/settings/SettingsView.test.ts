@@ -67,6 +67,14 @@ describe("SettingsView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("exposes settings content as a labeled section instead of a nested main", async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+
+    expect(wrapper.findAll("main")).toHaveLength(0);
+    expect(wrapper.find('section[aria-label="设置内容"]').exists()).toBe(true);
+  });
+
   it("tracks the visible category and disconnects its observer", async () => {
     const wrapper = mount(SettingsView);
     await flushPromises();

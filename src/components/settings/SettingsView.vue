@@ -261,7 +261,11 @@ async function updateAutostart(event: Event) {
       </button>
     </nav>
 
-    <main ref="settingsContentRef" class="min-w-0 max-w-[820px]">
+    <section
+      ref="settingsContentRef"
+      class="min-w-0 max-w-[820px]"
+      aria-label="设置内容"
+    >
       <h1 class="mb-6 mt-0 text-title text-text-primary">设置</h1>
       <p
         v-if="settingsStore.loading && !settingsStore.settings"
@@ -510,6 +514,6 @@ async function updateAutostart(event: Event) {
           @confirm="confirmRestore"
         />
       </template>
-    </main>
+    </section>
   </section>
 </template>

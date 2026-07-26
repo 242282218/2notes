@@ -67,9 +67,12 @@ function entryTitle(entry: RelatedEntry) {
 </script>
 
 <template>
-  <section class="grid gap-4 rounded-xl border border-border bg-bg-elevated p-4 shadow-sm" aria-label="关联">
-    <h3 class="m-0 text-[15px] font-semibold text-text-primary">关联</h3>
-    <EmptyState v-if="loading" title="加载关联中" />
+  <section
+    class="mt-1 grid gap-4 border-t border-border py-5"
+    aria-label="关联"
+  >
+    <h3 class="m-0 text-title text-text-primary">关联</h3>
+    <EmptyState v-if="loading" title="加载关联中" busy />
     <p v-else-if="error" class="text-danger m-0" role="alert">{{ error }}</p>
     <EmptyState
       v-else-if="isEmpty"
@@ -79,51 +82,73 @@ function entryTitle(entry: RelatedEntry) {
     />
     <template v-else-if="relations">
       <section v-if="relations.outgoing.length" class="grid gap-2">
-        <h4 class="m-0 text-[13px] font-medium text-text-secondary">出链</h4>
+        <h4 class="m-0 text-ui font-medium text-text-secondary">出链</h4>
         <ul class="m-0 grid gap-2 p-0 list-none">
           <li v-for="entry in relations.outgoing" :key="entry.id">
             <button
               type="button"
-              class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-150 ring-focus hover:border-border-hover hover:bg-bg-hover"
+              class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-fast ease-token ring-focus hover:border-border-hover hover:bg-bg-hover"
               @click="emit('openRelated', entry.id)"
             >
-              <span class="font-medium text-[14px]">{{ entryTitle(entry) }}</span>
-              <small class="text-[12px] text-text-tertiary truncate">{{ entry.summary }}</small>
-              <small class="text-[12px] text-text-tertiary">{{ entry.occurrenceCount }} 次</small>
-              <small v-if="entry.deletedAt" class="text-[12px] text-danger">已在回收站</small>
+              <span class="text-heading">{{
+                entryTitle(entry)
+              }}</span>
+              <small class="text-caption text-text-tertiary truncate">{{
+                entry.summary
+              }}</small>
+              <small class="text-caption text-text-tertiary"
+                >{{ entry.occurrenceCount }} 次</small
+              >
+              <small v-if="entry.deletedAt" class="text-caption text-danger"
+                >已在回收站</small
+              >
             </button>
           </li>
         </ul>
       </section>
 
       <section v-if="relations.backlinks.length" class="grid gap-2">
-        <h4 class="m-0 text-[13px] font-medium text-text-secondary">反向链接</h4>
+        <h4 class="m-0 text-ui font-medium text-text-secondary">
+          反向链接
+        </h4>
         <ul class="m-0 grid gap-2 p-0 list-none">
           <li v-for="entry in relations.backlinks" :key="entry.id">
             <button
               type="button"
-              class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-150 ring-focus hover:border-border-hover hover:bg-bg-hover"
+              class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-fast ease-token ring-focus hover:border-border-hover hover:bg-bg-hover"
               @click="emit('openRelated', entry.id)"
             >
-              <span class="font-medium text-[14px]">{{ entryTitle(entry) }}</span>
-              <small class="text-[12px] text-text-tertiary truncate">{{ entry.summary }}</small>
-              <small class="text-[12px] text-text-tertiary">{{ entry.occurrenceCount }} 次</small>
-              <small v-if="entry.deletedAt" class="text-[12px] text-danger">已在回收站</small>
+              <span class="text-heading">{{
+                entryTitle(entry)
+              }}</span>
+              <small class="text-caption text-text-tertiary truncate">{{
+                entry.summary
+              }}</small>
+              <small class="text-caption text-text-tertiary"
+                >{{ entry.occurrenceCount }} 次</small
+              >
+              <small v-if="entry.deletedAt" class="text-caption text-danger"
+                >已在回收站</small
+              >
             </button>
           </li>
         </ul>
       </section>
 
       <section v-if="relations.unresolved.length" class="grid gap-2">
-        <h4 class="m-0 text-[13px] font-medium text-text-secondary">未解析链接</h4>
+        <h4 class="m-0 text-ui font-medium text-text-secondary">
+          未解析链接
+        </h4>
         <ul class="m-0 grid gap-2 p-0 list-none">
           <li
             v-for="entry in relations.unresolved"
             :key="`${entry.rawTarget}-${entry.occurrenceCount}`"
-            class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-150"
+            class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-fast ease-token"
           >
-            <span class="font-medium text-[14px]">{{ entry.rawTarget }}</span>
-            <small class="text-[12px] text-text-tertiary">{{ entry.occurrenceCount }} 次</small>
+            <span class="text-heading">{{ entry.rawTarget }}</span>
+            <small class="text-caption text-text-tertiary"
+              >{{ entry.occurrenceCount }} 次</small
+            >
           </li>
         </ul>
       </section>

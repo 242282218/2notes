@@ -555,6 +555,30 @@ describe("EntryDetail", () => {
     });
   });
 
+  it("exposes loading as a busy status region", () => {
+    const wrapper = mount(EntryDetail, {
+      props: { detail: null, loading: true },
+    });
+
+    const status = wrapper.get('[role="status"]');
+    expect(status.attributes("aria-busy")).toBe("true");
+    expect(status.text()).toContain("加载中");
+  });
+
+  it("keeps wiki combobox collapsed without controls when suggestions are closed", async () => {
+    const wrapper = mount(EntryDetail, {
+      props: { detail: entry(), loading: false },
+    });
+    await flushPromises();
+
+    const editor = wrapper.get("textarea");
+    expect(editor.attributes("role")).toBe("combobox");
+    expect(editor.attributes("aria-expanded")).toBe("false");
+    expect(editor.attributes("aria-controls")).toBeUndefined();
+    expect(editor.attributes("aria-activedescendant")).toBeUndefined();
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
+  });
+
   it("navigates open wiki link suggestions and exposes the active option", async () => {
     const wrapper = mount(EntryDetail, {
       props: { detail: entry(), loading: false },
@@ -565,7 +589,9 @@ describe("EntryDetail", () => {
       suggestion("two", "Canonical Two"),
     ]);
     const editor = wrapper.get("textarea");
+    const listbox = wrapper.get('[role="listbox"]');
 
+    expect(listbox.attributes("id")).toBe("entry-wiki-link-suggestions");
     expect(editor.attributes()).toMatchObject({
       "aria-autocomplete": "list",
       "aria-expanded": "true",
@@ -588,7 +614,9 @@ describe("EntryDetail", () => {
 
     await editor.trigger("keydown", { key: "Escape" });
     expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
-    expect(editor.attributes("aria-expanded")).toBeUndefined();
+    expect(editor.attributes("aria-expanded")).toBe("false");
+    expect(editor.attributes("aria-controls")).toBeUndefined();
+    expect(editor.attributes("aria-activedescendant")).toBeUndefined();
 
     const closedArrow = new KeyboardEvent("keydown", {
       key: "ArrowDown",
