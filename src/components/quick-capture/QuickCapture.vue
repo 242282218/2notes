@@ -42,6 +42,12 @@ const autosave = useAutosave({
 });
 
 const saving = computed(() => autosave.state.value === "saving");
+const statusText = computed(() => {
+  if (!hydrated.value) return "正在加载草稿";
+  if (submitting.value) return "正在保存";
+  if (saving.value) return "草稿保存中";
+  return "就绪";
+});
 
 useAppQuitRequest(async () => {
   try {
@@ -96,6 +102,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  autosave.dispose();
   unlistenDatabaseRestored?.();
   unlistenDatabaseRestorePrepare?.();
 });
@@ -143,7 +150,11 @@ function onSubmitKeydown(event: KeyboardEvent) {
 }
 
 async function copyContent() {
-  await navigator.clipboard.writeText(content.value);
+  try {
+    await navigator.clipboard.writeText(content.value);
+  } catch (copyError) {
+    error.value = copyError instanceof Error ? copyError.message : "复制失败";
+  }
 }
 
 async function hideQuickCapture() {
@@ -157,36 +168,63 @@ async function hideQuickCapture() {
 </script>
 
 <template>
-  <main class="flex h-screen w-screen items-center justify-center bg-[#101516]/45 p-5 backdrop-blur-[12px] backdrop-brightness-85 animate-fade-in">
-    <section class="grid w-full max-w-[640px] max-h-[calc(100vh-24px)] grid-rows-[auto_minmax(140px,1fr)_auto] gap-4 rounded-2xl border border-border-subtle p-5 glass-panel shadow-[var(--shadow-xl),var(--color-brand-glow)] animate-scale-spring">
-      <header class="flex items-center justify-between gap-3">
-        <div class="flex items-baseline gap-2">
-          <strong class="text-[17px] font-semibold text-text-primary">快速记录</strong>
-          <span class="text-[13px] text-text-tertiary">{{ saving ? "草稿保存中" : "就绪" }}</span>
+  <main
+    data-quick-capture-shell
+    class="flex h-screen w-screen min-h-0 min-w-0 items-center justify-center overflow-hidden bg-bg-base p-3"
+  >
+    <Transition
+      appear
+      enter-from-class="translate-y-1 opacity-0"
+      enter-active-class="transition-[transform,opacity] duration-base ease-token"
+      enter-to-class="translate-y-0 opacity-100"
+    >
+      <section
+        data-quick-capture-card
+        class="quick-capture-card elevation-2 grid h-full min-h-0 w-full max-h-full translate-y-0 grid-rows-[34px_minmax(0,1fr)_36px] gap-3 overflow-hidden rounded-lg bg-bg-elevated p-4 animate-fade-in"
+        aria-labelledby="quick-capture-title"
+      >
+      <header class="flex min-w-0 items-center justify-between gap-3">
+        <div class="flex min-w-0 items-center gap-3">
+          <h1 id="quick-capture-title" class="m-0 text-title text-text-primary">快速记录</h1>
+          <span class="whitespace-nowrap text-caption text-text-tertiary" role="status" aria-live="polite">
+            {{ statusText }}
+          </span>
         </div>
         <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
       </header>
+
+      <label for="quick-capture-content" class="sr-only">记录内容</label>
       <textarea
+        id="quick-capture-content"
         ref="textareaRef"
         v-model="content"
         autofocus
         :disabled="!hydrated || submitting"
+        :aria-invalid="Boolean(error)"
+        :aria-describedby="error ? 'quick-capture-error' : undefined"
         placeholder="记下现在这件事"
-        class="input-base resize-none p-4 text-[15px] leading-relaxed"
+        class="input-base min-h-0 resize-none p-3 text-body"
         @input="onContentChange"
         @keydown.enter.exact="onSubmitKeydown"
         @keydown.esc.prevent="hideQuickCapture"
       />
-      <footer class="flex items-center justify-between gap-3">
-        <p v-if="error" class="text-danger m-0">
+
+      <footer class="flex min-w-0 items-center justify-between gap-3">
+        <p
+          v-if="error"
+          id="quick-capture-error"
+          class="m-0 min-w-0 truncate text-caption text-danger"
+          role="alert"
+          :title="error"
+        >
           {{ error }}
         </p>
-        <span v-else />
-        <div class="flex items-center justify-end gap-2">
+        <span v-else aria-hidden="true" />
+        <div class="flex shrink-0 items-center justify-end gap-2">
           <IconButton
             label="复制"
             :icon="Clipboard"
-            :disabled="!hydrated"
+            :disabled="!hydrated || !content"
             @click="copyContent"
           />
           <button
@@ -195,11 +233,22 @@ async function hideQuickCapture() {
             :disabled="!hydrated || !content.trim() || submitting"
             @click="submit"
           >
-            <Send :size="16" />
-            保存
+            <Send :size="16" aria-hidden="true" />
+            {{ submitting ? "保存中…" : "保存" }}
           </button>
         </div>
       </footer>
-    </section>
+      </section>
+    </Transition>
   </main>
 </template>
+
+<style scoped>
+@media (max-height: 250px) {
+  .quick-capture-card {
+    grid-template-rows: 32px minmax(0, 1fr) 34px;
+    gap: var(--space-2);
+    padding: var(--space-3);
+  }
+}
+</style>
