@@ -52,6 +52,7 @@ const entries = reactive({
   filters: { query: "", entryType: "", status: "", tag: "" },
   items: [],
   tags: [],
+  tagsError: null as string | null,
   selectedId: "entry-1",
   detail: {
     id: "entry-1",
