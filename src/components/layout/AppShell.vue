@@ -577,6 +577,20 @@ function setQuery(value: string) {
               </button>
             </header>
             <div class="min-h-0 flex-1 overflow-auto p-2">
+              <div
+                v-if="entries.tagsError"
+                class="mb-2 rounded-md border border-border bg-bg-hover px-3 py-2 text-micro text-text-secondary"
+                role="alert"
+              >
+                <p class="mb-2">{{ entries.tagsError }}</p>
+                <button
+                  type="button"
+                  class="rounded-md border border-border bg-bg-elevated px-2 py-1 text-micro text-text-primary ring-focus"
+                  @click="entries.refreshTags()"
+                >
+                  重试
+                </button>
+              </div>
               <button
                 type="button"
                 class="mb-1 flex h-[36px] w-full items-center justify-between rounded-md border-none bg-transparent px-3 text-ui text-text-secondary transition-colors duration-fast ease-token ring-focus hover:bg-bg-hover hover:text-text-primary"

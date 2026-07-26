@@ -8,7 +8,8 @@ import {
   entriesMoveToTrash,
   entriesRestoreFromTrash,
 } from "../services/entryApi";
-import type { EntryDetail } from "../types/generated";
+import { tagsList } from "../services/tagApi";
+import type { EntryDetail, Tag } from "../types/generated";
 import { useEntriesStore } from "./entries";
 
 vi.mock("../services/entryApi", () => ({
@@ -32,6 +33,7 @@ describe("entries store", () => {
     vi.mocked(entriesMoveToTrash).mockReset();
     vi.mocked(entriesRestoreFromTrash).mockReset();
     vi.mocked(entriesDeleteForever).mockReset();
+    vi.mocked(tagsList).mockReset();
   });
 
   it("clears the previous detail when selecting a new entry fails", async () => {
@@ -129,7 +131,7 @@ describe("entries store", () => {
 
   it("lets a normal selection cancel an open request waiting on the list", async () => {
     const store = useEntriesStore();
-    const pendingPage = deferred<ReturnType<typeof emptyPage>>();
+    const pendingPage = deferred<ReturnType<typeof pageWith>>();
     vi.mocked(entriesGet)
       .mockResolvedValueOnce(entry("related"))
       .mockResolvedValueOnce(entry("selected"));
@@ -160,6 +162,131 @@ describe("entries store", () => {
     await selecting;
 
     expect(store.detailLoading).toBe(false);
+  });
+
+  it("does not replace the current detail with a stale saved entry", () => {
+    const store = selectedStore();
+    const requestGeneration = store.selectionGeneration;
+    store.selectedId = "entry-b";
+    store.detail = entry("entry-b");
+
+    store.applySavedEntry(
+      { ...entry("entry-a"), revision: 1 },
+      requestGeneration,
+    );
+
+    expect(store.selectedId).toBe("entry-b");
+    expect(store.detail?.id).toBe("entry-b");
+  });
+
+  it.each([
+    ["trash", entriesMoveToTrash, "moveSelectedToTrash"],
+    ["restore", entriesRestoreFromTrash, "restoreSelected"],
+  ] as const)("discards stale %s responses after selection changes", async (_, api, action) => {
+    const store = selectedStore();
+    const pending = deferred<EntryDetail>();
+    vi.mocked(api).mockReturnValue(pending.promise);
+
+    vi.mocked(entriesGet)
+      .mockResolvedValueOnce(entry("entry-b"))
+      .mockResolvedValueOnce(entry("entry-a"));
+    const operation = store[action]();
+    await store.select("entry-b");
+    await store.select("entry-a");
+    pending.resolve({ ...entry("entry-a"), revision: 1 });
+    await operation;
+
+    expect(store.selectedId).toBe("entry-a");
+    expect(store.detail?.id).toBe("entry-a");
+    expect(store.detail?.revision).toBe(0);
+  });
+
+  it.each([
+    ["trash", entriesMoveToTrash, "moveSelectedToTrash"],
+    ["restore", entriesRestoreFromTrash, "restoreSelected"],
+  ] as const)("treats repeated selection as a new lifecycle for stale %s", async (_, api, action) => {
+    const store = selectedStore();
+    const pending = deferred<EntryDetail>();
+    vi.mocked(api).mockReturnValue(pending.promise);
+    vi.mocked(entriesGet).mockResolvedValue(entry("entry-a"));
+
+    const operation = store[action]();
+    await store.select("entry-a");
+    pending.resolve({ ...entry("entry-a"), revision: 2 });
+    await operation;
+
+    expect(store.detail?.id).toBe("entry-a");
+    expect(store.detail?.revision).toBe(0);
+  });
+
+  it("treats repeated selection as a new lifecycle for stale deletion", async () => {
+    const store = selectedStore();
+    const pending = deferred<void>();
+    vi.mocked(entriesDeleteForever).mockReturnValue(pending.promise);
+    vi.mocked(entriesGet).mockResolvedValue(entry("entry-a"));
+
+    const operation = store.deleteSelectedForever();
+    await store.select("entry-a");
+    pending.resolve();
+    await operation;
+
+    expect(store.selectedId).toBe("entry-a");
+    expect(store.detail?.id).toBe("entry-a");
+  });
+
+  it("reconciles the current list after a stale trash response", async () => {
+    const store = selectedStore();
+    const pending = deferred<EntryDetail>();
+    const trashed = { ...entry("entry-a"), deletedAt: "2026-07-25T00:00:00Z" };
+    vi.mocked(entriesMoveToTrash).mockReturnValue(pending.promise);
+    vi.mocked(entriesList).mockResolvedValue(pageWith(trashed));
+
+    const operation = store.moveSelectedToTrash();
+    store.selectedId = "entry-b";
+    store.detail = entry("entry-b");
+    store.view = "trash";
+    store.items = pageWith(trashed).items;
+    pending.resolve(trashed);
+    await operation;
+
+    expect(entriesList).toHaveBeenCalled();
+    expect(store.items.map((item) => item.id)).toContain("entry-a");
+    expect(store.selectedId).toBe("entry-b");
+    expect(store.detail?.id).toBe("entry-b");
+  });
+
+  it("reloads a target list when a stale knowledge update is not present", async () => {
+    const store = selectedStore();
+    const promoted = { ...entry("entry-a"), knowledgeState: "knowledge" as const };
+    store.selectedId = "entry-b";
+    store.detail = entry("entry-b");
+    store.view = "knowledge";
+    store.items = [];
+    vi.mocked(entriesList).mockResolvedValue(pageWith(promoted));
+
+    store.applyEntryListUpdate(promoted);
+
+    await vi.waitFor(() => expect(entriesList).toHaveBeenCalled());
+    expect(store.items.map((item) => item.id)).toContain("entry-a");
+    expect(store.detail?.id).toBe("entry-b");
+  });
+
+  it("does not clear a newer selection after stale permanent deletion completes", async () => {
+    const store = selectedStore();
+    const pending = deferred<void>();
+    vi.mocked(entriesDeleteForever).mockReturnValue(pending.promise);
+
+    vi.mocked(entriesGet)
+      .mockResolvedValueOnce(entry("entry-b"))
+      .mockResolvedValueOnce(entry("entry-a"));
+    const operation = store.deleteSelectedForever();
+    await store.select("entry-b");
+    await store.select("entry-a");
+    pending.resolve();
+    await operation;
+
+    expect(store.selectedId).toBe("entry-a");
+    expect(store.detail?.id).toBe("entry-a");
   });
 
   it("reloads backend search results after a saved entry changes", async () => {
@@ -201,6 +328,49 @@ describe("entries store", () => {
     expect(store.detail?.id).toBe("entry-a");
   });
 
+  it("clears stale items while a view change is loading", async () => {
+    const store = useEntriesStore();
+    const pendingPage = deferred<ReturnType<typeof pageWith>>();
+    store.items = pageWith(entry("old-entry")).items;
+    store.selectedId = "old-entry";
+    store.detail = entry("old-entry");
+    vi.mocked(entriesList).mockReturnValue(pendingPage.promise);
+
+    const changingView = store.setView("knowledge");
+
+    expect(store.view).toBe("knowledge");
+    expect(store.loading).toBe(true);
+    expect(store.items).toEqual([]);
+    expect(store.selectedId).toBeNull();
+    expect(store.detail).toBeNull();
+
+    pendingPage.resolve(pageWith(entry("new-entry")));
+    await changingView;
+
+    expect(store.loading).toBe(false);
+    expect(store.items.map((item) => item.id)).toEqual(["new-entry"]);
+  });
+
+  it("keeps current items visible during a reconcile reload", async () => {
+    const store = selectedStore();
+    const pendingPage = deferred<ReturnType<typeof pageWith>>();
+    store.view = "knowledge";
+    store.items = pageWith(entry("old-entry")).items;
+    vi.mocked(entriesList).mockReturnValue(pendingPage.promise);
+
+    store.applyEntryListUpdate({
+      ...entry("new-entry"),
+      knowledgeState: "knowledge",
+    });
+    await vi.waitFor(() => expect(entriesList).toHaveBeenCalledOnce());
+
+    expect(store.loading).toBe(true);
+    expect(store.items.map((item) => item.id)).toEqual(["old-entry"]);
+
+    pendingPage.resolve(pageWith(entry("new-entry")));
+    await vi.waitFor(() => expect(store.loading).toBe(false));
+  });
+
   it("coalesces rapid search queries before calling the backend", async () => {
     vi.useFakeTimers();
     try {
@@ -220,6 +390,64 @@ describe("entries store", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("clears items for changed search queries but not identical ones", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = useEntriesStore();
+      store.items = pageWith(entry("old-entry")).items;
+      const pendingPage = deferred<ReturnType<typeof pageWith>>();
+      vi.mocked(entriesList).mockReturnValue(pendingPage.promise);
+
+      store.setQuery("知识库");
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.loading).toBe(true);
+      expect(store.items).toEqual([]);
+
+      pendingPage.resolve(pageWith(entry("new-entry")));
+      await vi.waitFor(() => expect(store.loading).toBe(false));
+      expect(store.items.map((item) => item.id)).toEqual(["new-entry"]);
+
+      const sameQueryPage = deferred<ReturnType<typeof pageWith>>();
+      vi.mocked(entriesList).mockReturnValue(sameQueryPage.promise);
+      store.setQuery("知识库");
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(store.loading).toBe(true);
+      expect(store.items.map((item) => item.id)).toEqual(["new-entry"]);
+
+      sameQueryPage.resolve(pageWith(entry("new-entry")));
+      await vi.waitFor(() => expect(store.loading).toBe(false));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears items for type and status filter changes", async () => {
+    const store = useEntriesStore();
+    store.items = pageWith(entry("old-entry")).items;
+    const pendingType = deferred<ReturnType<typeof pageWith>>();
+    vi.mocked(entriesList).mockReturnValue(pendingType.promise);
+
+    const changingType = store.setTypeFilter("idea");
+    expect(store.loading).toBe(true);
+    expect(store.items).toEqual([]);
+    pendingType.resolve(pageWith(entry("typed")));
+    await changingType;
+    expect(store.items.map((item) => item.id)).toEqual(["typed"]);
+
+    store.items = pageWith(entry("typed")).items;
+    const pendingStatus = deferred<ReturnType<typeof pageWith>>();
+    vi.mocked(entriesList).mockReturnValue(pendingStatus.promise);
+
+    const changingStatus = store.setStatusFilter("done");
+    expect(store.loading).toBe(true);
+    expect(store.items).toEqual([]);
+    pendingStatus.resolve(pageWith(entry("done-entry")));
+    await changingStatus;
+    expect(store.items.map((item) => item.id)).toEqual(["done-entry"]);
   });
 
   it("keeps the selected entry and exposes trash failures", async () => {
@@ -255,6 +483,97 @@ describe("entries store", () => {
     expect(store.detail?.id).toBe("entry-a");
     expect(store.error).toBe("delete failed");
   });
+
+  it("keeps only the latest tags result when an older refresh resolves later", async () => {
+    const store = useEntriesStore();
+    const first = deferred<Tag[]>();
+    const second = deferred<Tag[]>();
+    const olderTags = [tag("old", "old")];
+    const newerTags = [tag("new", "new")];
+    vi.mocked(tagsList)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const firstRefresh = store.refreshTags();
+    const secondRefresh = store.refreshTags();
+    second.resolve(newerTags);
+    await secondRefresh;
+    first.resolve(olderTags);
+    await firstRefresh;
+
+    expect(store.tags).toEqual(newerTags);
+    expect(store.tagsError).toBeNull();
+  });
+
+  it("keeps entries usable when tagsList fails and isolates tagsError", async () => {
+    const store = useEntriesStore();
+    const listed = pageWith(entry("entry-a"));
+    vi.mocked(entriesList).mockResolvedValue(listed);
+    vi.mocked(tagsList).mockRejectedValue(new Error("tags down"));
+
+    await store.load();
+    await expect(store.refreshTags()).resolves.toBeUndefined();
+
+    expect(store.items.map((item) => item.id)).toEqual(["entry-a"]);
+    expect(store.error).toBeNull();
+    expect(store.tagsError).toBe("tags down");
+    expect(store.tags).toEqual([]);
+  });
+
+  it("clears tagsError when a new refresh starts and when the latest succeeds", async () => {
+    const store = useEntriesStore();
+    const pending = deferred<Tag[]>();
+    vi.mocked(tagsList)
+      .mockRejectedValueOnce(new Error("tags down"))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce([tag("ok", "ok")]);
+
+    await store.refreshTags();
+    expect(store.tagsError).toBe("tags down");
+
+    const second = store.refreshTags();
+    expect(store.tagsError).toBeNull();
+    pending.resolve([tag("pending", "pending")]);
+    await second;
+    expect(store.tags).toEqual([tag("pending", "pending")]);
+    expect(store.tagsError).toBeNull();
+
+    await store.refreshTags();
+    expect(store.tags).toEqual([tag("ok", "ok")]);
+    expect(store.tagsError).toBeNull();
+  });
+
+  it("ignores stale tags failures after a newer refresh succeeds", async () => {
+    const store = useEntriesStore();
+    const first = deferred<Tag[]>();
+    const second = deferred<Tag[]>();
+    const newerTags = [tag("fresh", "fresh")];
+    vi.mocked(tagsList)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    const firstRefresh = store.refreshTags();
+    const secondRefresh = store.refreshTags();
+    second.resolve(newerTags);
+    await secondRefresh;
+    first.reject(new Error("stale tags failure"));
+    await firstRefresh;
+
+    expect(store.tags).toEqual(newerTags);
+    expect(store.tagsError).toBeNull();
+    expect(store.error).toBeNull();
+  });
+
+  it("does not overwrite entry save errors with tagsError", async () => {
+    const store = selectedStore();
+    store.error = "保存失败";
+    vi.mocked(tagsList).mockRejectedValue(new Error("tags down"));
+
+    await store.refreshTags();
+
+    expect(store.error).toBe("保存失败");
+    expect(store.tagsError).toBe("tags down");
+  });
 });
 
 function selectedStore() {
@@ -284,6 +603,28 @@ function entry(id: string): EntryDetail {
   };
 }
 
+function pageWith(...entries: EntryDetail[]) {
+  return {
+    items: entries.map((value) => ({
+      id: value.id,
+      title: value.title,
+      summary: value.currentContent,
+      entryType: value.entryType,
+      status: value.status,
+      knowledgeState: value.knowledgeState,
+      searchSnippet: null,
+      tags: value.tags,
+      revision: value.revision,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+      deletedAt: value.deletedAt,
+    })),
+    limit: 50,
+    offset: 0,
+    hasMore: false,
+  };
+}
+
 function emptyPage() {
   return {
     items: [],
@@ -293,10 +634,22 @@ function emptyPage() {
   };
 }
 
+function tag(id: string, name: string): Tag {
+  return {
+    id,
+    name,
+    normalizedName: name,
+    createdAt: "2026-07-15T00:00:00Z",
+    entryCount: 1,
+  };
+}
+
 function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }

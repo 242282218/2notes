@@ -38,10 +38,17 @@ export const useEntriesStore = defineStore("entries", () => {
   const items = ref<EntryListItem[]>([]);
   const tags = ref<Tag[]>([]);
   const selectedId = ref<string | null>(null);
+  const selectionGeneration = ref(0);
   const detail = ref<EntryDetail | null>(null);
+
+  function beginSelection() {
+    selectionGeneration.value += 1;
+    return selectionGeneration.value;
+  }
   const loading = ref(false);
   const detailLoading = ref(false);
   const error = ref<string | null>(null);
+  const tagsError = ref<string | null>(null);
   const externalChangeToken = ref(0);
   const hasMore = ref(false);
   const offset = ref(0);
@@ -49,6 +56,7 @@ export const useEntriesStore = defineStore("entries", () => {
   let loadRequestId = 0;
   let selectRequestId = 0;
   let openRequestId = 0;
+  let tagsRequestId = 0;
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   const selectedItem = computed(() =>
@@ -62,12 +70,17 @@ export const useEntriesStore = defineStore("entries", () => {
   async function loadEntries(
     resetPage = true,
     isCurrent: () => boolean = () => true,
+    preserveSelection = false,
+    clearExisting = false,
   ) {
     const requestId = ++loadRequestId;
     loading.value = true;
     error.value = null;
     if (resetPage) {
       offset.value = 0;
+      if (clearExisting) {
+        items.value = [];
+      }
     }
     const requestOffset = offset.value;
     const filter = buildEntryFilter(view.value, filters);
@@ -81,15 +94,18 @@ export const useEntriesStore = defineStore("entries", () => {
       }
       items.value = resetPage ? page.items : [...items.value, ...page.items];
       hasMore.value = page.hasMore;
-      if (!selectedId.value && page.items[0]) {
-        await select(page.items[0].id);
-      }
-      if (
-        selectedId.value &&
-        !items.value.some((item) => item.id === selectedId.value)
-      ) {
-        detail.value = null;
-        selectedId.value = null;
+      if (!preserveSelection) {
+        if (!selectedId.value && page.items[0]) {
+          await select(page.items[0].id);
+        }
+        if (
+          selectedId.value &&
+          !items.value.some((item) => item.id === selectedId.value)
+        ) {
+          beginSelection();
+          detail.value = null;
+          selectedId.value = null;
+        }
       }
     } catch (loadError) {
       if (requestId === loadRequestId && isCurrent()) {
@@ -101,6 +117,10 @@ export const useEntriesStore = defineStore("entries", () => {
         loading.value = false;
       }
     }
+  }
+
+  async function reconcileCurrentList() {
+    await loadEntries(true, () => true, true);
   }
 
   async function loadMore() {
@@ -116,10 +136,23 @@ export const useEntriesStore = defineStore("entries", () => {
   }
 
   async function refreshTags() {
-    tags.value = await tagsList();
+    const requestId = ++tagsRequestId;
+    tagsError.value = null;
+    try {
+      const next = await tagsList();
+      if (requestId === tagsRequestId) {
+        tags.value = next;
+        tagsError.value = null;
+      }
+    } catch (cause) {
+      if (requestId === tagsRequestId) {
+        tagsError.value = getErrorMessage(cause, "标签加载失败");
+      }
+    }
   }
 
   async function select(id: string) {
+    beginSelection();
     openRequestId += 1;
     const requestId = ++selectRequestId;
     selectedId.value = id;
@@ -150,6 +183,7 @@ export const useEntriesStore = defineStore("entries", () => {
   }
 
   async function openEntry(id: string) {
+    beginSelection();
     const requestId = ++openRequestId;
     const selectionRequestId = ++selectRequestId;
     error.value = null;
@@ -210,107 +244,170 @@ export const useEntriesStore = defineStore("entries", () => {
     return updated;
   }
 
-  function applySavedEntry(updated: EntryDetail) {
-    detail.value = updated;
-    if (view.value === "search" && filters.query.trim()) {
-      void load();
-    } else {
-      upsertListItem(updated);
+  function applySavedEntry(
+    updated: EntryDetail,
+    requestGeneration = selectionGeneration.value,
+  ) {
+    const updatesCurrentSelection =
+      selectedId.value === updated.id &&
+      selectionGeneration.value === requestGeneration;
+    if (updatesCurrentSelection) detail.value = updated;
+    applyEntryListUpdate(updated, updatesCurrentSelection);
+  }
+
+  function applyEntryListUpdate(
+    updated: EntryDetail,
+    reloadSearch = false,
+  ) {
+    if (reloadSearch && view.value === "search" && filters.query.trim()) {
+      void reconcileCurrentList();
+    } else if (!upsertListItem(updated)) {
+      void reconcileCurrentList();
     }
-    refreshTags().catch(() => {
-      // Silently swallow tag refresh errors in autosave callback context.
-      // The tags list will be refreshed on next manual action.
-    });
+    void refreshTags();
   }
 
   async function moveSelectedToTrash() {
-    if (!detail.value) {
-      return;
-    }
+    if (!detail.value) return;
+    const requestEntry = detail.value;
+    const requestGeneration = selectionGeneration.value;
     error.value = null;
     try {
-      detail.value = await entriesMoveToTrash(
-        detail.value.id,
-        detail.value.revision,
+      const updated = await entriesMoveToTrash(
+        requestEntry.id,
+        requestEntry.revision,
       );
+      if (
+        selectedId.value !== requestEntry.id ||
+        selectionGeneration.value !== requestGeneration
+      ) {
+        await reconcileCurrentList();
+        await refreshTags();
+        return;
+      }
+      detail.value = updated;
       await load();
       await refreshTags();
     } catch (operationError) {
-      error.value = getErrorMessage(operationError, "移到回收站失败");
+      if (
+        selectedId.value === requestEntry.id &&
+        selectionGeneration.value === requestGeneration
+      ) {
+        error.value = getErrorMessage(operationError, "移到回收站失败");
+      }
     }
   }
 
   async function restoreSelected() {
-    if (!detail.value) {
-      return;
-    }
+    if (!detail.value) return;
+    const requestEntry = detail.value;
+    const requestGeneration = selectionGeneration.value;
     error.value = null;
     try {
-      detail.value = await entriesRestoreFromTrash(
-        detail.value.id,
-        detail.value.revision,
+      const updated = await entriesRestoreFromTrash(
+        requestEntry.id,
+        requestEntry.revision,
       );
+      if (
+        selectedId.value !== requestEntry.id ||
+        selectionGeneration.value !== requestGeneration
+      ) {
+        await reconcileCurrentList();
+        await refreshTags();
+        return;
+      }
+      detail.value = updated;
       await load();
       await refreshTags();
     } catch (operationError) {
-      error.value = getErrorMessage(operationError, "恢复失败");
+      if (
+        selectedId.value === requestEntry.id &&
+        selectionGeneration.value === requestGeneration
+      ) {
+        error.value = getErrorMessage(operationError, "恢复失败");
+      }
     }
   }
 
   async function deleteSelectedForever() {
-    if (!detail.value) {
-      return;
-    }
+    if (!detail.value) return;
+    const requestEntryId = detail.value.id;
+    const requestGeneration = selectionGeneration.value;
     error.value = null;
     try {
-      await entriesDeleteForever(detail.value.id);
+      await entriesDeleteForever(requestEntryId);
+      if (
+        selectedId.value !== requestEntryId ||
+        selectionGeneration.value !== requestGeneration
+      ) {
+        await reconcileCurrentList();
+        await refreshTags();
+        return;
+      }
       detail.value = null;
       selectedId.value = null;
       await load();
       await refreshTags();
     } catch (operationError) {
-      error.value = getErrorMessage(operationError, "永久删除失败");
+      if (
+        selectedId.value === requestEntryId &&
+        selectionGeneration.value === requestGeneration
+      ) {
+        error.value = getErrorMessage(operationError, "永久删除失败");
+      }
     }
   }
 
   async function setView(nextView: AppView) {
+    const nextTag = nextView === "tags" ? filters.tag : "";
+    const queryChanged = view.value !== nextView || filters.tag !== nextTag;
+    beginSelection();
     view.value = nextView;
-    filters.tag = nextView === "tags" ? filters.tag : "";
+    filters.tag = nextTag;
     selectedId.value = null;
     detail.value = null;
-    await load();
+    await loadEntries(true, () => true, false, queryChanged);
     await refreshTags();
   }
 
   async function setTagFilter(tag: string) {
+    const queryChanged = view.value !== "tags" || filters.tag !== tag;
+    beginSelection();
     filters.tag = tag;
     view.value = "tags";
     selectedId.value = null;
     detail.value = null;
-    await load();
+    await loadEntries(true, () => true, false, queryChanged);
   }
 
   async function setTypeFilter(value: EntryType | "") {
+    const queryChanged = filters.entryType !== value;
     filters.entryType = value;
-    await load();
+    await loadEntries(true, () => true, false, queryChanged);
   }
 
   async function setStatusFilter(value: EntryStatus | "") {
+    const queryChanged = filters.status !== value;
     filters.status = value;
-    await load();
+    await loadEntries(true, () => true, false, queryChanged);
   }
 
+  let pendingSearchQueryChange = false;
+
   function setQuery(value: string, switchView = true) {
+    const nextView = switchView && value.trim() ? "search" : view.value;
+    pendingSearchQueryChange ||=
+      filters.query !== value || view.value !== nextView;
     filters.query = value;
-    if (switchView && value.trim()) {
-      view.value = "search";
-    }
+    view.value = nextView;
     if (searchTimer) {
       clearTimeout(searchTimer);
     }
     searchTimer = setTimeout(() => {
       searchTimer = null;
-      void load();
+      const clearExisting = pendingSearchQueryChange;
+      pendingSearchQueryChange = false;
+      void loadEntries(true, () => true, false, clearExisting);
     }, SEARCH_DEBOUNCE_MS);
   }
 
@@ -320,19 +417,19 @@ export const useEntriesStore = defineStore("entries", () => {
 
   function upsertListItem(updated: EntryDetail) {
     const index = items.value.findIndex((item) => item.id === updated.id);
-    if (index < 0) {
-      return;
-    }
+    if (index < 0) return false;
     if (!matchesCurrentFilter(updated)) {
       items.value.splice(index, 1);
       // Clear selected detail if the entry no longer matches the current filter.
       if (selectedId.value === updated.id) {
+        beginSelection();
         selectedId.value = null;
         detail.value = null;
       }
-      return;
+      return true;
     }
     items.value.splice(index, 1, toListItem(updated));
+    return true;
   }
 
   function toListItem(updated: EntryDetail): EntryListItem {
@@ -364,10 +461,12 @@ export const useEntriesStore = defineStore("entries", () => {
     tags,
     selectedId,
     selectedItem,
+    selectionGeneration,
     detail,
     loading,
     detailLoading,
     error,
+    tagsError,
     externalChangeToken,
     hasMore,
     load,
@@ -378,6 +477,7 @@ export const useEntriesStore = defineStore("entries", () => {
     noteExternalChange,
     updateSelected,
     applySavedEntry,
+    applyEntryListUpdate,
     moveSelectedToTrash,
     restoreSelected,
     deleteSelectedForever,
