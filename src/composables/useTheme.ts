@@ -7,9 +7,13 @@ const html = document.documentElement;
 const query = window.matchMedia("(prefers-color-scheme: dark)");
 
 function readInitialMode(): ThemeMode {
-  const saved = localStorage.getItem(storageKey);
-  if (saved === "light" || saved === "dark" || saved === "system") {
-    return saved;
+  try {
+    const saved = localStorage.getItem(storageKey);
+    if (saved === "light" || saved === "dark" || saved === "system") {
+      return saved;
+    }
+  } catch {
+    // Private mode / blocked storage: fall back to system.
   }
   return "system";
 }
@@ -39,7 +43,11 @@ function applyTheme(theme: "light" | "dark") {
 
 function setMode(next: ThemeMode) {
   mode.value = next;
-  localStorage.setItem(storageKey, next);
+  try {
+    localStorage.setItem(storageKey, next);
+  } catch {
+    // Keep in-memory mode even when persistence is unavailable.
+  }
 }
 
 // Side effect runs once on module import; keeps DOM in sync with resolvedTheme.

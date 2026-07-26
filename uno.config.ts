@@ -25,6 +25,8 @@ export default defineConfig({
         subtle: "var(--color-success-subtle)",
       },
       warning: "var(--color-warning)",
+      selected: "var(--color-bg-selected)",
+      backdrop: "var(--color-backdrop)",
       bg: {
         base: "var(--color-bg-base)",
         elevated: "var(--color-bg-elevated)",
@@ -47,6 +49,66 @@ export default defineConfig({
         placeholder: "var(--color-text-placeholder)",
         disabled: "var(--color-text-disabled)",
       },
+      "on-brand": "var(--color-on-brand)",
+      "on-danger": "var(--color-on-danger)",
+    },
+    fontSize: {
+      display: [
+        "var(--text-display)",
+        {
+          "line-height": "var(--text-display-line-height)",
+          "font-weight": "var(--text-display-weight)",
+          "letter-spacing": "var(--text-display-tracking)",
+        },
+      ],
+      title: [
+        "var(--text-title)",
+        {
+          "line-height": "var(--text-title-line-height)",
+          "font-weight": "var(--text-title-weight)",
+          "letter-spacing": "var(--text-title-tracking)",
+        },
+      ],
+      heading: [
+        "var(--text-heading)",
+        {
+          "line-height": "var(--text-heading-line-height)",
+          "font-weight": "var(--text-heading-weight)",
+          "letter-spacing": "var(--text-heading-tracking)",
+        },
+      ],
+      body: [
+        "var(--text-body)",
+        {
+          "line-height": "var(--text-body-line-height)",
+          "font-weight": "var(--text-body-weight)",
+          "letter-spacing": "var(--text-body-tracking)",
+        },
+      ],
+      ui: [
+        "var(--text-ui)",
+        {
+          "line-height": "var(--text-ui-line-height)",
+          "font-weight": "var(--text-ui-weight)",
+          "letter-spacing": "var(--text-ui-tracking)",
+        },
+      ],
+      caption: [
+        "var(--text-caption)",
+        {
+          "line-height": "var(--text-caption-line-height)",
+          "font-weight": "var(--text-caption-weight)",
+          "letter-spacing": "var(--text-caption-tracking)",
+        },
+      ],
+      micro: [
+        "var(--text-micro)",
+        {
+          "line-height": "var(--text-micro-line-height)",
+          "font-weight": "var(--text-micro-weight)",
+          "letter-spacing": "var(--text-micro-tracking)",
+        },
+      ],
     },
     boxShadow: {
       sm: "var(--shadow-sm)",
@@ -54,52 +116,63 @@ export default defineConfig({
       lg: "var(--shadow-lg)",
       xl: "var(--shadow-xl)",
       glow: "var(--color-brand-glow)",
-      focus: "0 0 0 3px var(--color-focus-ring-bg)",
-      "focus-glow": "0 0 0 3px var(--color-focus-ring-bg), var(--color-brand-glow)",
     },
-    animation: {
-      "scale-spring": "scale-spring 200ms cubic-bezier(0.34, 1.56, 0.64, 1)",
-      "fade-in": "fade-in 200ms cubic-bezier(0.16, 1, 0.3, 1)",
-      "pulse-saved": "pulse-saved 1.5s cubic-bezier(0.16, 1, 0.3, 1)",
-    },
-    keyframes: {
-      "scale-spring": {
-        "0%": { opacity: "0", transform: "scale(0.95)" },
-        "100%": { opacity: "1", transform: "scale(1)" },
-      },
-      "fade-in": {
-        "0%": { opacity: "0" },
-        "100%": { opacity: "1" },
-      },
-      "pulse-saved": {
-        "0%": { boxShadow: "0 0 0 0 rgba(22, 114, 70, 0.4), var(--shadow-md)" },
-        "70%": { boxShadow: "0 0 0 6px rgba(22, 114, 70, 0), var(--shadow-md)" },
-        "100%": { boxShadow: "var(--shadow-md)" },
-      },
+    duration: {
+      fast: "var(--duration-fast)",
+      base: "var(--duration-base)",
+      slow: "var(--duration-slow)",
     },
   },
+  rules: [
+    [
+      "animate-fade-in",
+      { animation: "fade-in var(--duration-base) var(--ease-out)" },
+    ],
+    [
+      "skeleton-pulse",
+      {
+        animation:
+          "skeleton-pulse var(--duration-slow) var(--ease-out) infinite alternate",
+      },
+    ],
+    ["ease-token", { "transition-timing-function": "var(--ease-out)" }],
+  ],
   shortcuts: {
     // Layout
     "flex-center": "flex items-center justify-center",
     "flex-between": "flex items-center justify-between",
-    
+
     // Interactions
-    "ring-focus": "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand/20",
-    "ring-focus-danger": "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-danger/20",
-    
+    "ring-focus":
+      "focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-[var(--color-focus-ring-bg)]",
+    // Elevation
+    "elevation-0": "shadow-none",
+    "elevation-panel": "shadow-none",
+    "elevation-1": "border border-border shadow-none",
+    "elevation-2": "border border-border shadow-md",
+    "elevation-3": "border border-border shadow-xl",
+
     // UI Elements
-    "btn-base": "inline-flex items-center justify-center gap-2 rounded-md font-medium transition-all duration-150 ring-focus disabled:opacity-55 disabled:cursor-not-allowed",
-    "btn-primary": "btn-base min-w-[88px] h-[38px] px-3 bg-brand text-white border border-brand hover:bg-brand-hover hover:border-brand-hover active:bg-brand-active active:scale-97 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_var(--color-brand-shadow)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_2px_6px_var(--color-brand-shadow)]",
-    "btn-primary-danger": "btn-primary bg-danger border-danger hover:bg-danger-hover hover:border-danger-hover active:bg-danger-hover shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_var(--color-danger-shadow)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_2px_6px_var(--color-danger-shadow)]",
-    "btn-secondary": "btn-base min-w-[88px] h-[38px] px-3 bg-bg-elevated text-text-primary border border-border-strong hover:bg-bg-hover hover:border-border-hover active:bg-bg-active active:scale-97",
-    "btn-icon": "btn-base size-[34px] bg-bg-elevated text-text-secondary border border-border-strong hover:bg-bg-hover hover:border-border-hover hover:text-text-primary active:scale-95",
-    "btn-icon-danger": "btn-icon text-danger border-danger/30 hover:bg-danger/10 hover:border-danger/40 hover:text-danger",
-    
+    "btn-base":
+      "inline-flex items-center justify-center gap-2 rounded-md font-medium transition-[color,background-color,border-color,box-shadow] duration-fast ease-token ring-focus disabled:opacity-55 disabled:cursor-not-allowed",
+    "btn-primary":
+      "btn-base min-w-[88px] h-[36px] px-3 bg-brand text-on-brand border border-brand hover:bg-brand-hover hover:border-brand-hover active:bg-brand-active shadow-[0_1px_2px_var(--color-brand-shadow)]",
+    "btn-primary-danger":
+      "btn-primary bg-danger text-on-danger border-danger hover:bg-danger-hover hover:border-danger-hover active:bg-danger-hover shadow-[0_1px_2px_var(--color-danger-shadow)]",
+    "btn-secondary":
+      "btn-base min-w-[88px] h-[36px] px-3 bg-bg-elevated text-text-primary border border-border-strong hover:bg-bg-hover hover:border-border-hover active:bg-bg-active",
+    "btn-icon":
+      "btn-base size-[34px] bg-transparent text-text-secondary border border-transparent hover:bg-bg-hover hover:text-text-primary active:bg-bg-active",
+    "btn-icon-danger":
+      "btn-icon text-danger hover:bg-danger/10 hover:text-danger",
+
     // Form Inputs
-    "input-base": "w-full border border-border-strong rounded-md bg-bg-base text-text-primary placeholder:text-text-placeholder transition-colors duration-150 ring-focus focus:border-brand focus:bg-bg-elevated disabled:opacity-55 disabled:cursor-not-allowed",
-    "select-base": "h-[38px] px-3 border border-border-strong rounded-md bg-bg-elevated text-text-primary transition-colors duration-150 ring-focus focus:border-brand disabled:opacity-55 disabled:cursor-not-allowed",
-    
-    // Glassmorphism
-    "glass-panel": "bg-white/70 dark:bg-[#181c1e]/70 backdrop-blur-xl",
+    "input-base":
+      "w-full border border-border-strong rounded-md bg-bg-elevated text-text-primary placeholder:text-text-placeholder transition-[color,background-color,border-color,box-shadow] duration-fast ease-token ring-focus focus:border-brand disabled:opacity-55 disabled:cursor-not-allowed",
+    "select-base":
+      "h-[36px] px-3 border border-border-strong rounded-md bg-bg-elevated text-text-primary transition-[color,background-color,border-color,box-shadow] duration-fast ease-token ring-focus focus:border-brand disabled:opacity-55 disabled:cursor-not-allowed",
+
+    // Translucent chrome is reserved for persistent navigation surfaces.
+    "glass-panel": "bg-[var(--color-bg-translucent)] backdrop-blur-xl",
   },
 });
