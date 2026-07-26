@@ -373,18 +373,19 @@ impl KnowledgeRepo {
         conn: &Connection,
         entry_ids: &[String],
     ) -> AppResult<HashMap<String, Vec<String>>> {
+        if entry_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let mut aliases = HashMap::new();
-        let mut stmt = conn.prepare(
-            "SELECT entry_id, alias FROM entry_aliases ORDER BY created_at, normalized_alias",
-        )?;
-        let rows = stmt.query_map([], |row| {
+        let sql = aliases_for_entries_sql(entry_ids.len());
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(entry_ids.iter()), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         for row in rows {
             let (entry_id, alias) = row?;
-            if entry_ids.contains(&entry_id) {
-                aliases.entry(entry_id).or_insert_with(Vec::new).push(alias);
-            }
+            aliases.entry(entry_id).or_insert_with(Vec::new).push(alias);
         }
         Ok(aliases)
     }
@@ -430,6 +431,16 @@ impl KnowledgeRepo {
         }
         Self::rebuild_all_indexes(conn).map(|_| ())
     }
+}
+
+fn aliases_for_entries_sql(id_count: usize) -> String {
+    let placeholders = (1..=id_count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT entry_id, alias FROM entry_aliases WHERE entry_id IN ({placeholders}) ORDER BY created_at, normalized_alias"
+    )
 }
 
 fn ensure_link_index_ready(conn: &Connection) -> AppResult<()> {
@@ -578,6 +589,81 @@ mod tests {
             knowledge::KnowledgeState,
         },
     };
+
+    #[test]
+    fn aliases_for_entries_sql_scopes_to_requested_ids() {
+        assert_eq!(
+            aliases_for_entries_sql(0),
+            "SELECT entry_id, alias FROM entry_aliases WHERE entry_id IN () ORDER BY created_at, normalized_alias"
+        );
+        assert_eq!(
+            aliases_for_entries_sql(1),
+            "SELECT entry_id, alias FROM entry_aliases WHERE entry_id IN (?1) ORDER BY created_at, normalized_alias"
+        );
+        assert_eq!(
+            aliases_for_entries_sql(3),
+            "SELECT entry_id, alias FROM entry_aliases WHERE entry_id IN (?1, ?2, ?3) ORDER BY created_at, normalized_alias"
+        );
+
+        let sql = aliases_for_entries_sql(2);
+        assert!(sql.contains("WHERE entry_id IN (?1, ?2)"));
+        assert_eq!(sql.matches('?').count(), 2);
+    }
+
+    #[test]
+    fn aliases_for_entries_returns_only_requested_entry_aliases() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let target = EntriesRepo::create(&tx, "Target Entry", &now).unwrap();
+        let other = EntriesRepo::create(&tx, "Other Entry", &now).unwrap();
+        tx.commit().unwrap();
+
+        for index in 0..50 {
+            conn.execute(
+                "INSERT INTO entry_aliases(normalized_alias, entry_id, alias, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    format!("target-alias-{index}"),
+                    target.id,
+                    format!("Target Alias {index}"),
+                    now
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entry_aliases(normalized_alias, entry_id, alias, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    format!("other-alias-{index}"),
+                    other.id,
+                    format!("Other Alias {index}"),
+                    now
+                ],
+            )
+            .unwrap();
+        }
+
+        let empty = KnowledgeRepo::aliases_for_entries(&conn, &[]).unwrap();
+        assert!(empty.is_empty());
+
+        let aliases =
+            KnowledgeRepo::aliases_for_entries(&conn, &[target.id.clone()]).unwrap();
+        assert_eq!(aliases.len(), 1);
+        let target_aliases = aliases.get(&target.id).expect("target aliases present");
+        assert_eq!(target_aliases.len(), 50);
+        assert!(target_aliases.iter().all(|alias| alias.starts_with("Target Alias ")));
+        assert!(!aliases.contains_key(&other.id));
+
+        let both = KnowledgeRepo::aliases_for_entries(
+            &conn,
+            &[target.id.clone(), other.id.clone()],
+        )
+        .unwrap();
+        assert_eq!(both.len(), 2);
+        assert_eq!(both.get(&target.id).map(Vec::len), Some(50));
+        assert_eq!(both.get(&other.id).map(Vec::len), Some(50));
+    }
 
     #[test]
     fn suggest_matches_current_title_and_alias_but_excludes_trash() {
