@@ -5,6 +5,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import type { AppView } from "../../app/routes";
 import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
+import { useAppShellShortcuts } from "../../composables/useAppShellShortcuts";
 import { windowOpenQuickCapture } from "../../services/windowApi";
 import { useEntriesStore } from "../../stores/entries";
 import type { EntryStatus, EntryType } from "../../types/generated";
@@ -40,45 +41,35 @@ const viewLabels: Record<AppView, string> = {
   trash: "回收站",
   settings: "设置",
 };
-
 const currentViewLabel = computed(() => viewLabels[entries.view]);
 const showDetailActions = computed(
   () => entries.view !== "settings" && Boolean(entries.detail),
 );
 const searchQuery = ref(entries.filters.query);
-
 watch(
   () => entries.filters.query,
   (value) => {
-    if (searchQuery.value !== value) {
-      searchQuery.value = value;
-    }
+    if (searchQuery.value !== value) searchQuery.value = value;
   },
 );
 
 function closeTagPanel(returnFocus = false) {
   if (!tagPanelOpen.value) return;
   tagPanelOpen.value = false;
-  if (returnFocus) {
-    void nextTick(() => topbarRef.value?.tagButtonRef?.focus());
-  }
+  if (returnFocus) void nextTick(() => topbarRef.value?.tagButtonRef?.focus());
 }
 
-function onGlobalKeydown(event: KeyboardEvent) {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-    event.preventDefault();
-    topbarRef.value?.focusSearch();
-    return;
-  }
-  if (
-    event.key === "Delete" &&
+/** Detail menu / filter own Escape; AppShell only closes the tag panel. */
+function closeTopmostOverlay() {
+  if (tagPanelOpen.value) closeTagPanel(true);
+}
+
+function canDeleteSelected() {
+  return (
     entries.view !== "trash" &&
-    entries.selectedId &&
-    document.activeElement?.closest(".entry-list")
-  ) {
-    event.preventDefault();
-    void requestMoveSelectedToTrash();
-  }
+    Boolean(entries.selectedId) &&
+    Boolean(document.activeElement?.closest(".entry-list"))
+  );
 }
 
 function onDocumentPointerDown(event: globalThis.PointerEvent) {
@@ -94,36 +85,6 @@ function onDocumentPointerDown(event: globalThis.PointerEvent) {
   }
 }
 
-useAppQuitRequest(flushDetail);
-
-onMounted(async () => {
-  window.addEventListener("keydown", onGlobalKeydown);
-  document.addEventListener("pointerdown", onDocumentPointerDown);
-  if (isTauri()) {
-    const unlisten = await listen("entries-changed", async () => {
-      if (await flushDetail()) {
-        await entries.load();
-        await entries.refreshTags();
-        entries.noteExternalChange();
-      }
-    });
-    if (disposed) {
-      unlisten();
-      return;
-    }
-    unlistenEntriesChanged = unlisten;
-    await entries.load();
-    await entries.refreshTags();
-  }
-});
-
-onUnmounted(() => {
-  disposed = true;
-  unlistenEntriesChanged?.();
-  window.removeEventListener("keydown", onGlobalKeydown);
-  document.removeEventListener("pointerdown", onDocumentPointerDown);
-});
-
 async function flushDetail() {
   return (await detailRef.value?.flushPendingSave()) ?? true;
 }
@@ -133,14 +94,47 @@ async function requestMoveSelectedToTrash() {
   detailRef.value?.requestMoveToTrash();
 }
 
+useAppQuitRequest(flushDetail);
+useAppShellShortcuts({
+  focusSearch: () => topbarRef.value?.focusSearch(),
+  closeTopmostOverlay,
+  canDelete: canDeleteSelected,
+  requestDelete: () => {
+    void requestMoveSelectedToTrash();
+  },
+});
+
+onMounted(async () => {
+  document.addEventListener("pointerdown", onDocumentPointerDown);
+  if (!isTauri()) return;
+  const unlisten = await listen("entries-changed", async () => {
+    if (await flushDetail()) {
+      await entries.load();
+      await entries.refreshTags();
+      entries.noteExternalChange();
+    }
+  });
+  if (disposed) {
+    unlisten();
+    return;
+  }
+  unlistenEntriesChanged = unlisten;
+  await entries.load();
+  await entries.refreshTags();
+});
+
+onUnmounted(() => {
+  disposed = true;
+  unlistenEntriesChanged?.();
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+});
+
 async function selectEntry(id: string) {
   if (await flushDetail()) await entries.select(id);
 }
-
 async function openRelatedEntry(id: string) {
   if (await flushDetail()) await entries.openEntry(id);
 }
-
 async function changeView(view: AppView) {
   if (await flushDetail()) {
     tagPanelOpen.value = false;
@@ -148,22 +142,18 @@ async function changeView(view: AppView) {
     await entries.setView(view);
   }
 }
-
 async function setTagFilter(tag: string) {
   if (await flushDetail()) {
     tagPanelOpen.value = false;
     await entries.setTagFilter(tag);
   }
 }
-
 async function setTypeFilter(value: EntryType | "") {
   if (await flushDetail()) await entries.setTypeFilter(value);
 }
-
 async function setStatusFilter(value: EntryStatus | "") {
   if (await flushDetail()) await entries.setStatusFilter(value);
 }
-
 function setQuery(value: string) {
   searchQuery.value = value;
   entries.setQuery(value);
@@ -181,7 +171,6 @@ function setQuery(value: string) {
     class="grid h-screen min-h-[480px] grid-cols-[64px_minmax(0,1fr)] overflow-hidden bg-bg-base md:grid-cols-[200px_minmax(0,1fr)]"
   >
     <SidebarNav :view="entries.view" @change="changeView" />
-
     <section
       id="workspace"
       class="flex min-w-0 flex-col overflow-hidden"
@@ -190,28 +179,18 @@ function setQuery(value: string) {
     >
       <AppTopbar
         ref="topbarRef"
-        :model-value="searchQuery"
-        :tag-panel-open="tagPanelOpen"
-        :view-label="currentViewLabel"
-        :view="entries.view"
+        :model-value="searchQuery" :tag-panel-open="tagPanelOpen"
+        :view-label="currentViewLabel" :view="entries.view"
         :current-tag="entries.filters.tag"
-        :entry-type="entries.filters.entryType"
-        :status="entries.filters.status"
-        :show-detail-actions="showDetailActions"
-        :toolbar-state="toolbarState"
-        @update:model-value="setQuery"
-        @update:tag-panel-open="tagPanelOpen = $event"
-        @type-change="setTypeFilter"
-        @status-change="setStatusFilter"
-        @quick-capture="windowOpenQuickCapture"
-        @retry="detailRef?.retrySave()"
-        @promote="detailRef?.promoteToKnowledge()"
-        @demote="detailRef?.demoteFromKnowledge()"
-        @restore="detailRef?.restore()"
-        @delete-forever="detailRef?.requestDeleteForever()"
+        :entry-type="entries.filters.entryType" :status="entries.filters.status"
+        :show-detail-actions="showDetailActions" :toolbar-state="toolbarState"
+        @update:model-value="setQuery" @update:tag-panel-open="tagPanelOpen = $event"
+        @type-change="setTypeFilter" @status-change="setStatusFilter"
+        @quick-capture="windowOpenQuickCapture" @retry="detailRef?.retrySave()"
+        @promote="detailRef?.promoteToKnowledge()" @demote="detailRef?.demoteFromKnowledge()"
+        @restore="detailRef?.restore()" @delete-forever="detailRef?.requestDeleteForever()"
         @move-to-trash="requestMoveSelectedToTrash"
       />
-
       <p
         v-if="entries.error && entries.view !== 'settings'"
         class="elevation-1 z-10 m-0 shrink-0 border-x-0 border-t-0 bg-bg-elevated px-4 py-2 text-ui text-danger"
@@ -219,7 +198,6 @@ function setQuery(value: string) {
       >
         {{ entries.error }}
       </p>
-
       <section class="relative min-h-0 flex-1 overflow-hidden">
         <section v-if="entries.view === 'settings'" class="h-full overflow-auto">
           <SettingsView />
@@ -229,18 +207,13 @@ function setQuery(value: string) {
           class="grid h-full min-h-0 grid-cols-[minmax(300px,34%)_minmax(0,1fr)]"
         >
           <EntryList
-            :items="entries.items"
-            :selected-id="entries.selectedId"
-            :loading="entries.loading"
-            :has-more="entries.hasMore"
-            @select="selectEntry"
-            @more="entries.loadMore"
+            :items="entries.items" :selected-id="entries.selectedId"
+            :loading="entries.loading" :has-more="entries.hasMore"
+            @select="selectEntry" @more="entries.loadMore"
           />
-
           <EntryDetail
             ref="detailRef"
-            :detail="entries.detail"
-            :loading="entries.detailLoading"
+            :detail="entries.detail" :loading="entries.detailLoading"
             :refresh-token="entries.externalChangeToken"
             :selection-generation="entries.selectionGeneration"
             @toolbar-change="toolbarState = $event"
@@ -252,16 +225,13 @@ function setQuery(value: string) {
             @open-related="openRelatedEntry"
           />
         </section>
-
         <Transition name="tag-panel">
           <TagFilterPanel
             v-if="entries.view === 'tags' && tagPanelOpen"
             ref="tagPanelRef"
-            :tags="entries.tags"
-            :current-tag="entries.filters.tag"
+            :tags="entries.tags" :current-tag="entries.filters.tag"
             :tags-error="entries.tagsError"
-            @select="setTagFilter"
-            @close="closeTagPanel"
+            @select="setTagFilter" @close="closeTagPanel"
             @retry="entries.refreshTags()"
           />
         </Transition>
@@ -273,11 +243,9 @@ function setQuery(value: string) {
 <style scoped>
 .tag-panel-enter-active,
 .tag-panel-leave-active {
-  transition:
-    opacity var(--duration-base) var(--ease-out),
+  transition: opacity var(--duration-base) var(--ease-out),
     transform var(--duration-base) var(--ease-out);
 }
-
 .tag-panel-enter-from,
 .tag-panel-leave-to {
   opacity: 0;
