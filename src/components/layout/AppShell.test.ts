@@ -13,6 +13,7 @@ const wrappers: VueWrapper[] = [];
 
 const detailCommands = {
   flushPendingSave: vi.fn().mockResolvedValue(true),
+  requestMoveToTrash: vi.fn(),
 };
 
 const entries = reactive({
@@ -31,6 +32,7 @@ const entries = reactive({
   detailLoading: false,
   error: null,
   externalChangeToken: 0,
+  selectionGeneration: 0,
   hasMore: false,
   load: vi.fn(),
   loadMore: vi.fn(),
@@ -39,6 +41,7 @@ const entries = reactive({
   openEntry: vi.fn(),
   noteExternalChange: vi.fn(),
   applySavedEntry: vi.fn(),
+  applyEntryListUpdate: vi.fn(),
   moveSelectedToTrash: vi.fn(),
   restoreSelected: vi.fn(),
   deleteSelectedForever: vi.fn(),
@@ -63,10 +66,27 @@ vi.mock("../../composables/useAppQuitRequest", () => ({
 }));
 
 const EntryDetailStub = defineComponent({
-  emits: ["open-related"],
+  emits: ["open-related", "toolbar-change"],
   setup(_, { expose }) {
     expose(detailCommands);
     return () => h("section", { "data-testid": "entry-detail" });
+  },
+});
+
+const EntryListStub = defineComponent({
+  name: "EntryList",
+  emits: ["select", "more"],
+  setup() {
+    return () =>
+      h(
+        "div",
+        {
+          class: "entry-list",
+          tabindex: 0,
+          "data-testid": "entry-list",
+        },
+        "list",
+      );
   },
 });
 
@@ -76,7 +96,7 @@ function mountShell(attachTo?: HTMLElement) {
     global: {
       stubs: {
         SidebarNav: true,
-        EntryList: true,
+        EntryList: EntryListStub,
         EntryDetail: EntryDetailStub,
         SettingsView: true,
       },
@@ -89,15 +109,19 @@ function mountShell(attachTo?: HTMLElement) {
 describe("AppShell selection commit boundary", () => {
   beforeEach(() => {
     detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.requestMoveToTrash.mockReset();
     entries.view = "inbox";
     entries.selectedId = "entry-1";
+    entries.filters.query = "";
     entries.error = null;
     entries.load.mockReset();
     entries.refreshTags.mockReset();
     entries.select.mockReset();
     entries.openEntry.mockReset();
     entries.noteExternalChange.mockReset();
+    entries.moveSelectedToTrash.mockReset();
     entries.setView.mockReset();
+    entries.setQuery.mockReset();
     tauriMocks.isTauri.mockReset().mockReturnValue(false);
     tauriMocks.listen.mockReset();
   });
@@ -163,5 +187,116 @@ describe("AppShell selection commit boundary", () => {
     await flushPromises();
     expect(detailCommands.flushPendingSave).toHaveBeenCalled();
     expect(entries.select).toHaveBeenCalledWith("entry-2");
+  });
+});
+
+describe("AppShell delete flush boundary", () => {
+  beforeEach(() => {
+    detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.requestMoveToTrash.mockReset();
+    entries.view = "inbox";
+    entries.selectedId = "entry-1";
+    entries.filters.query = "";
+    entries.error = null;
+    entries.moveSelectedToTrash.mockReset();
+    entries.setQuery.mockReset();
+    tauriMocks.isTauri.mockReset().mockReturnValue(false);
+    tauriMocks.listen.mockReset();
+  });
+
+  afterEach(() => {
+    while (wrappers.length > 0) {
+      wrappers.pop()?.unmount();
+    }
+  });
+
+  it("does not move to trash when flush fails on Delete", async () => {
+    detailCommands.flushPendingSave.mockResolvedValue(false);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const wrapper = mountShell(host);
+    await flushPromises();
+
+    const list = wrapper.get("[data-testid='entry-list']")
+      .element as HTMLElement;
+    list.focus();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+    );
+    await flushPromises();
+
+    expect(detailCommands.flushPendingSave).toHaveBeenCalled();
+    expect(detailCommands.requestMoveToTrash).not.toHaveBeenCalled();
+    expect(entries.moveSelectedToTrash).not.toHaveBeenCalled();
+    host.remove();
+  });
+
+  it("requests move to trash via detail after successful flush on Delete", async () => {
+    detailCommands.flushPendingSave.mockResolvedValue(true);
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const wrapper = mountShell(host);
+    await flushPromises();
+
+    const list = wrapper.get("[data-testid='entry-list']")
+      .element as HTMLElement;
+    list.focus();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+    );
+    await flushPromises();
+
+    expect(detailCommands.flushPendingSave).toHaveBeenCalled();
+    expect(detailCommands.requestMoveToTrash).toHaveBeenCalled();
+    expect(entries.moveSelectedToTrash).not.toHaveBeenCalled();
+    host.remove();
+  });
+});
+
+describe("AppShell search input race", () => {
+  beforeEach(() => {
+    detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.requestMoveToTrash.mockReset();
+    entries.view = "inbox";
+    entries.selectedId = "entry-1";
+    entries.filters.query = "";
+    entries.error = null;
+    entries.setQuery.mockReset();
+    tauriMocks.isTauri.mockReset().mockReturnValue(false);
+    tauriMocks.listen.mockReset();
+  });
+
+  afterEach(() => {
+    while (wrappers.length > 0) {
+      wrappers.pop()?.unmount();
+    }
+  });
+
+  it("updates search input immediately without awaiting detail flush", async () => {
+    let resolveFlush: ((value: boolean) => void) | undefined;
+    detailCommands.flushPendingSave.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveFlush = resolve;
+        }),
+    );
+
+    const wrapper = mountShell();
+    await flushPromises();
+
+    const input = wrapper.get("#global-search");
+
+    await input.setValue("知");
+    await input.setValue("知识");
+    await input.setValue("知识库");
+
+    expect((input.element as HTMLInputElement).value).toBe("知识库");
+    expect(entries.setQuery).toHaveBeenCalledWith("知");
+    expect(entries.setQuery).toHaveBeenCalledWith("知识");
+    expect(entries.setQuery).toHaveBeenCalledWith("知识库");
+    expect(detailCommands.flushPendingSave).not.toHaveBeenCalled();
+
+    resolveFlush?.(true);
+    await flushPromises();
   });
 });
