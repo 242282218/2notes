@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { entriesUpdate } from "../../services/entryApi";
 import {
+  knowledgeDemote,
   knowledgePromote,
   knowledgeSuggest,
 } from "../../services/knowledgeApi";
@@ -32,6 +33,7 @@ describe("EntryDetail", () => {
     vi.useFakeTimers();
     vi.mocked(entriesUpdate).mockReset();
     vi.mocked(knowledgePromote).mockReset();
+    vi.mocked(knowledgeDemote).mockReset();
     vi.mocked(knowledgeSuggest).mockReset().mockResolvedValue([]);
   });
 
@@ -145,10 +147,354 @@ describe("EntryDetail", () => {
     const wrapper = mount(EntryDetail, { props: { detail, loading: false } });
     await flushPromises();
     await wrapper.get('input[placeholder="标题"]').setValue("确认后的标题");
-    await wrapper.get('button[aria-label="沉淀为知识"]').trigger("click");
+    const exposed = wrapper.vm as unknown as {
+      promoteToKnowledge: () => Promise<void>;
+    };
+    await exposed.promoteToKnowledge();
     await flushPromises();
     expect(entriesUpdate).toHaveBeenCalled();
     expect(knowledgePromote).toHaveBeenCalledWith(detail.id, 1);
+  });
+
+  it("does not emit a stale promotion after selection changes", async () => {
+    const pendingPromotion = deferred<EntryDetailType>();
+    const first = entry();
+    const second = { ...entry(), id: "entry-2", title: "second" };
+    vi.mocked(knowledgePromote).mockReturnValue(pendingPromotion.promise);
+    const wrapper = mount(EntryDetail, {
+      props: { detail: first, loading: false },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as {
+      promoteToKnowledge: () => Promise<void>;
+    };
+    const promoting = exposed.promoteToKnowledge();
+    await flushPromises();
+    await wrapper.setProps({ detail: second });
+    await flushPromises();
+    await wrapper.setProps({ detail: first });
+    await flushPromises();
+    pendingPromotion.resolve({
+      ...first,
+      knowledgeState: "knowledge",
+      revision: 1,
+    });
+    await promoting;
+
+    expect(wrapper.emitted("saved")).toBeUndefined();
+    expect(wrapper.emitted("entryUpdated")?.[0]).toEqual([
+      expect.objectContaining({ id: first.id, revision: 1 }),
+    ]);
+  });
+
+  it("uses the same stale guard for demotion ABA responses", async () => {
+    const pendingDemotion = deferred<EntryDetailType>();
+    const first = { ...entry(), knowledgeState: "knowledge" as const };
+    const second = { ...entry(), id: "entry-2", title: "second" };
+    vi.mocked(knowledgeDemote).mockReturnValue(pendingDemotion.promise);
+    const wrapper = mount(EntryDetail, {
+      props: { detail: first, loading: false },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as {
+      demoteFromKnowledge: () => Promise<void>;
+    };
+    const demoting = exposed.demoteFromKnowledge();
+    await flushPromises();
+    await wrapper.setProps({ detail: second });
+    await flushPromises();
+    await wrapper.setProps({ detail: first });
+    await flushPromises();
+    pendingDemotion.resolve({
+      ...first,
+      knowledgeState: "capture",
+      revision: 1,
+    });
+    await demoting;
+
+    expect(wrapper.emitted("saved")).toBeUndefined();
+    expect(wrapper.emitted("entryUpdated")?.[0]).toEqual([
+      expect.objectContaining({ id: first.id, revision: 1 }),
+    ]);
+  });
+
+  it.each([
+    ["promotion", "capture", knowledgePromote, "promoteToKnowledge"],
+    ["demotion", "knowledge", knowledgeDemote, "demoteFromKnowledge"],
+  ] as const)(
+    "discards stale %s when only the selection token changes",
+    async (_, knowledgeState, api, action) => {
+      const pending = deferred<EntryDetailType>();
+      const current = { ...entry(), knowledgeState };
+      vi.mocked(api).mockReturnValue(pending.promise);
+      const wrapper = mount(EntryDetail, {
+        props: {
+          detail: current,
+          loading: false,
+          selectionGeneration: 1,
+        },
+      });
+      await flushPromises();
+
+      const exposed = wrapper.vm as unknown as Record<
+        typeof action,
+        () => Promise<void>
+      >;
+      const operation = exposed[action]();
+      await flushPromises();
+      await wrapper.setProps({ selectionGeneration: 2 });
+      pending.resolve({
+        ...current,
+        knowledgeState:
+          knowledgeState === "capture" ? "knowledge" : "capture",
+        revision: 1,
+      });
+      await operation;
+
+      expect(wrapper.emitted("saved")).toBeUndefined();
+      expect(wrapper.emitted("entryUpdated")?.[0]).toEqual([
+        expect.objectContaining({ id: current.id, revision: 1 }),
+      ]);
+    },
+  );
+
+  it("advances expected revision across continuous edits", async () => {
+    const detail = entry();
+    const firstSave = deferred<EntryDetailType>();
+    vi.mocked(entriesUpdate)
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockResolvedValueOnce({
+        ...detail,
+        currentContent: "second draft",
+        revision: 2,
+      });
+
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("first draft");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    expect(entriesUpdate).toHaveBeenCalledTimes(1);
+    expect(entriesUpdate).toHaveBeenLastCalledWith(
+      detail.id,
+      expect.objectContaining({ currentContent: "first draft" }),
+      0,
+    );
+
+    await wrapper.get("textarea").setValue("second draft");
+    firstSave.resolve({
+      ...detail,
+      currentContent: "first draft",
+      revision: 1,
+    });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(entriesUpdate).toHaveBeenCalledTimes(2);
+    expect(entriesUpdate).toHaveBeenLastCalledWith(
+      detail.id,
+      expect.objectContaining({ currentContent: "second draft" }),
+      1,
+    );
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "second draft",
+    );
+  });
+
+  it("keeps local fields when a newer same-id detail arrives while dirty", async () => {
+    const detail = entry();
+    const pendingSave = deferred<EntryDetailType>();
+    vi.mocked(entriesUpdate).mockReturnValue(pendingSave.promise);
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("local dirty content");
+    await wrapper.get('input[placeholder="标题"]').setValue("local title");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    await wrapper.setProps({
+      detail: {
+        ...detail,
+        title: "server title",
+        currentContent: "server content",
+        revision: 5,
+        tags: [
+          {
+            id: "tag-server",
+            name: "server-tag",
+            normalizedName: "server-tag",
+            createdAt: "2026-07-15T00:00:00Z",
+            entryCount: 1,
+          },
+        ],
+      },
+    });
+    await flushPromises();
+
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "local dirty content",
+    );
+    expect(
+      (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
+        .value,
+    ).toBe("local title");
+    expect(wrapper.text()).not.toContain("server-tag");
+
+    pendingSave.resolve({
+      ...detail,
+      title: "local title",
+      titleSource: "user",
+      currentContent: "local dirty content",
+      revision: 1,
+    });
+    await flushPromises();
+
+    // After the in-flight save settles, same-id prop replacement still must not
+    // clobber the local editor with the external server snapshot.
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "local dirty content",
+    );
+    expect(
+      (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
+        .value,
+    ).toBe("local title");
+    expect(wrapper.text()).not.toContain("server-tag");
+  });
+
+  it("keeps local fields for same-id replacement while dirty before save starts", async () => {
+    const detail = entry();
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("unsaved local body");
+    await wrapper.get('input[placeholder="标题"]').setValue("unsaved title");
+
+    await wrapper.setProps({
+      detail: {
+        ...detail,
+        title: "remote title",
+        currentContent: "remote body",
+        revision: 4,
+      },
+    });
+    await flushPromises();
+
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "unsaved local body",
+    );
+    expect(
+      (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
+        .value,
+    ).toBe("unsaved title");
+  });
+
+  it("fully hydrates a newer same-id detail when local state is clean", async () => {
+    const detail = entry();
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.setProps({
+      detail: {
+        ...detail,
+        title: "external title",
+        currentContent: "external content",
+        entryType: "idea",
+        status: "done",
+        revision: 3,
+        tags: [
+          {
+            id: "tag-ext",
+            name: "external",
+            normalizedName: "external",
+            createdAt: "2026-07-15T00:00:00Z",
+            entryCount: 1,
+          },
+        ],
+      },
+    });
+    await flushPromises();
+
+    expect(
+      (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
+        .value,
+    ).toBe("external title");
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "external content",
+    );
+    expect(
+      (wrapper.get("select.entry-type-select").element as HTMLSelectElement)
+        .value,
+    ).toBe("idea");
+    expect(
+      (wrapper.get("select.entry-status-select").element as HTMLSelectElement)
+        .value,
+    ).toBe("done");
+    expect(wrapper.text()).toContain("external");
+  });
+
+  it("does not reset local fields when save success replaces same-id detail", async () => {
+    const detail = entry();
+    vi.mocked(entriesUpdate).mockResolvedValue({
+      ...detail,
+      currentContent: "saved content",
+      revision: 1,
+    });
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.get("textarea").setValue("saved content");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    await wrapper.setProps({
+      detail: {
+        ...detail,
+        currentContent: "saved content",
+        revision: 1,
+      },
+    });
+    await flushPromises();
+
+    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
+      "saved content",
+    );
+    await wrapper.get("textarea").setValue("follow-up edit");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(entriesUpdate).toHaveBeenLastCalledWith(
+      detail.id,
+      expect.objectContaining({ currentContent: "follow-up edit" }),
+      1,
+    );
+  });
+
+  it("cancels pending autosave when unmounted", async () => {
+    const wrapper = mount(EntryDetail, {
+      props: { detail: entry(), loading: false },
+    });
+    await flushPromises();
+    await wrapper.get("textarea").setValue("dirty content");
+
+    wrapper.unmount();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(entriesUpdate).not.toHaveBeenCalled();
   });
 
   it("disables promotion for an empty title", async () => {
@@ -156,9 +502,57 @@ describe("EntryDetail", () => {
       props: { detail: { ...entry(), title: null }, loading: false },
     });
     await flushPromises();
-    expect(
-      wrapper.get('button[aria-label="沉淀为知识"]').attributes(),
-    ).toHaveProperty("disabled");
+    const events = wrapper.emitted("toolbarChange") ?? [];
+    expect(events[events.length - 1]?.[0]).toMatchObject({
+      showPromote: true,
+      canPromote: false,
+    });
+  });
+
+  it("hides promotion outside an active capture entry", async () => {
+    const knowledgeWrapper = mount(EntryDetail, {
+      props: {
+        detail: { ...entry(), knowledgeState: "knowledge" },
+        loading: false,
+      },
+    });
+    await flushPromises();
+    const knowledgeEvents = knowledgeWrapper.emitted("toolbarChange") ?? [];
+    expect(knowledgeEvents[knowledgeEvents.length - 1]?.[0]).toMatchObject({
+      showPromote: false,
+    });
+
+    const deletedWrapper = mount(EntryDetail, {
+      props: {
+        detail: { ...entry(), deletedAt: "2026-07-25T00:00:00Z" },
+        loading: false,
+      },
+    });
+    await flushPromises();
+    const deletedEvents = deletedWrapper.emitted("toolbarChange") ?? [];
+    expect(deletedEvents[deletedEvents.length - 1]?.[0]).toMatchObject({
+      showPromote: false,
+    });
+  });
+
+  it("reports toolbar state without rendering its own header or fixed save state", async () => {
+    const wrapper = mount(EntryDetail, {
+      props: { detail: entry(), loading: false },
+    });
+    await flushPromises();
+
+    expect(wrapper.find("header").exists()).toBe(false);
+    const article = wrapper.get("article");
+    expect(article.classes()).toContain("elevation-panel");
+    expect(article.classes()).not.toContain("border");
+    expect(wrapper.find("[data-testid='save-state']").exists()).toBe(false);
+    expect(wrapper.html()).not.toContain("fixed bottom-4 right-4");
+    const events = wrapper.emitted("toolbarChange") ?? [];
+    expect(events[events.length - 1]?.[0]).toMatchObject({
+      canPromote: true,
+      canDemote: false,
+      deleted: false,
+    });
   });
 
   it("navigates open wiki link suggestions and exposes the active option", async () => {

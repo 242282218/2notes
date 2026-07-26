@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { FileText, RotateCcw, Trash2 } from "lucide-vue-next";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  ref,
+  watch,
+  watchEffect,
+} from "vue";
+import { ChevronRight, FileText } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
 import {
@@ -21,10 +28,9 @@ import type {
   EntryType,
   KnowledgeSuggestion,
 } from "../../types/generated";
+import type { EntryDetailToolbarState } from "./entryDetailToolbar";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import EmptyState from "../shared/EmptyState.vue";
-import IconButton from "../shared/IconButton.vue";
-import SaveState from "../shared/SaveState.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
 import EntryTypeSelect from "./EntryTypeSelect.vue";
 import KnowledgeRelations from "./KnowledgeRelations.vue";
@@ -36,16 +42,19 @@ const props = withDefaults(
     detail: EntryDetail | null;
     loading: boolean;
     refreshToken?: number;
+    selectionGeneration?: number;
   }>(),
-  { refreshToken: 0 },
+  { refreshToken: 0, selectionGeneration: 0 },
 );
 
 const emit = defineEmits<{
-  saved: [entry: EntryDetail];
+  saved: [entry: EntryDetail, selectionGeneration: number];
+  entryUpdated: [entry: EntryDetail];
   trash: [];
   restore: [];
   deleteForever: [];
   openRelated: [id: string];
+  toolbarChange: [state: EntryDetailToolbarState];
 }>();
 
 const title = ref("");
@@ -57,6 +66,9 @@ const contentEditorRef = ref<HTMLTextAreaElement | null>(null);
 const tags = ref<string[]>([]);
 const baseRevision = ref(0);
 const editingEntryId = ref<string | null>(null);
+const knowledgeState = ref<EntryDetail["knowledgeState"] | null>(null);
+const deletedAt = ref<string | null>(null);
+const originalContent = ref("");
 const confirmTrash = ref(false);
 const confirmDelete = ref(false);
 const knowledgeError = ref("");
@@ -68,16 +80,25 @@ const wikiLinkSuggestionsOpen = computed(
   () =>
     wikiLinkCompletion.value !== null && wikiLinkSuggestions.value.length > 0,
 );
+const editorDisabled = computed(() => Boolean(deletedAt.value));
+const hasEditingEntry = computed(() => Boolean(editingEntryId.value));
 let initializing = false;
 let syncVersion = 0;
 let titleDirty = false;
 let wikiLinkRequestId = 0;
 let wikiLinkTimer: number | undefined;
 let wikiLinkHandledKey: string | null = null;
+let operationGeneration = 0;
 
-const autosave = useAutosave<EntryDetail>({
+const autosave = useAutosave<{
+  entry: EntryDetail;
+  selectionGeneration: number;
+  operationGeneration: number;
+}>({
   delay: 500,
-  save: () => {
+  save: async () => {
+    const requestSelectionGeneration = props.selectionGeneration;
+    const requestOperationGeneration = operationGeneration;
     const patch: EntryPatch = {
       title: titleDirty ? title.value : null,
       currentContent: currentContent.value,
@@ -88,33 +109,122 @@ const autosave = useAutosave<EntryDetail>({
     if (!editingEntryId.value) {
       throw new Error("未选择条目");
     }
-    return entriesUpdate(editingEntryId.value, patch, baseRevision.value);
+    const entry = await entriesUpdate(
+      editingEntryId.value,
+      patch,
+      baseRevision.value,
+    );
+    return {
+      entry,
+      selectionGeneration: requestSelectionGeneration,
+      operationGeneration: requestOperationGeneration,
+    };
   },
-  onSaved: (entry) => {
-    if (props.detail?.id === entry.id) {
-      baseRevision.value = entry.revision;
-      titleDirty = false;
-      emit("saved", entry);
+  onSaved: ({ entry, selectionGeneration, operationGeneration: requestGeneration }) => {
+    if (
+      editingEntryId.value === entry.id &&
+      operationGeneration === requestGeneration
+    ) {
+      applySavedRevision(entry);
+      emit("saved", entry, selectionGeneration);
+    } else {
+      emit("entryUpdated", entry);
     }
   },
-  onStaleSaved: (entry) => {
-    if (editingEntryId.value === entry.id) {
-      baseRevision.value = entry.revision;
+  onStaleSaved: ({ entry, operationGeneration: requestGeneration }) => {
+    if (
+      editingEntryId.value === entry.id &&
+      operationGeneration === requestGeneration
+    ) {
+      applySavedRevision(entry);
     }
+    emit("entryUpdated", entry);
   },
+});
+
+function applySavedRevision(entry: EntryDetail) {
+  if (entry.revision > baseRevision.value) {
+    baseRevision.value = entry.revision;
+  }
+  titleDirty = false;
+  knowledgeState.value = entry.knowledgeState;
+  deletedAt.value = entry.deletedAt;
+}
+
+function isAutosaveBusy() {
+  const state = autosave.state.value;
+  return state === "dirty" || state === "saving" || state === "failed";
+}
+
+function applyEntrySnapshot(entry: EntryDetail | null) {
+  editingEntryId.value = entry?.id || null;
+  title.value = entry?.title || "";
+  currentContent.value = entry?.currentContent || "";
+  entryType.value = entry?.entryType || "unclear";
+  status.value = entry?.status || "pending";
+  tags.value = entry?.tags.map((tag) => tag.name) || [];
+  baseRevision.value = entry?.revision || 0;
+  knowledgeState.value = entry?.knowledgeState ?? null;
+  deletedAt.value = entry?.deletedAt ?? null;
+  originalContent.value = entry?.originalContent || "";
+  titleDirty = false;
+}
+
+watchEffect(() => {
+  emit("toolbarChange", {
+    saveState: autosave.state.value,
+    saveError: autosave.error.value,
+    showPromote:
+      hasEditingEntry.value &&
+      !deletedAt.value &&
+      knowledgeState.value === "capture",
+    canPromote:
+      hasEditingEntry.value &&
+      !deletedAt.value &&
+      knowledgeState.value === "capture" &&
+      Boolean(title.value.trim()),
+    canDemote:
+      hasEditingEntry.value &&
+      !deletedAt.value &&
+      knowledgeState.value === "knowledge",
+    deleted: Boolean(deletedAt.value),
+  });
 });
 
 watch(
   () => props.detail,
   async (entry) => {
     resetWikiLinkCompletion();
+    const nextId = entry?.id ?? null;
+    const sameEntry = nextId !== null && nextId === editingEntryId.value;
+
+    if (sameEntry) {
+      // Same-id replacement: never re-run full local reset while the user is
+      // still editing. Only fully hydrate when autosave is clean and the
+      // incoming revision is strictly newer.
+      if (isAutosaveBusy()) {
+        if (entry && entry.revision > baseRevision.value) {
+          baseRevision.value = entry.revision;
+        }
+        return;
+      }
+      if (!entry || entry.revision <= baseRevision.value) {
+        return;
+      }
+      initializing = true;
+      applyEntrySnapshot(entry);
+      autosave.reset();
+      await nextTick();
+      initializing = false;
+      return;
+    }
+
     const currentSync = ++syncVersion;
     initializing = true;
     try {
-      // Flush must complete before we touch local refs, but stale flushes
-      // from older watcher invocations must be discarded.
+      // Identity change: flush the previous entry before swapping local state.
+      // AppShell owns selection commit; this only drains the previous cycle.
       await autosave.flush();
-      // Double-check that this watcher is still the newest.
       if (currentSync !== syncVersion) {
         return;
       }
@@ -122,14 +232,9 @@ watch(
       initializing = false;
       return;
     }
-    editingEntryId.value = entry?.id || null;
-    title.value = entry?.title || "";
-    currentContent.value = entry?.currentContent || "";
-    entryType.value = entry?.entryType || "unclear";
-    status.value = entry?.status || "pending";
-    tags.value = entry?.tags.map((tag) => tag.name) || [];
-    baseRevision.value = entry?.revision || 0;
-    titleDirty = false;
+
+    operationGeneration += 1;
+    applyEntrySnapshot(entry);
     autosave.reset();
     await nextTick();
     initializing = false;
@@ -137,17 +242,20 @@ watch(
   { immediate: true },
 );
 
-onBeforeUnmount(resetWikiLinkCompletion);
+onBeforeUnmount(() => {
+  resetWikiLinkCompletion();
+  autosave.dispose();
+});
 
 watch(title, () => {
-  if (!initializing && props.detail && !props.detail.deletedAt) {
+  if (!initializing && editingEntryId.value && !deletedAt.value) {
     titleDirty = true;
     autosave.markDirty();
   }
 });
 
 watch([currentContent, entryType, status, tags], () => {
-  if (!initializing && props.detail && !props.detail.deletedAt) {
+  if (!initializing && editingEntryId.value && !deletedAt.value) {
     autosave.markDirty();
   }
 });
@@ -165,6 +273,22 @@ function confirmDeleteForever() {
   emit("deleteForever");
 }
 
+function requestMoveToTrash() {
+  confirmTrash.value = true;
+}
+
+function restore() {
+  emit("restore");
+}
+
+function requestDeleteForever() {
+  confirmDelete.value = true;
+}
+
+function retrySave() {
+  void autosave.retry();
+}
+
 async function flushPendingSave(): Promise<boolean> {
   try {
     tagInputRef.value?.commitDraft();
@@ -179,14 +303,28 @@ async function flushPendingSave(): Promise<boolean> {
 async function promoteToKnowledge() {
   knowledgeError.value = "";
   if (!(await flushPendingSave()) || !editingEntryId.value) return;
+  const requestEntryId = editingEntryId.value;
+  const requestRevision = baseRevision.value;
+  const requestGeneration = operationGeneration;
+  const requestSelectionGeneration = props.selectionGeneration;
   try {
-    const updated = await knowledgePromote(
-      editingEntryId.value,
-      baseRevision.value,
-    );
-    baseRevision.value = updated.revision;
-    emit("saved", updated);
+    const updated = await knowledgePromote(requestEntryId, requestRevision);
+    if (
+      editingEntryId.value !== requestEntryId ||
+      operationGeneration !== requestGeneration ||
+      props.selectionGeneration !== requestSelectionGeneration
+    ) {
+      emit("entryUpdated", updated);
+      return;
+    }
+    applySavedRevision(updated);
+    emit("saved", updated, requestSelectionGeneration);
   } catch (error) {
+    if (
+      editingEntryId.value !== requestEntryId ||
+      operationGeneration !== requestGeneration ||
+      props.selectionGeneration !== requestSelectionGeneration
+    ) return;
     knowledgeError.value = error instanceof Error ? error.message : "沉淀失败";
   }
 }
@@ -194,14 +332,28 @@ async function promoteToKnowledge() {
 async function demoteFromKnowledge() {
   knowledgeError.value = "";
   if (!(await flushPendingSave()) || !editingEntryId.value) return;
+  const requestEntryId = editingEntryId.value;
+  const requestRevision = baseRevision.value;
+  const requestGeneration = operationGeneration;
+  const requestSelectionGeneration = props.selectionGeneration;
   try {
-    const updated = await knowledgeDemote(
-      editingEntryId.value,
-      baseRevision.value,
-    );
-    baseRevision.value = updated.revision;
-    emit("saved", updated);
+    const updated = await knowledgeDemote(requestEntryId, requestRevision);
+    if (
+      editingEntryId.value !== requestEntryId ||
+      operationGeneration !== requestGeneration ||
+      props.selectionGeneration !== requestSelectionGeneration
+    ) {
+      emit("entryUpdated", updated);
+      return;
+    }
+    applySavedRevision(updated);
+    emit("saved", updated, requestSelectionGeneration);
   } catch (error) {
+    if (
+      editingEntryId.value !== requestEntryId ||
+      operationGeneration !== requestGeneration ||
+      props.selectionGeneration !== requestSelectionGeneration
+    ) return;
     knowledgeError.value = error instanceof Error ? error.message : "移出失败";
   }
 }
@@ -308,151 +460,128 @@ function clearWikiLinkTimer() {
 
 defineExpose({
   flushPendingSave,
+  promoteToKnowledge,
+  demoteFromKnowledge,
+  requestMoveToTrash,
+  restore,
+  requestDeleteForever,
+  retrySave,
 });
 </script>
 
 <template>
-  <section class="flex flex-col min-w-0 min-h-0 overflow-auto bg-bg-base p-5 gap-4 md:p-6 lg:p-8">
+  <section class="min-h-0 min-w-0 overflow-auto bg-bg-secondary">
     <EmptyState v-if="loading" title="加载中" />
     <EmptyState
-      v-else-if="!detail"
+      v-else-if="!hasEditingEntry"
       :icon="FileText"
       title="选择一条记录"
       description="从左侧列表选择一条记录以查看详情"
     />
     <template v-else>
-      <header class="flex items-center justify-between gap-2">
-        <div class="flex-1"></div>
-        <div class="flex items-center justify-end gap-2">
-          <button
-            v-if="!detail.deletedAt && detail.knowledgeState === 'capture'"
-            type="button"
-            class="btn-primary"
-            aria-label="沉淀为知识"
-            :disabled="!title.trim()"
-            @click="promoteToKnowledge"
+      <div class="mx-auto grid w-full max-w-[920px] px-5 py-5 lg:px-8 lg:py-7">
+        <p
+          v-if="knowledgeError"
+          class="mb-4 mt-0 rounded-md border border-danger/25 bg-bg-elevated px-3 py-2 text-ui text-danger"
+          role="alert"
+        >
+          {{ knowledgeError }}
+        </p>
+
+        <article
+          class="elevation-panel grid overflow-visible rounded-lg bg-bg-elevated"
+        >
+          <input
+            v-model="title"
+            class="mx-5 mt-4 h-[52px] w-[calc(100%_-_40px)] border-none bg-transparent text-display text-text-primary outline-none placeholder:text-text-placeholder ring-focus disabled:opacity-55"
+            type="text"
+            placeholder="标题"
+            aria-label="标题"
+            :disabled="editorDisabled"
+          />
+
+          <div
+            class="grid grid-cols-2 gap-3 border-y border-border bg-bg-secondary px-5 py-3"
           >
-            沉淀为知识
-          </button>
-          <button
-            v-if="!detail.deletedAt && detail.knowledgeState === 'knowledge'"
-            type="button"
-            class="btn-secondary"
-            aria-label="移出知识库"
-            @click="demoteFromKnowledge"
+            <EntryTypeSelect
+              v-model="entryType"
+              :disabled="editorDisabled"
+            />
+            <EntryStatusSelect
+              v-model="status"
+              :disabled="editorDisabled"
+            />
+          </div>
+
+          <div class="border-b border-border px-5 py-3">
+            <TagInput
+              ref="tagInputRef"
+              v-model="tags"
+              :disabled="editorDisabled"
+            />
+          </div>
+
+          <div class="relative min-h-[260px]">
+            <textarea
+              ref="contentEditorRef"
+              v-model="currentContent"
+              class="min-h-[300px] w-full resize-y border-none bg-transparent px-5 py-4 font-sans text-body text-text-primary outline-none placeholder:text-text-placeholder ring-focus disabled:opacity-55"
+              role="combobox"
+              aria-label="正文"
+              :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
+              :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
+              :aria-controls="
+                wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
+              "
+              :aria-activedescendant="
+                wikiLinkSuggestionsOpen
+                  ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
+                  : undefined
+              "
+              :disabled="editorDisabled"
+              @input="refreshWikiLinkCompletion"
+              @click="refreshWikiLinkCompletion"
+              @keyup="handleWikiLinkKeyup"
+              @keydown="handleWikiLinkKeydown"
+              @blur="resetWikiLinkCompletion"
+            />
+            <WikiLinkSuggestions
+              v-if="wikiLinkSuggestionsOpen"
+              :suggestions="wikiLinkSuggestions"
+              :active-index="wikiLinkActiveIndex"
+              :listbox-id="wikiLinkListboxId"
+              @select="selectWikiLinkSuggestion"
+            />
+          </div>
+        </article>
+
+        <details class="group mt-4 py-4">
+          <summary
+            class="cursor-pointer select-none list-none rounded-sm text-ui font-medium text-text-secondary outline-none ring-focus marker:hidden [&::-webkit-details-marker]:hidden"
           >
-            移出知识库
-          </button>
-          <IconButton
-            v-if="detail.deletedAt"
-            label="恢复"
-            :icon="RotateCcw"
-            @click="$emit('restore')"
-          />
-          <IconButton
-            v-if="detail.deletedAt"
-            label="永久删除"
-            :icon="Trash2"
-            danger
-            @click="confirmDelete = true"
-          />
-          <IconButton
-            v-else
-            label="移到回收站"
-            :icon="Trash2"
-            danger
-            @click="confirmTrash = true"
-          />
-        </div>
-      </header>
+            <span
+              class="inline-flex items-center gap-1.5 group-open:text-text-primary"
+            >
+              <ChevronRight
+                :size="14"
+                class="transition-transform duration-fast ease-token group-open:rotate-90"
+                aria-hidden="true"
+              />
+              原始内容
+            </span>
+          </summary>
+          <pre
+            class="mb-0 mt-3 max-h-[260px] overflow-auto whitespace-pre-wrap rounded-md bg-bg-inset p-4 font-mono text-caption text-text-secondary"
+            >{{ originalContent }}</pre>
+        </details>
 
-      <p v-if="knowledgeError" class="text-danger" role="alert">
-        {{ knowledgeError }}
-      </p>
-
-      <article class="grid gap-4 rounded-xl border border-border-subtle bg-bg-elevated p-5 shadow-sm">
-        <input
-          v-model="title"
-          class="h-[48px] w-full bg-transparent text-[24px] font-bold tracking-tight text-text-primary placeholder:text-text-placeholder outline-none ring-focus transition-all duration-150 focus-visible:bg-bg-hover focus-visible:-mx-2 focus-visible:px-2 focus-visible:rounded-md disabled:opacity-55"
-          type="text"
-          placeholder="标题"
-          aria-label="标题"
-          :disabled="Boolean(detail.deletedAt)"
+        <KnowledgeRelations
+          :entry-id="editingEntryId!"
+          :revision="baseRevision"
+          :refresh-token="props.refreshToken"
+          @open-related="emit('openRelated', $event)"
         />
-
-        <div class="grid grid-cols-2 gap-3">
-          <EntryTypeSelect
-            v-model="entryType"
-            :disabled="Boolean(detail.deletedAt)"
-          />
-          <EntryStatusSelect
-            v-model="status"
-            :disabled="Boolean(detail.deletedAt)"
-          />
-        </div>
-
-        <TagInput
-          ref="tagInputRef"
-          v-model="tags"
-          :disabled="Boolean(detail.deletedAt)"
-        />
-
-        <div class="relative min-h-[220px]">
-          <textarea
-            ref="contentEditorRef"
-            v-model="currentContent"
-            class="input-base min-h-[240px] resize-y p-4 text-[14px] leading-relaxed font-sans"
-            role="combobox"
-            aria-label="正文"
-            :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
-            :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : undefined"
-            :aria-controls="
-              wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
-            "
-            :aria-activedescendant="
-              wikiLinkSuggestionsOpen
-                ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
-                : undefined
-            "
-            :disabled="Boolean(detail.deletedAt)"
-            @input="refreshWikiLinkCompletion"
-            @click="refreshWikiLinkCompletion"
-            @keyup="handleWikiLinkKeyup"
-            @keydown="handleWikiLinkKeydown"
-            @blur="resetWikiLinkCompletion"
-          />
-          <WikiLinkSuggestions
-            v-if="wikiLinkSuggestionsOpen"
-            :suggestions="wikiLinkSuggestions"
-            :active-index="wikiLinkActiveIndex"
-            :listbox-id="wikiLinkListboxId"
-            @select="selectWikiLinkSuggestion"
-          />
-        </div>
-      </article>
-
-      <details class="rounded-xl border border-border bg-bg-elevated p-4 shadow-sm group">
-        <summary class="cursor-pointer select-none list-none text-[13px] font-medium text-text-secondary outline-none ring-focus rounded-sm marker:hidden [&::-webkit-details-marker]:hidden">
-          <span class="inline-flex items-center gap-1 group-open:text-text-primary">
-            <span class="i-lucide-chevron-right transition-transform group-open:rotate-90"></span>原始内容
-          </span>
-        </summary>
-        <pre class="mt-3 overflow-auto whitespace-pre-wrap text-[13px] leading-relaxed text-text-secondary font-mono">{{ detail.originalContent }}</pre>
-      </details>
-
-      <KnowledgeRelations
-        :entry-id="detail.id"
-        :revision="detail.revision"
-        :refresh-token="props.refreshToken"
-        @open-related="emit('openRelated', $event)"
-      />
-
-      <SaveState
-        class="fixed bottom-6 right-6 z-10 shadow-md"
-        :state="autosave.state.value"
-        :error="autosave.error.value"
-        @retry="autosave.retry"
-      />
+      </div>
 
       <ConfirmDialog
         :open="confirmTrash"
