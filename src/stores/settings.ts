@@ -2,8 +2,8 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 
 import { settingsGet, settingsUpdate } from "../services/settingsApi";
-import { useTheme, type ThemeMode } from "../composables/useTheme";
-import type { AppSettings } from "../types/generated";
+import { useTheme } from "../composables/useTheme";
+import type { AppSettings, ThemeMode } from "../types/generated";
 
 export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<AppSettings | null>(null);
@@ -18,7 +18,7 @@ export const useSettingsStore = defineStore("settings", () => {
       settings.value = next;
       // Sync local UI theme with persisted backend value (handles cross-device
       // or reset scenarios where localStorage may diverge from the DB).
-      useTheme().setMode(next.themeMode as ThemeMode);
+      useTheme().setMode(next.themeMode);
     } catch (loadError) {
       error.value =
         loadError instanceof Error ? loadError.message : "设置加载失败";
@@ -65,7 +65,7 @@ export const useSettingsStore = defineStore("settings", () => {
       settings.value = previous;
       // Rollback UI to previous persisted mode.
       if (previous) {
-        useTheme().setMode(previous.themeMode as ThemeMode);
+        useTheme().setMode(previous.themeMode);
       }
       error.value =
         updateError instanceof Error ? updateError.message : "主题设置失败";

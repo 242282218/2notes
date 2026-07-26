@@ -24,8 +24,7 @@ pub fn settings_get(
     let theme_mode = state
         .read_conn()
         .map_err(AppErrorResponse::from)
-        .and_then(|conn| SettingsRepo::get_string(&conn, "theme_mode").map_err(AppErrorResponse::from))?
-        .unwrap_or_else(|| "system".to_string());
+        .and_then(|conn| SettingsRepo::get_theme_mode(&conn).map_err(AppErrorResponse::from))?;
 
     Ok(AppSettings {
         data_dir: state.data_dir().display().to_string(),
@@ -63,16 +62,9 @@ pub fn settings_update(
             .map_err(AppErrorResponse::from)?;
     }
     if let Some(theme_mode) = patch.theme_mode {
-        if !matches!(theme_mode.as_str(), "system" | "light" | "dark") {
-            return Err(AppError::validation(
-                "INVALID_THEME_MODE",
-                "主题必须是 system、light 或 dark",
-            )
-            .into());
-        }
         let now = now_string();
         state
-            .with_write_tx(|tx| SettingsRepo::set_string(tx, "theme_mode", &theme_mode, &now))
+            .with_write_tx(|tx| SettingsRepo::set_theme_mode(tx, theme_mode, &now))
             .map_err(AppErrorResponse::from)?;
     }
     settings_get(app, window, state)

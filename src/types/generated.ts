@@ -103,6 +103,8 @@ export type EntryPatch = {
 
 export type Draft = { content: string; revision: number; updatedAt: string };
 
+export type ThemeMode = "system" | "light" | "dark";
+
 export type AppSettings = {
   dataDir: string;
   logDir: string;
@@ -111,12 +113,12 @@ export type AppSettings = {
   shortcutRegistered: boolean;
   shortcutError: string | null;
   autostartEnabled: boolean;
-  themeMode: string;
+  themeMode: ThemeMode;
 };
 
 export type SettingsPatch = {
   autostartEnabled: boolean | null;
-  themeMode: string | null;
+  themeMode: ThemeMode | null;
 };
 
 export type ExportResult = { exportedCount: number; targetDir: string };

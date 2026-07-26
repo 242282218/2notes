@@ -18,7 +18,7 @@ mod tests {
             KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
             RelatedEntry, SearchSnippet, SearchSnippetPart, UnresolvedWikiLink,
         },
-        settings::{AppSettings, Draft, ExportResult, SettingsPatch},
+        settings::{AppSettings, Draft, ExportResult, SettingsPatch, ThemeMode},
         tags::Tag,
     };
     use crate::error::AppErrorResponse;
@@ -45,6 +45,7 @@ mod tests {
             EntryDetail::decl(&config),
             EntryPatch::decl(&config),
             Draft::decl(&config),
+            ThemeMode::decl(&config),
             AppSettings::decl(&config),
             SettingsPatch::decl(&config),
             ExportResult::decl(&config),

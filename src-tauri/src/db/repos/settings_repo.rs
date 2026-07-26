@@ -1,17 +1,16 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::AppResult;
+use crate::types::settings::ThemeMode;
 
 pub struct SettingsRepo;
 
 impl SettingsRepo {
     pub fn get_string(conn: &Connection, key: &str) -> AppResult<Option<String>> {
         let value = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+                row.get::<_, String>(0)
+            })
             .optional()?;
         Ok(value)
     }
@@ -30,5 +29,17 @@ impl SettingsRepo {
             params![key, value, now],
         )?;
         Ok(())
+    }
+
+    pub fn get_theme_mode(conn: &Connection) -> AppResult<ThemeMode> {
+        let value = Self::get_string(conn, "theme_mode")?;
+        Ok(value
+            .as_deref()
+            .and_then(ThemeMode::from_db)
+            .unwrap_or(ThemeMode::System))
+    }
+
+    pub fn set_theme_mode(tx: &Transaction<'_>, theme_mode: ThemeMode, now: &str) -> AppResult<()> {
+        Self::set_string(tx, "theme_mode", theme_mode.as_str(), now)
     }
 }
