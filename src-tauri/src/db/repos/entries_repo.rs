@@ -1590,7 +1590,8 @@ mod tests {
             .any(|detail| detail.to_ascii_uppercase().contains("VIRTUAL TABLE")));
         drop(stmt);
 
-        read_conn
+        // Intentionally corrupt FTS via write connection so list falls back to LIKE.
+        write_conn
             .execute("DELETE FROM entries_fts WHERE entry_id = ?1", [&entry.id])
             .unwrap();
         let mut short_filter = default_filter();
