@@ -3,5 +3,11 @@
   "identifier": "quick-capture",
   "description": "Minimal capability for the quick capture window",
   "windows": ["quick-capture"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus"
+  ]
 }

@@ -1,0 +1,33 @@
+{
+  "description": "Exact Tauri permission identifiers allowed in src-tauri/capabilities. Validated against local desktop-schema.json during Task 10; CI must not read src-tauri/gen.",
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "core:window:allow-set-focus",
+    "opener:allow-open-path",
+    "log:default",
+    "window-state:default"
+  ],
+  "windows": {
+    "main": [
+      "core:default",
+      "opener:allow-open-path",
+      "log:default",
+      "window-state:default"
+    ],
+    "quick-capture": [
+      "core:event:allow-listen",
+      "core:event:allow-unlisten",
+      "core:window:allow-show",
+      "core:window:allow-unminimize",
+      "core:window:allow-set-focus"
+    ]
+  },
+  "notes": {
+    "main": "Uses core:default for window/event/app baseline. opener:default removed; only openPath is used. dialog is not granted (Rust dialog plugin is used from export_markdown without frontend capability). window-state is main-only.",
+    "quick-capture": "Replaces core:default with minimal listen/unlisten + show/unminimize/set-focus for restore/quit reveal flows. No opener, dialog, or window-state."
+  }
+}
