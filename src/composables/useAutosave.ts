@@ -19,12 +19,31 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
   );
 
   let timer: number | undefined;
+  /** Content version: whether a save result matches the latest input. */
   let version = 0;
-  let inFlight = false;
+  /** Lifecycle generation: whether a save still belongs to the current entry cycle. */
+  let generation = 0;
   let pending = false;
-  let activeFlush: Promise<void> | null = null;
+  let disposed = false;
+  let drainPromise: Promise<void> | null = null;
+
+  function clearTimer() {
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = undefined;
+    }
+  }
+
+  function isActive(requestGeneration: number) {
+    return !disposed && requestGeneration === generation;
+  }
+
+  function needsSave() {
+    return state.value === "dirty" || state.value === "failed" || pending;
+  }
 
   function markDirty() {
+    if (disposed) return;
     version += 1;
     state.value = "dirty";
     error.value = null;
@@ -32,62 +51,65 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
   }
 
   function schedule() {
-    if (timer) {
-      window.clearTimeout(timer);
-    }
+    if (disposed) return;
+    clearTimer();
     timer = window.setTimeout(() => {
       void flush().catch(() => {});
     }, options.delay);
   }
 
   async function flush(): Promise<void> {
-    if (timer) {
-      window.clearTimeout(timer);
-      timer = undefined;
+    if (disposed) return;
+    clearTimer();
+
+    if (drainPromise) {
+      return drainPromise;
     }
-    if (inFlight) {
-      pending = true;
-      await activeFlush;
+
+    if (!needsSave()) {
       return;
     }
-    if (state.value !== "dirty" && state.value !== "failed") {
-      return;
-    }
-    activeFlush = runFlush();
-    try {
-      await activeFlush;
-    } finally {
-      activeFlush = null;
-    }
+
+    const requestGeneration = generation;
+    drainPromise = drain(requestGeneration).finally(() => {
+      if (requestGeneration === generation) {
+        drainPromise = null;
+      }
+    });
+
+    return drainPromise;
   }
 
-  async function runFlush(): Promise<void> {
-    const requestVersion = version;
-    inFlight = true;
-    state.value = "saving";
-    try {
-      const value = await options.save();
-      if (requestVersion === version) {
-        state.value = "saved";
-        options.onSaved?.(value);
-      } else {
-        options.onStaleSaved?.(value);
+  async function drain(requestGeneration: number): Promise<void> {
+    // Loop until this generation is clean. Continue after each save in the same
+    // microtask so callers awaiting one Promise.resolve() observe chained saves.
+    while (isActive(requestGeneration) && needsSave()) {
+      pending = false;
+      const requestVersion = version;
+      state.value = "saving";
+
+      try {
+        const value = await options.save();
+        if (!isActive(requestGeneration)) return;
+
+        if (requestVersion === version) {
+          state.value = "saved";
+          options.onSaved?.(value);
+        } else {
+          options.onStaleSaved?.(value);
+          pending = true;
+        }
+      } catch (saveError) {
+        if (!isActive(requestGeneration)) return;
+
+        if (requestVersion === version) {
+          state.value = "failed";
+          error.value =
+            saveError instanceof Error ? saveError.message : "保存失败";
+          options.onFailed?.(saveError);
+          throw saveError;
+        }
         pending = true;
-      }
-    } catch (saveError) {
-      if (requestVersion === version) {
-        state.value = "failed";
-        error.value =
-          saveError instanceof Error ? saveError.message : "保存失败";
-        options.onFailed?.(saveError);
-        throw saveError;
-      }
-      pending = true;
-    } finally {
-      inFlight = false;
-      if (pending) {
-        pending = false;
-        await flush();
       }
     }
   }
@@ -99,13 +121,17 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
   }
 
   function reset() {
-    if (timer) {
-      window.clearTimeout(timer);
-    }
-    version += 1;
+    generation += 1;
+    clearTimer();
     pending = false;
+    drainPromise = null;
     state.value = "idle";
     error.value = null;
+  }
+
+  function dispose() {
+    disposed = true;
+    reset();
   }
 
   return {
@@ -116,5 +142,6 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
     flush,
     retry,
     reset,
+    dispose,
   };
 }
