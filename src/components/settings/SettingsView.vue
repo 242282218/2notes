@@ -2,7 +2,7 @@
 import { Download, ExternalLink, FolderOpen } from "lucide-vue-next";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 import {
   backupsCreate,
@@ -17,6 +17,7 @@ import type { BackupInfo, KnowledgeIndexReport } from "../../types/generated";
 import AppearanceSettings from "./AppearanceSettings.vue";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import IconButton from "../shared/IconButton.vue";
+import SettingRow from "./SettingRow.vue";
 
 const settingsStore = useSettingsStore();
 
@@ -29,15 +30,66 @@ const categories = [
   { id: "export", label: "导出" },
 ];
 
+const activeCategory = ref(categories[0].id);
+const settingsContentRef = ref<HTMLElement | null>(null);
+let sectionObserver: {
+  observe: (target: HTMLElement) => void;
+  disconnect: () => void;
+} | null = null;
+let disposed = false;
+let ignoreObserverUntil = 0;
+let scrollLockTimer: number | null = null;
+
+function getSection(id: string) {
+  return settingsContentRef.value?.querySelector<HTMLElement>(`#${id}`) ?? null;
+}
+
 function scrollToSection(id: string) {
-  const element = document.getElementById(id);
-  if (element) {
-    element.scrollIntoView({ behavior: "smooth", block: "start" });
+  activeCategory.value = id;
+  ignoreObserverUntil = Date.now() + 300;
+  if (scrollLockTimer !== null) {
+    window.clearTimeout(scrollLockTimer);
+  }
+  scrollLockTimer = window.setTimeout(() => {
+    scrollLockTimer = null;
+    ignoreObserverUntil = 0;
+  }, 300);
+  getSection(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function observeSections() {
+  sectionObserver?.disconnect();
+  sectionObserver = null;
+  if (typeof IntersectionObserver === "undefined") {
+    return;
+  }
+  sectionObserver = new window.IntersectionObserver(
+    (entries) => {
+      if (Date.now() < ignoreObserverUntil) {
+        return;
+      }
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => right.intersectionRatio - left.intersectionRatio);
+      const id = visible[0]?.target.id;
+      if (id) {
+        activeCategory.value = id;
+      }
+    },
+    { rootMargin: "-10% 0px -65% 0px", threshold: [0, 0.25, 0.5, 0.75] },
+  );
+  for (const category of categories) {
+    const section = getSection(category.id);
+    if (section) {
+      sectionObserver.observe(section);
+    }
   }
 }
+
 const entriesStore = useEntriesStore();
 const exportMessage = ref("");
 const exportError = ref("");
+const exportBusy = ref(false);
 const backupMessage = ref("");
 const backupError = ref("");
 const backupBusy = ref(false);
@@ -54,27 +106,44 @@ const restoreMessage = computed(() =>
     : "",
 );
 
-onMounted(() => {
-  void settingsStore.load();
+onMounted(async () => {
   void loadBackups();
+  await settingsStore.ensureLoaded();
+  if (disposed) return;
+  await nextTick();
+  if (disposed) return;
+  observeSections();
+});
+
+onBeforeUnmount(() => {
+  disposed = true;
+  if (scrollLockTimer !== null) {
+    window.clearTimeout(scrollLockTimer);
+    scrollLockTimer = null;
+  }
+  sectionObserver?.disconnect();
+  sectionObserver = null;
 });
 
 async function chooseExportDir() {
   exportMessage.value = "";
   exportError.value = "";
-  const selected = await openDialog({
-    directory: true,
-    multiple: false,
-    title: "选择 Markdown 导出目录",
-  });
-  if (typeof selected !== "string") {
-    return;
-  }
+  exportBusy.value = true;
   try {
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "选择 Markdown 导出目录",
+    });
+    if (typeof selected !== "string") {
+      return;
+    }
     const result = await exportMarkdown(selected);
     exportMessage.value = `已导出 ${result.exportedCount} 个文件`;
   } catch (error) {
     exportError.value = error instanceof Error ? error.message : "导出失败";
+  } finally {
+    exportBusy.value = false;
   }
 }
 
@@ -175,128 +244,172 @@ async function updateAutostart(event: Event) {
 </script>
 
 <template>
-  <section class="grid max-w-[1100px] gap-6 p-6 md:grid-cols-[180px_minmax(0,860px)]">
-    <nav class="flex flex-row flex-wrap gap-1 rounded-lg border border-border bg-bg-elevated p-2 shadow-sm md:sticky md:top-4 md:h-fit md:flex-col" aria-label="设置分类">
+  <section
+    class="grid w-full max-w-[1060px] grid-cols-[164px_minmax(0,1fr)] gap-8 p-6 max-[700px]:grid-cols-[132px_minmax(0,1fr)] max-[700px]:gap-5 max-[700px]:p-4"
+  >
+    <nav
+      class="sticky top-4 flex self-start flex-col gap-0.5 border-l border-border p-1"
+      aria-label="设置分类"
+    >
       <button
         v-for="category in categories"
         :key="category.id"
         type="button"
-        class="flex h-[34px] items-center rounded-md border-none bg-transparent px-3 text-left text-[14px] text-text-secondary transition-colors duration-150 ring-focus hover:bg-bg-hover hover:text-text-primary"
+        class="ring-focus h-9 rounded-md border-0 bg-transparent px-3 text-left text-ui text-text-secondary transition-[color,background-color] duration-fast ease-token hover:bg-bg-hover hover:text-text-primary"
+        :class="{
+          'bg-selected text-text-primary': activeCategory === category.id,
+        }"
+        :data-category="category.id"
+        :aria-current="activeCategory === category.id ? 'location' : undefined"
         @click="scrollToSection(category.id)"
       >
         {{ category.label }}
       </button>
     </nav>
 
-    <div>
-      <h1 class="mb-5 text-[26px] font-bold tracking-tight text-text-primary">设置</h1>
-      <div v-if="settingsStore.error" class="text-danger mb-4">
+    <main ref="settingsContentRef" class="min-w-0 max-w-[820px]">
+      <h1 class="mb-6 mt-0 text-title text-text-primary">设置</h1>
+      <p
+        v-if="settingsStore.loading && !settingsStore.settings"
+        class="mt-2 text-ui text-text-secondary"
+        role="status"
+        aria-live="polite"
+      >
+        正在加载设置…
+      </p>
+      <p
+        v-if="settingsStore.error"
+        class="mt-2 text-ui text-danger"
+        role="alert"
+      >
         {{ settingsStore.error }}
-      </div>
+      </p>
       <template v-if="settingsStore.settings">
         <AppearanceSettings id="appearance" />
 
-        <section id="shortcut" class="mb-6">
-          <h2 class="mb-4 text-[18px] font-semibold text-text-primary">快捷键</h2>
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">全局快捷键</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">{{ settingsStore.settings.shortcut }}</span>
-            </div>
+        <section id="shortcut" class="mb-8 scroll-mt-4">
+          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+            快捷键
+          </h2>
+          <SettingRow
+            title="全局快捷键"
+            :description="settingsStore.settings.shortcut"
+          >
             <span
-              class="inline-flex min-h-[22px] items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full px-2 text-[12px]"
-              :class="settingsStore.settings.shortcutRegistered ? 'bg-success-subtle text-success' : 'bg-danger/10 text-danger'"
-            >
-              {{
+              class="whitespace-nowrap rounded-sm px-2 py-1 text-caption font-semibold"
+              :class="
                 settingsStore.settings.shortcutRegistered
-                  ? "已注册"
-                  : "注册失败"
-              }}
+                  ? 'bg-success-subtle text-success'
+                  : 'bg-danger/10 text-danger'
+              "
+            >
+              {{ settingsStore.settings.shortcutRegistered ? "已注册" : "注册失败" }}
             </span>
-          </div>
-          <p v-if="settingsStore.settings.shortcutError" class="text-danger mt-2">
+          </SettingRow>
+          <p
+            v-if="settingsStore.settings.shortcutError"
+            class="mt-2 text-ui text-danger"
+            role="alert"
+          >
             {{ settingsStore.settings.shortcutError }}
           </p>
 
-          <label class="flex min-h-[64px] cursor-pointer items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">开机自启动</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">随 Windows 会话启动</span>
-            </div>
+          <SettingRow
+            as="label"
+            class="cursor-pointer"
+            title="开机自启动"
+            :description="
+              settingsStore.autostartSaving ? '正在更新…' : '随 Windows 会话启动'
+            "
+          >
             <input
               type="checkbox"
-              class="m-0 size-5 cursor-pointer rounded-sm border border-border-strong bg-bg-elevated accent-brand ring-focus"
+              class="ring-focus mr-2 size-5 accent-brand"
               :checked="settingsStore.settings?.autostartEnabled ?? false"
+              :disabled="settingsStore.autostartSaving"
+              :aria-busy="settingsStore.autostartSaving ? 'true' : undefined"
               @change="updateAutostart"
             />
-          </label>
+          </SettingRow>
         </section>
 
-        <section id="directories" class="mb-6">
-          <h2 class="mb-4 text-[18px] font-semibold text-text-primary">目录</h2>
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">数据目录</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">{{ settingsStore.settings.dataDir }}</span>
-            </div>
+        <section id="directories" class="mb-8 scroll-mt-4">
+          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+            目录
+          </h2>
+          <SettingRow title="数据目录">
+            <template #description>
+              <span class="block truncate" :title="settingsStore.settings.dataDir">
+                {{ settingsStore.settings.dataDir }}
+              </span>
+            </template>
             <IconButton
               label="打开数据目录"
               :icon="FolderOpen"
               @click="openDir(settingsStore.settings.dataDir)"
             />
-          </div>
+          </SettingRow>
 
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">日志目录</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">{{ settingsStore.settings.logDir }}</span>
-            </div>
+          <SettingRow title="日志目录">
+            <template #description>
+              <span class="block truncate" :title="settingsStore.settings.logDir">
+                {{ settingsStore.settings.logDir }}
+              </span>
+            </template>
             <IconButton
               label="打开日志目录"
               :icon="ExternalLink"
               @click="openDir(settingsStore.settings.logDir)"
             />
-          </div>
+          </SettingRow>
 
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">备份目录</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">{{ settingsStore.settings.backupDir }}</span>
-            </div>
+          <SettingRow title="备份目录">
+            <template #description>
+              <span class="block truncate" :title="settingsStore.settings.backupDir">
+                {{ settingsStore.settings.backupDir }}
+              </span>
+            </template>
             <IconButton
               label="打开备份目录"
               :icon="FolderOpen"
               @click="openDir(settingsStore.settings.backupDir)"
             />
-          </div>
+          </SettingRow>
         </section>
 
-        <section id="backup" class="mb-6">
-          <h2 class="mb-4 text-[18px] font-semibold text-text-primary">备份</h2>
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">本地备份</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">创建当前 SQLite 快照，恢复前会自动再备份一次</span>
-            </div>
+        <section id="backup" class="mb-8 scroll-mt-4">
+          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+            备份
+          </h2>
+          <SettingRow
+            title="本地备份"
+            description="创建当前 SQLite 快照，恢复前会自动再备份一次"
+          >
             <button
               type="button"
               class="btn-secondary"
               :disabled="backupBusy"
               @click="createManualBackup"
             >
-              立即备份
+              {{ backupBusy ? "处理中…" : "立即备份" }}
             </button>
-          </div>
-          <div v-if="backups.length" class="-mt-2 mb-3 grid gap-2">
+          </SettingRow>
+          <div
+            v-if="backups.length"
+            class="border-b border-border"
+            aria-label="可用备份"
+          >
             <div
               v-for="backup in backups"
               :key="backup.fileName"
-              class="flex items-center justify-between gap-3 rounded-md border border-border bg-bg-secondary px-3 py-2 text-[13px] text-text-secondary transition-colors duration-150 hover:border-border-hover hover:bg-bg-hover"
+              class="grid min-h-11 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-0 py-2 pl-3 text-ui text-text-secondary not-first:border-t not-first:border-border"
             >
-              <span>{{ backup.fileName }}</span>
+              <span class="block truncate" :title="backup.fileName">{{
+                backup.fileName
+              }}</span>
               <button
                 type="button"
-                class="btn-secondary h-7 text-xs min-w-0"
+                class="btn-secondary h-7 min-w-0 text-caption"
                 :disabled="backupBusy"
                 @click="promptRestore(backup)"
               >
@@ -304,21 +417,31 @@ async function updateAutostart(event: Event) {
               </button>
             </div>
           </div>
-          <p v-if="backupMessage" class="text-success mt-2">
+          <p
+            v-if="backupMessage"
+            class="mt-2 text-ui text-success"
+            role="status"
+            aria-live="polite"
+          >
             {{ backupMessage }}
           </p>
-          <p v-if="backupError" class="text-danger mt-2">
+          <p
+            v-if="backupError"
+            class="mt-2 text-ui text-danger"
+            role="alert"
+          >
             {{ backupError }}
           </p>
         </section>
 
-        <section id="knowledge" class="mb-6">
-          <h2 class="mb-4 text-[18px] font-semibold text-text-primary">知识索引</h2>
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">重建索引</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">只重建搜索和关联索引，不修改条目正文</span>
-            </div>
+        <section id="knowledge" class="mb-8 scroll-mt-4">
+          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+            知识索引
+          </h2>
+          <SettingRow
+            title="重建索引"
+            description="只重建搜索和关联索引，不修改条目正文"
+          >
             <button
               type="button"
               class="btn-secondary"
@@ -328,37 +451,57 @@ async function updateAutostart(event: Event) {
             >
               {{ indexBusy ? "重建中…" : "重建索引" }}
             </button>
-          </div>
-          <p v-if="indexReport" class="text-success mt-2">
+          </SettingRow>
+          <p
+            v-if="indexReport"
+            class="mt-2 text-ui text-success"
+            role="status"
+            aria-live="polite"
+          >
             {{
               `重建完成：来源 ${indexReport.indexedSources}，链接 ${indexReport.linkOccurrences}，未解析 ${indexReport.unresolvedOccurrences}，${indexReport.searchIndexAvailable ? "搜索索引可用" : "搜索索引不可用"}`
             }}
           </p>
-          <p v-if="indexError" class="text-danger mt-2" role="alert">
+          <p
+            v-if="indexError"
+            class="mt-2 text-ui text-danger"
+            role="alert"
+          >
             {{ indexError }}
           </p>
         </section>
 
-        <section id="export" class="mb-6">
-          <h2 class="mb-4 text-[18px] font-semibold text-text-primary">导出</h2>
-          <div class="flex min-h-[64px] items-center justify-between gap-4 border-b border-border py-2">
-            <div class="grid min-w-0 gap-1">
-              <strong class="font-medium text-text-primary">Markdown 导出</strong>
-              <span class="break-words text-[13px] leading-relaxed text-text-tertiary">导出未进入回收站的条目</span>
-            </div>
+        <section id="export" class="mb-8 scroll-mt-4">
+          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+            导出
+          </h2>
+          <SettingRow
+            title="Markdown 导出"
+            description="导出未进入回收站的条目"
+          >
             <button
               type="button"
               class="btn-primary"
+              :disabled="exportBusy"
               @click="chooseExportDir"
             >
               <Download :size="16" />
-              导出
+              {{ exportBusy ? "导出中…" : "导出" }}
             </button>
-          </div>
-          <p v-if="exportMessage" class="text-success mt-2">
+          </SettingRow>
+          <p
+            v-if="exportMessage"
+            class="mt-2 text-ui text-success"
+            role="status"
+            aria-live="polite"
+          >
             {{ exportMessage }}
           </p>
-          <p v-if="exportError" class="text-danger mt-2">
+          <p
+            v-if="exportError"
+            class="mt-2 text-ui text-danger"
+            role="alert"
+          >
             {{ exportError }}
           </p>
         </section>
@@ -373,6 +516,6 @@ async function updateAutostart(event: Event) {
           @confirm="confirmRestore"
         />
       </template>
-    </div>
+    </main>
   </section>
 </template>

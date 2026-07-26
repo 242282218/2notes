@@ -6,6 +6,13 @@ import type { ThemeMode } from "../../types/generated";
 
 const { mode, options } = useTheme();
 
+const props = withDefaults(
+  defineProps<{
+    disabled?: boolean;
+  }>(),
+  { disabled: false },
+);
+
 const icons: Record<ThemeMode, typeof Monitor> = {
   system: Monitor,
   light: Sun,
@@ -35,8 +42,10 @@ function onChange(event: Event) {
   >
     <component :is="icons[mode]" :size="16" aria-hidden="true" />
     <select
-      class="ring-focus cursor-pointer border-0 bg-transparent text-inherit outline-0"
+      class="ring-focus cursor-pointer border-0 bg-transparent text-inherit outline-0 disabled:cursor-not-allowed disabled:opacity-60"
       :value="mode"
+      :disabled="props.disabled"
+      :aria-busy="props.disabled ? 'true' : undefined"
       aria-label="主题"
       @change="onChange"
     >
