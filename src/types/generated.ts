@@ -136,3 +136,43 @@ export type AppErrorResponse = {
   message: string;
   recoverable: boolean;
 };
+
+export type BlockKind =
+  "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem" | "blockquote" | "codeBlock" | "horizontalRule";
+
+export type BlockAttrs = {
+  level: number | null;
+  language: string | null;
+  start: number | null;
+};
+
+export type InlineMark =
+  { "type": "bold" } | { "type": "italic" } | { "type": "strike" } | { "type": "code" } | { "type": "link"; href: string };
+
+export type InlineNode =
+  { "type": "text"; text: string; marks: Array<InlineMark> } | { "type": "hardBreak" };
+
+export type BlockNode = {
+  id: string;
+  kind: BlockKind;
+  attrs: BlockAttrs;
+  content: Array<InlineNode>;
+  children: Array<BlockNode>;
+};
+
+export type BlockDocument = {
+  schemaVersion: number;
+  blocks: Array<BlockNode>;
+};
+
+export type OutlineItem = { id: string; level: number; text: string };
+
+export type BlockProjection = {
+  id: string;
+  parentBlockId: string | null;
+  ordinal: number;
+  depth: number;
+  kind: BlockKind;
+  textContent: string;
+  attrs: BlockAttrs;
+};

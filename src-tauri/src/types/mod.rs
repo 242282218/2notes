@@ -1,4 +1,5 @@
 pub mod backups;
+pub mod documents;
 pub mod entries;
 pub mod knowledge;
 pub mod settings;
@@ -10,6 +11,10 @@ mod tests {
 
     use super::{
         backups::BackupInfo,
+        documents::{
+            BlockAttrs, BlockDocument, BlockKind, BlockNode, BlockProjection, InlineMark,
+            InlineNode, OutlineItem,
+        },
         entries::{
             EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
             EntryType, PageRequest, TitleSource,
@@ -51,6 +56,14 @@ mod tests {
             ExportResult::decl(&config),
             BackupInfo::decl(&config),
             AppErrorResponse::decl(&config),
+            BlockKind::decl(&config),
+            BlockAttrs::decl(&config),
+            InlineMark::decl(&config),
+            InlineNode::decl(&config),
+            BlockNode::decl(&config),
+            BlockDocument::decl(&config),
+            OutlineItem::decl(&config),
+            BlockProjection::decl(&config),
         ]
         .map(|declaration| format!("export {declaration}"));
         format!("{}\n", declarations.join("\n\n"))

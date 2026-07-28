@@ -1,5 +1,6 @@
 mod app_state;
 mod commands;
+pub mod content;
 mod db;
 mod error;
 mod files;
