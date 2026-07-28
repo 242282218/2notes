@@ -95,10 +95,20 @@ describe("TagInput", () => {
         modelValue: [],
       },
     });
-    await wrapper.get("input").setValue("wo");
+    const input = wrapper.get("input");
+    await input.setValue("wo");
     await flushPromises();
+    const option = wrapper.get("[role='listbox'] button");
+    const mouseDown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+    });
 
-    await wrapper.get("[role='listbox'] button").trigger("click");
+    option.element.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+
+    await option.trigger("click");
 
     expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["work"]]);
   });
@@ -129,11 +139,22 @@ describe("TagInput", () => {
     await input.setValue("wo");
     await flushPromises();
 
+    const listbox = wrapper.get("[role='listbox']");
     const options = wrapper.findAll("[role='option']");
+    expect(input.attributes()).toMatchObject({
+      role: "combobox",
+      "aria-autocomplete": "list",
+      "aria-expanded": "true",
+      "aria-controls": listbox.attributes("id"),
+      "aria-activedescendant": options[0].attributes("id"),
+    });
     expect(options[0].attributes("aria-selected")).toBe("true");
 
     await input.trigger("keydown", { key: "ArrowDown" });
     expect(options[1].attributes("aria-selected")).toBe("true");
+    expect(input.attributes("aria-activedescendant")).toBe(
+      options[1].attributes("id"),
+    );
 
     await input.trigger("keydown", { key: "Enter" });
     expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["workshop"]]);
@@ -163,5 +184,10 @@ describe("TagInput", () => {
     await flushPromises();
 
     expect(wrapper.find("[role='listbox']").exists()).toBe(false);
+    expect(wrapper.get("input").attributes("aria-expanded")).toBe("false");
+    expect(wrapper.get("input").attributes("aria-controls")).toBeUndefined();
+    expect(
+      wrapper.get("input").attributes("aria-activedescendant"),
+    ).toBeUndefined();
   });
 });

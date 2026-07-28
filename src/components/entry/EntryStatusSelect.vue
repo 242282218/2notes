@@ -23,7 +23,7 @@ const options: Array<{ value: EntryStatus; label: string }> = [
 <template>
   <select
     ref="selectRef"
-    class="field-select entry-status-select"
+    class="select-base entry-status-select"
     aria-label="状态"
     :value="modelValue"
     :disabled="disabled"

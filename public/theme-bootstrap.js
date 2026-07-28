@@ -1,3 +1,4 @@
+/* global localStorage */
 (function () {
   var storageKey = "2notes-theme-mode";
   var mode = "system";
@@ -7,7 +8,7 @@
     if (saved === "light" || saved === "dark" || saved === "system") {
       mode = saved;
     }
-  } catch (_error) {
+  } catch {
     mode = "system";
   }
 
@@ -17,7 +18,7 @@
       theme = window.matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light";
-    } catch (_error) {
+    } catch {
       theme = "light";
     }
   }

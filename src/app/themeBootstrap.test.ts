@@ -35,10 +35,9 @@ const baseSettings: AppSettings = {
 function relativeLuminance(hex: string): number {
   const normalized = hex.replace("#", "");
   const channels = [0, 2, 4].map((offset) => {
-    const value = Number.parseInt(normalized.slice(offset, offset + 2), 16) / 255;
-    return value <= 0.03928
-      ? value / 12.92
-      : ((value + 0.055) / 1.055) ** 2.4;
+    const value =
+      Number.parseInt(normalized.slice(offset, offset + 2), 16) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
 }
@@ -115,7 +114,9 @@ function runBootstrap(options: {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn().mockImplementation((query: string) => ({
-      matches: Boolean(options.systemDark) && query.includes("prefers-color-scheme: dark"),
+      matches:
+        Boolean(options.systemDark) &&
+        query.includes("prefers-color-scheme: dark"),
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -127,7 +128,6 @@ function runBootstrap(options: {
   });
 
   // Execute the production bootstrap script in this isolated DOM context.
-  // eslint-disable-next-line no-new-func
   new Function(bootstrapSource)();
 }
 
@@ -170,7 +170,9 @@ describe("theme-bootstrap.js runtime", () => {
     "applies $expected for mode=$mode systemDark=$systemDark",
     ({ mode, systemDark, expected }) => {
       runBootstrap({ mode, systemDark });
-      expect(document.documentElement.getAttribute("data-theme")).toBe(expected);
+      expect(document.documentElement.getAttribute("data-theme")).toBe(
+        expected,
+      );
       expect(document.documentElement.style.colorScheme).toBe(expected);
     },
   );
@@ -211,12 +213,22 @@ describe("theme contrast tokens", () => {
     const light = extractThemeTokens(css, ":root");
     const dark = extractThemeTokens(css, '[data-theme="dark"]');
 
-    expect(contrastRatio(light.onBrand, light.brand)).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(light.onDanger, light.danger)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(light.onBrand, light.brand)).toBeGreaterThanOrEqual(
+      4.5,
+    );
+    expect(contrastRatio(light.onDanger, light.danger)).toBeGreaterThanOrEqual(
+      4.5,
+    );
     expect(contrastRatio(dark.onBrand, dark.brand)).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(dark.onDanger, dark.danger)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(dark.onDanger, dark.danger)).toBeGreaterThanOrEqual(
+      4.5,
+    );
 
-    expect(contrastRatio(light.focusRing, light.bgBase)).toBeGreaterThanOrEqual(3);
-    expect(contrastRatio(dark.focusRing, dark.bgBase)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(light.focusRing, light.bgBase)).toBeGreaterThanOrEqual(
+      3,
+    );
+    expect(contrastRatio(dark.focusRing, dark.bgBase)).toBeGreaterThanOrEqual(
+      3,
+    );
   });
 });

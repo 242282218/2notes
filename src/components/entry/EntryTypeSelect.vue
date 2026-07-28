@@ -25,7 +25,7 @@ const options: Array<{ value: EntryType; label: string }> = [
 <template>
   <select
     ref="selectRef"
-    class="field-select entry-type-select"
+    class="select-base entry-type-select"
     aria-label="类型"
     :value="modelValue"
     :disabled="disabled"

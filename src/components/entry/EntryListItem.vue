@@ -14,47 +14,102 @@ defineProps<{
 defineEmits<{
   select: [id: string];
 }>();
+
+function allTagsTitle(tags: EntryListItem["tags"]) {
+  return tags.map((tag) => `#${tag.name}`).join(", ");
+}
+
+function formatUpdatedAt(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+
+  return new Intl.DateTimeFormat("zh-CN", {
+    ...(sameDay
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "numeric", day: "numeric" }),
+  }).format(date);
+}
 </script>
 
 <template>
   <button
     type="button"
-    class="entry-list-item group relative grid w-full gap-1 border-b border-border-subtle bg-bg-elevated px-4 py-3.5 text-left transition-colors duration-150 focus-visible:z-10 ring-focus hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
-    :class="{ 'bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800 shadow-[inset_3px_0_0_var(--color-brand)]': active }"
+    class="entry-list-item group relative grid w-full gap-1.5 rounded-md border-l-2 bg-transparent px-3 py-3 text-left transition-colors duration-fast ease-token ring-focus hover:bg-selected"
+    :class="{
+      'border-l-brand bg-selected hover:bg-selected': active,
+      'border-l-transparent': !active,
+    }"
     :data-entry-id="item.id"
+    :aria-current="active ? 'true' : undefined"
     @click="$emit('select', item.id)"
   >
-    <span class="overflow-hidden text-ellipsis whitespace-nowrap text-[14px] font-semibold tracking-tight text-text-primary">
-      {{ item.title || item.summary || "untitled" }}
+    <span class="flex min-w-0 items-baseline justify-between gap-3">
+      <strong
+        class="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-ui font-semibold text-text-primary"
+      >
+        {{ item.title || item.summary || "无标题" }}
+      </strong>
+      <time
+        :datetime="item.updatedAt"
+        class="shrink-0 text-micro tabular-nums text-text-tertiary"
+      >
+        {{ formatUpdatedAt(item.updatedAt) }}
+      </time>
     </span>
-    <span v-if="item.searchSnippet" class="search-snippet line-clamp-2 overflow-hidden text-[13px] leading-relaxed text-text-secondary">
+    <span
+      v-if="item.searchSnippet"
+      class="search-snippet line-clamp-2 overflow-hidden text-caption text-text-secondary"
+    >
       <template v-for="(part, index) in item.searchSnippet.parts" :key="index">
-        <mark v-if="part.highlighted" class="rounded-[3px] bg-brand-subtle px-[3px] py-[1px] font-medium text-text-primary">{{ part.text }}</mark>
+        <mark
+          v-if="part.highlighted"
+          class="rounded-sm bg-brand-subtle px-0.5 font-medium text-text-primary"
+          >{{ part.text }}</mark
+        >
         <template v-else>{{ part.text }}</template>
       </template>
     </span>
-    <span v-else class="line-clamp-2 overflow-hidden text-[13px] leading-relaxed text-text-secondary">{{ item.summary }}</span>
-    <span class="mt-[2px] flex min-w-0 flex-wrap gap-2 text-[12px] tabular-nums text-text-tertiary">
+    <span
+      v-else
+      class="line-clamp-2 overflow-hidden text-caption text-text-secondary"
+      >{{ item.summary }}</span
+    >
+    <span
+      class="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-micro text-text-tertiary"
+    >
       <span
         v-if="item.knowledgeState === 'knowledge'"
-        class="inline-flex max-w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full bg-brand/10 px-2 min-h-[22px] text-[12px] text-brand"
+        class="shrink-0 rounded bg-brand-subtle px-1.5 py-0.5 font-medium text-brand"
       >
         {{ KNOWLEDGE_LABEL }}
       </span>
-      <span class="inline-flex max-w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full bg-bg-active px-2 min-h-[22px] text-[12px]">
-        {{ TYPE_LABELS[item.entryType] ?? item.entryType }}
-      </span>
-      <span class="inline-flex max-w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full bg-bg-active px-2 min-h-[22px] text-[12px]">
-        {{ STATUS_LABELS[item.status] ?? item.status }}
-      </span>
+      <span v-if="item.knowledgeState === 'knowledge'" aria-hidden="true"
+        >·</span
+      >
+      <span class="shrink-0 font-medium text-text-secondary">{{
+        TYPE_LABELS[item.entryType] ?? item.entryType
+      }}</span>
+      <span aria-hidden="true">·</span>
+      <span class="shrink-0">{{
+        STATUS_LABELS[item.status] ?? item.status
+      }}</span>
       <span
-        v-for="tag in item.tags.slice(0, 3)"
+        v-for="tag in item.tags.slice(0, 2)"
         :key="tag.id"
+        data-entry-tag
         :title="`#${tag.name}`"
-        class="inline-flex max-w-full items-center overflow-hidden text-ellipsis whitespace-nowrap rounded-full bg-bg-active px-2 min-h-[22px] text-[12px]"
+        class="max-w-[72px] overflow-hidden text-ellipsis whitespace-nowrap rounded bg-bg-active px-1.5 py-0.5"
       >
         #{{ tag.name }}
       </span>
+      <span
+        v-if="item.tags.length > 2"
+        data-tag-overflow
+        class="shrink-0"
+        :title="allTagsTitle(item.tags)"
+        >+{{ item.tags.length - 2 }}</span
+      >
     </span>
   </button>
 </template>

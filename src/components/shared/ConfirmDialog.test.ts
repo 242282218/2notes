@@ -1,21 +1,62 @@
 import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import ConfirmDialog from "./ConfirmDialog.vue";
 
+const props = {
+  open: true,
+  title: "删除",
+  message: "确认删除？",
+  confirmLabel: "删除",
+};
+
+function getDialog() {
+  return document.body.querySelector<HTMLElement>('[role="dialog"]');
+}
+
+function dispatchKey(target: HTMLElement, key: string, shiftKey = false) {
+  target.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key,
+      shiftKey,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+afterEach(() => {
+  document.body.innerHTML = "";
+});
+
 describe("ConfirmDialog", () => {
+  it("teleports an accessible modal to body", () => {
+    const wrapper = mount(ConfirmDialog, { props });
+    const backdrop =
+      document.body.querySelector<HTMLElement>(".modal-backdrop");
+    const dialog = getDialog();
+
+    expect(backdrop).not.toBeNull();
+    expect(backdrop?.classList.contains("fixed")).toBe(true);
+    expect(dialog?.getAttribute("aria-modal")).toBe("true");
+    expect(dialog?.getAttribute("aria-labelledby")).toBe(
+      dialog?.querySelector("h2")?.id,
+    );
+    expect(dialog?.getAttribute("aria-describedby")).toBe(
+      dialog?.querySelector("p")?.id,
+    );
+    expect(dialog?.querySelector(".modal-actions")).not.toBeNull();
+
+    wrapper.unmount();
+    expect(getDialog()).toBeNull();
+  });
+
   it("focuses cancel button when opened and restores focus when closed", async () => {
     const opener = document.createElement("button");
     document.body.appendChild(opener);
     opener.focus();
     const wrapper = mount(ConfirmDialog, {
-      props: {
-        open: false,
-        title: "删除",
-        message: "确认删除？",
-        confirmLabel: "删除",
-      },
-      attachTo: document.body,
+      props: { ...props, open: false },
     });
 
     await wrapper.setProps({ open: true });
@@ -26,21 +67,32 @@ describe("ConfirmDialog", () => {
     expect(document.activeElement).toBe(opener);
 
     wrapper.unmount();
-    opener.remove();
+  });
+
+  it("keeps Tab focus inside the dialog", async () => {
+    const wrapper = mount(ConfirmDialog, { props });
+    await flushPromises();
+    const dialog = getDialog()!;
+    const [cancelButton, confirmButton] = Array.from(
+      dialog.querySelectorAll<HTMLButtonElement>("button"),
+    );
+
+    cancelButton.focus();
+    dispatchKey(dialog, "Tab", true);
+    expect(document.activeElement).toBe(confirmButton);
+
+    confirmButton.focus();
+    dispatchKey(dialog, "Tab");
+    expect(document.activeElement).toBe(cancelButton);
+
+    wrapper.unmount();
   });
 
   it("emits cancel on Escape", async () => {
-    const wrapper = mount(ConfirmDialog, {
-      props: {
-        open: true,
-        title: "恢复",
-        message: "确认恢复？",
-        confirmLabel: "恢复",
-      },
-      attachTo: document.body,
-    });
+    const wrapper = mount(ConfirmDialog, { props });
+    await flushPromises();
 
-    await wrapper.find("section").trigger("keydown", { key: "Escape" });
+    dispatchKey(getDialog()!, "Escape");
 
     expect(wrapper.emitted("cancel")).toHaveLength(1);
     wrapper.unmount();
