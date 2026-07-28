@@ -51,7 +51,10 @@ pub struct BlockAttrs {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum InlineNode {
-    Text { text: String, marks: Vec<InlineMark> },
+    Text {
+        text: String,
+        marks: Vec<InlineMark>,
+    },
     HardBreak,
 }
 

@@ -32,13 +32,7 @@ pub fn validate_document(document: &BlockDocument) -> AppResult<()> {
 
     let mut seen_ids = HashSet::new();
     let mut block_count = 0usize;
-    walk_validate(
-        &document.blocks,
-        None,
-        0,
-        &mut seen_ids,
-        &mut block_count,
-    )?;
+    walk_validate(&document.blocks, None, 0, &mut seen_ids, &mut block_count)?;
 
     if block_count > MAX_BLOCKS_PER_DOCUMENT {
         return Err(AppError::validation(
@@ -194,9 +188,7 @@ fn is_safe_link_href(href: &str) -> bool {
         return false;
     }
     let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("mailto:")
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
 }
 
 pub fn document_to_markdown(document: &BlockDocument) -> AppResult<String> {
@@ -281,12 +273,7 @@ fn render_block_markdown(block: &BlockNode, list_depth: usize, out: &mut String)
     }
 }
 
-fn render_list_markdown(
-    list: &BlockNode,
-    list_depth: usize,
-    ordered: bool,
-    out: &mut String,
-) {
+fn render_list_markdown(list: &BlockNode, list_depth: usize, ordered: bool, out: &mut String) {
     let start = list.attrs.start.unwrap_or(1);
     for (index, item) in list.children.iter().enumerate() {
         let indent = "  ".repeat(list_depth);
@@ -431,7 +418,8 @@ fn collect_plain_blocks(blocks: &[BlockNode], parts: &mut Vec<String>) {
         match block.kind {
             BlockKind::Paragraph | BlockKind::Heading | BlockKind::CodeBlock => {
                 let text = inline_plain_text(&block.content);
-                if !text.is_empty() || matches!(block.kind, BlockKind::Paragraph | BlockKind::Heading)
+                if !text.is_empty()
+                    || matches!(block.kind, BlockKind::Paragraph | BlockKind::Heading)
                 {
                     parts.push(text);
                 }
@@ -676,7 +664,9 @@ mod tests {
     fn rejects_heading_level_seven() {
         let document = BlockDocument::from_blocks(vec![heading_block("h", 7, "too deep")]);
         let err = validate_document(&document).unwrap_err();
-        assert!(matches!(err, AppError::Validation { code, .. } if code == "HEADING_LEVEL_INVALID"));
+        assert!(
+            matches!(err, AppError::Validation { code, .. } if code == "HEADING_LEVEL_INVALID")
+        );
     }
 
     #[test]
@@ -716,7 +706,9 @@ mod tests {
         let document = BlockDocument::from_blocks(blocks);
         assert!(document.blocks.len() <= MAX_BLOCKS_PER_DOCUMENT);
         let err = validate_document(&document).unwrap_err();
-        assert!(matches!(err, AppError::Validation { code, .. } if code == "DOCUMENT_JSON_TOO_LARGE"));
+        assert!(
+            matches!(err, AppError::Validation { code, .. } if code == "DOCUMENT_JSON_TOO_LARGE")
+        );
     }
 
     #[test]
@@ -739,7 +731,11 @@ mod tests {
 
     #[test]
     fn accepts_safe_link_schemes() {
-        for href in ["http://example.com", "https://example.com/a", "mailto:a@b.c"] {
+        for href in [
+            "http://example.com",
+            "https://example.com/a",
+            "mailto:a@b.c",
+        ] {
             let document = BlockDocument::from_blocks(vec![BlockNode {
                 id: "p".to_string(),
                 kind: BlockKind::Paragraph,

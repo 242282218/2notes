@@ -1232,7 +1232,10 @@ mod tests {
             knowledge_id: seed_ids["knowledge_id"].as_str().unwrap().to_string(),
             linker_id: seed_ids["linker_id"].as_str().unwrap().to_string(),
             trash_id: seed_ids["trash_id"].as_str().unwrap().to_string(),
-            knowledge_title_key: seed_ids["knowledge_title_key"].as_str().unwrap().to_string(),
+            knowledge_title_key: seed_ids["knowledge_title_key"]
+                .as_str()
+                .unwrap()
+                .to_string(),
         };
         let live = collect_v030_fixture_metrics(&write_conn, ids);
         let expected = V030FixtureMetrics {
@@ -1256,7 +1259,10 @@ mod tests {
             knowledge_id: seed_ids["knowledge_id"].as_str().unwrap().to_string(),
             linker_id: seed_ids["linker_id"].as_str().unwrap().to_string(),
             trash_id: seed_ids["trash_id"].as_str().unwrap().to_string(),
-            knowledge_title_key: seed_ids["knowledge_title_key"].as_str().unwrap().to_string(),
+            knowledge_title_key: seed_ids["knowledge_title_key"]
+                .as_str()
+                .unwrap()
+                .to_string(),
         };
         assert_eq!(live, expected);
         assert_eq!(
@@ -1267,9 +1273,7 @@ mod tests {
             expected_json["fixture_db"].as_str().unwrap(),
             "scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite"
         );
-        assert!(expected_json["not_installer_captured"]
-            .as_bool()
-            .unwrap());
+        assert!(expected_json["not_installer_captured"].as_bool().unwrap());
     }
 
     fn test_paths() -> AppPaths {

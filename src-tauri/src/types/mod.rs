@@ -82,6 +82,7 @@ mod tests {
             .filter(|ch| !ch.is_whitespace())
             .map(|ch| if ch == ',' { ';' } else { ch })
             .collect::<String>();
+        normalized = normalized.replace("=|", "=").replace("\"type\":", "type:");
         while normalized.contains(";;") || normalized.contains(";}") {
             normalized = normalized.replace(";;", ";").replace(";}", "}");
         }

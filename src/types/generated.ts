@@ -138,7 +138,14 @@ export type AppErrorResponse = {
 };
 
 export type BlockKind =
-  "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem" | "blockquote" | "codeBlock" | "horizontalRule";
+  | "paragraph"
+  | "heading"
+  | "bulletList"
+  | "orderedList"
+  | "listItem"
+  | "blockquote"
+  | "codeBlock"
+  | "horizontalRule";
 
 export type BlockAttrs = {
   level: number | null;
@@ -147,10 +154,15 @@ export type BlockAttrs = {
 };
 
 export type InlineMark =
-  { "type": "bold" } | { "type": "italic" } | { "type": "strike" } | { "type": "code" } | { "type": "link"; href: string };
+  | { type: "bold" }
+  | { type: "italic" }
+  | { type: "strike" }
+  | { type: "code" }
+  | { type: "link"; href: string };
 
 export type InlineNode =
-  { "type": "text"; text: string; marks: Array<InlineMark> } | { "type": "hardBreak" };
+  | { type: "text"; text: string; marks: Array<InlineMark> }
+  | { type: "hardBreak" };
 
 export type BlockNode = {
   id: string;
