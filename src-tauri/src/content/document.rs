@@ -77,10 +77,16 @@ fn walk_validate(
             ));
         }
 
-        if block.id.is_empty() || !seen_ids.insert(block.id.clone()) {
+        if !is_uuid_v4(&block.id) {
+            return Err(AppError::validation(
+                "BLOCK_ID_INVALID",
+                format!("block id must be a UUID v4: {}", block.id),
+            ));
+        }
+        if !seen_ids.insert(block.id.clone()) {
             return Err(AppError::validation(
                 "BLOCK_ID_DUPLICATE",
-                format!("duplicate or empty block id: {}", block.id),
+                format!("duplicate block id: {}", block.id),
             ));
         }
 
@@ -107,6 +113,13 @@ fn walk_validate(
     }
 
     Ok(())
+}
+
+fn is_uuid_v4(id: &str) -> bool {
+    match Uuid::parse_str(id) {
+        Ok(value) => value.get_version() == Some(uuid::Version::Random),
+        Err(_) => false,
+    }
 }
 
 fn validate_block_shape(block: &BlockNode) -> AppResult<()> {
@@ -150,7 +163,16 @@ fn validate_block_shape(block: &BlockNode) -> AppResult<()> {
                 ));
             }
         }
-        BlockKind::ListItem | BlockKind::Blockquote => {}
+        BlockKind::Blockquote => {
+            // Tiptap-style tree: blockquote owns child blocks only.
+            if !block.content.is_empty() {
+                return Err(AppError::validation(
+                    "BLOCKQUOTE_CONTENT_INVALID",
+                    "blockquote must not contain inline content; use child paragraphs",
+                ));
+            }
+        }
+        BlockKind::ListItem => {}
     }
     Ok(())
 }
@@ -255,17 +277,19 @@ fn render_block_markdown(block: &BlockNode, list_depth: usize, out: &mut String)
             }
         }
         BlockKind::CodeBlock => {
-            out.push_str("```");
+            let code = inline_plain_text(&block.content);
+            let fence = code_fence_marker(&code);
+            out.push_str(&fence);
             if let Some(language) = block.attrs.language.as_deref() {
                 out.push_str(language);
             }
             out.push('\n');
-            let code = inline_plain_text(&block.content);
             out.push_str(&code);
             if !code.ends_with('\n') {
                 out.push('\n');
             }
-            out.push_str("```\n");
+            out.push_str(&fence);
+            out.push('\n');
         }
         BlockKind::HorizontalRule => {
             out.push_str("---\n");
@@ -321,15 +345,15 @@ fn render_list_markdown(list: &BlockNode, list_depth: usize, ordered: bool, out:
 fn render_inlines_markdown(content: &[InlineNode], out: &mut String, in_code: bool) {
     for node in content {
         match node {
-            InlineNode::HardBreak => out.push('\n'),
+            // CommonMark hard break: backslash + newline.
+            InlineNode::HardBreak => out.push_str("\\\n"),
             InlineNode::Text { text, marks } => {
-                if in_code || marks.iter().any(|m| matches!(m, InlineMark::Code)) {
-                    let escaped = if marks.iter().any(|m| matches!(m, InlineMark::Code)) {
-                        format!("`{}`", text.replace('`', "\\`"))
-                    } else {
-                        text.clone()
-                    };
-                    out.push_str(&escaped);
+                if in_code {
+                    out.push_str(text);
+                    continue;
+                }
+                if marks.iter().any(|m| matches!(m, InlineMark::Code)) {
+                    out.push_str(&wrap_inline_code(text));
                     continue;
                 }
 
@@ -339,7 +363,7 @@ fn render_inlines_markdown(content: &[InlineNode], out: &mut String, in_code: bo
                         InlineMark::Bold => rendered = format!("**{rendered}**"),
                         InlineMark::Italic => rendered = format!("*{rendered}*"),
                         InlineMark::Strike => rendered = format!("~~{rendered}~~"),
-                        InlineMark::Code => rendered = format!("`{text}`"),
+                        InlineMark::Code => rendered = wrap_inline_code(text),
                         InlineMark::Link { href } => {
                             let safe_href = href.replace('(', "%28").replace(')', "%29");
                             rendered = format!("[{rendered}]({safe_href})");
@@ -349,6 +373,36 @@ fn render_inlines_markdown(content: &[InlineNode], out: &mut String, in_code: bo
                 out.push_str(&rendered);
             }
         }
+    }
+}
+
+fn longest_backtick_run(input: &str) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in input.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+fn code_fence_marker(code: &str) -> String {
+    let ticks = longest_backtick_run(code).max(2) + 1;
+    "`".repeat(ticks)
+}
+
+fn wrap_inline_code(text: &str) -> String {
+    let ticks = longest_backtick_run(text) + 1;
+    let marker = "`".repeat(ticks.max(1));
+    // CommonMark: pad with spaces when content starts/ends with a backtick.
+    if text.starts_with('`') || text.ends_with('`') {
+        format!("{marker} {text} {marker}")
+    } else {
+        format!("{marker}{text}{marker}")
     }
 }
 
@@ -582,12 +636,27 @@ mod tests {
     use super::*;
     use crate::error::AppError;
 
-    fn paragraph_block(id: &str, text: &str) -> BlockNode {
-        BlockNode::paragraph(id, text)
+    fn id(label: &str) -> String {
+        // Stable UUID v4 IDs for tests: version nibble fixed to 4, RFC variant fixed to 8.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        label.hash(&mut hasher);
+        let n = hasher.finish();
+        let a = (n >> 32) as u32;
+        let b = ((n >> 16) & 0xffff) as u16;
+        let c = (0x4000u16) | (((n >> 4) as u16) & 0x0fff);
+        let d = (0x8000u16) | ((n as u16) & 0x3fff);
+        let e = n & 0x0000_ffff_ffff_ffff;
+        format!("{a:08x}-{b:04x}-{c:04x}-{d:04x}-{e:012x}")
     }
 
-    fn paragraph_document(id: &str, text: &str) -> BlockDocument {
-        BlockDocument::from_blocks(vec![paragraph_block(id, text)])
+    fn paragraph_block(label: &str, text: &str) -> BlockNode {
+        BlockNode::paragraph(id(label), text)
+    }
+
+    fn paragraph_document(label: &str, text: &str) -> BlockDocument {
+        BlockDocument::from_blocks(vec![paragraph_block(label, text)])
     }
 
     fn text_inline(text: &str) -> InlineNode {
@@ -597,9 +666,9 @@ mod tests {
         }
     }
 
-    fn heading_block(id: &str, level: u8, text: &str) -> BlockNode {
+    fn heading_block(label: &str, level: u8, text: &str) -> BlockNode {
         BlockNode {
-            id: id.to_string(),
+            id: id(label),
             kind: BlockKind::Heading,
             attrs: BlockAttrs {
                 level: Some(level),
@@ -617,7 +686,7 @@ mod tests {
         while current_depth > 0 {
             current_depth -= 1;
             node = BlockNode {
-                id: format!("d{current_depth}"),
+                id: id(&format!("d{current_depth}")),
                 kind: BlockKind::Blockquote,
                 attrs: BlockAttrs::default(),
                 content: Vec::new(),
@@ -635,7 +704,7 @@ mod tests {
 
     #[test]
     fn accepts_single_empty_paragraph() {
-        let document = BlockDocument::from_blocks(vec![BlockNode::empty_paragraph("empty")]);
+        let document = BlockDocument::from_blocks(vec![BlockNode::empty_paragraph(id("empty"))]);
         assert!(validate_document(&document).is_ok());
     }
 
@@ -648,9 +717,34 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_uuid_v4_block_ids() {
+        let document = BlockDocument::from_blocks(vec![paragraph_block_raw("p1", "hello")]);
+        let err = validate_document(&document).unwrap_err();
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "BLOCK_ID_INVALID"));
+
+        let nil = BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            "00000000-0000-0000-0000-000000000000",
+            "x",
+        )]);
+        let err = validate_document(&nil).unwrap_err();
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "BLOCK_ID_INVALID"));
+
+        let v1 = BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "x",
+        )]);
+        let err = validate_document(&v1).unwrap_err();
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "BLOCK_ID_INVALID"));
+    }
+
+    fn paragraph_block_raw(id: &str, text: &str) -> BlockNode {
+        BlockNode::paragraph(id, text)
+    }
+
+    #[test]
     fn rejects_non_list_item_inside_list() {
         let document = BlockDocument::from_blocks(vec![BlockNode {
-            id: "list".to_string(),
+            id: id("list"),
             kind: BlockKind::BulletList,
             attrs: BlockAttrs::default(),
             content: Vec::new(),
@@ -714,7 +808,7 @@ mod tests {
     #[test]
     fn rejects_dangerous_link_scheme() {
         let document = BlockDocument::from_blocks(vec![BlockNode {
-            id: "p".to_string(),
+            id: id("p"),
             kind: BlockKind::Paragraph,
             attrs: BlockAttrs::default(),
             content: vec![InlineNode::Text {
@@ -737,7 +831,7 @@ mod tests {
             "mailto:a@b.c",
         ] {
             let document = BlockDocument::from_blocks(vec![BlockNode {
-                id: "p".to_string(),
+                id: id("p"),
                 kind: BlockKind::Paragraph,
                 attrs: BlockAttrs::default(),
                 content: vec![InlineNode::Text {
@@ -755,7 +849,7 @@ mod tests {
     #[test]
     fn markdown_escapes_special_characters_and_keeps_wikilinks() {
         let document = BlockDocument::from_blocks(vec![BlockNode {
-            id: "p".to_string(),
+            id: id("p"),
             kind: BlockKind::Paragraph,
             attrs: BlockAttrs::default(),
             content: vec![
@@ -774,10 +868,72 @@ mod tests {
     }
 
     #[test]
+    fn markdown_renders_hard_break_as_backslash_newline() {
+        let document = BlockDocument::from_blocks(vec![BlockNode {
+            id: id("p"),
+            kind: BlockKind::Paragraph,
+            attrs: BlockAttrs::default(),
+            content: vec![
+                text_inline("hello"),
+                InlineNode::HardBreak,
+                text_inline("world"),
+            ],
+            children: Vec::new(),
+        }]);
+        let markdown = document_to_markdown(&document).expect("markdown");
+        assert_eq!(markdown, "hello\\\nworld");
+    }
+
+    #[test]
+    fn markdown_code_uses_longer_fences_for_backticks() {
+        let document = BlockDocument::from_blocks(vec![
+            BlockNode {
+                id: id("code"),
+                kind: BlockKind::CodeBlock,
+                attrs: BlockAttrs {
+                    level: None,
+                    language: Some("rs".to_string()),
+                    start: None,
+                },
+                content: vec![text_inline("let s = \"```\";\n")],
+                children: Vec::new(),
+            },
+            BlockNode {
+                id: id("p"),
+                kind: BlockKind::Paragraph,
+                attrs: BlockAttrs::default(),
+                content: vec![InlineNode::Text {
+                    text: "a`b".to_string(),
+                    marks: vec![InlineMark::Code],
+                }],
+                children: Vec::new(),
+            },
+        ]);
+        let markdown = document_to_markdown(&document).expect("markdown");
+        assert!(markdown.contains("````rs\nlet s = \"```\";\n````"));
+        assert!(markdown.contains("``a`b``") || markdown.contains("` a`b `"));
+    }
+
+    #[test]
+    fn rejects_blockquote_with_inline_content() {
+        let document = BlockDocument::from_blocks(vec![BlockNode {
+            id: id("bq"),
+            kind: BlockKind::Blockquote,
+            attrs: BlockAttrs::default(),
+            content: vec![text_inline("lost if only children render")],
+            children: Vec::new(),
+        }]);
+        let err = validate_document(&document).unwrap_err();
+        assert!(
+            matches!(err, AppError::Validation { code, .. } if code == "BLOCKQUOTE_CONTENT_INVALID")
+        );
+    }
+
+    #[test]
     fn plain_text_joins_blocks_and_hard_breaks() {
         let document = BlockDocument::from_blocks(vec![
             BlockNode {
-                id: "p1".to_string(),
+                id: id("p1"),
                 kind: BlockKind::Paragraph,
                 attrs: BlockAttrs::default(),
                 content: vec![
@@ -795,6 +951,8 @@ mod tests {
 
     #[test]
     fn outline_collects_headings_in_order() {
+        let h1 = id("h1");
+        let h2 = id("h2");
         let document = BlockDocument::from_blocks(vec![
             heading_block("h1", 1, "One"),
             paragraph_block("p", "body"),
@@ -802,10 +960,10 @@ mod tests {
         ]);
         let outline = document_outline(&document);
         assert_eq!(outline.len(), 2);
-        assert_eq!(outline[0].id, "h1");
+        assert_eq!(outline[0].id, h1);
         assert_eq!(outline[0].level, 1);
         assert_eq!(outline[0].text, "One");
-        assert_eq!(outline[1].id, "h2");
+        assert_eq!(outline[1].id, h2);
         assert_eq!(outline[1].level, 2);
         assert_eq!(outline[1].text, "Two");
     }
@@ -833,25 +991,34 @@ mod tests {
             [InlineNode::Text { text, .. }] if text == "[[Wiki]]"
         ));
         assert!(validate_document(&document).is_ok());
+        // Hydrate-only: derived markdown is available but must not be required for validity.
+        let _ = document_to_markdown(&document).expect("derived markdown is optional writeback");
     }
 
     #[test]
     fn legacy_hydrate_only_does_not_side_effect_or_require_writeback() {
-        // Pure hydrate path: construct document from legacy text and never call
-        // document_to_markdown. Callers must not serialize unedited legacy for writeback.
+        // Pure helpers are side-effect free: hydrate constructs a valid document without
+        // forcing callers to serialize. Writeback remains an explicit later step.
         let original = "keep me\nas-is\n\nsecond";
         let document = legacy_text_document(original);
         assert!(validate_document(&document).is_ok());
-        let _projection = flatten_blocks(&document);
-        let _outline = document_outline(&document);
-        let _plain = document_to_plain_text(&document);
-        // Intentionally do not invoke document_to_markdown — hydrate-only must not write.
+        let projection = flatten_blocks(&document);
+        let outline = document_outline(&document);
+        let plain = document_to_plain_text(&document);
+        assert!(!projection.is_empty());
+        assert!(outline.is_empty());
+        assert!(plain.contains("keep me"));
+        // Callers that only hydrate must not treat markdown derivation as mandatory writeback.
+        // document_to_markdown is pure and opt-in; not invoking it is the hydrate-only contract.
     }
 
     #[test]
     fn flatten_blocks_assigns_parent_ordinal_and_depth() {
+        let bq = id("bq");
+        let c0 = id("c0");
+        let c1 = id("c1");
         let document = BlockDocument::from_blocks(vec![BlockNode {
-            id: "bq".to_string(),
+            id: bq.clone(),
             kind: BlockKind::Blockquote,
             attrs: BlockAttrs::default(),
             content: Vec::new(),
@@ -859,15 +1026,15 @@ mod tests {
         }]);
         let flat = flatten_blocks(&document);
         assert_eq!(flat.len(), 3);
-        assert_eq!(flat[0].id, "bq");
+        assert_eq!(flat[0].id, bq);
         assert_eq!(flat[0].parent_block_id, None);
         assert_eq!(flat[0].ordinal, 0);
         assert_eq!(flat[0].depth, 0);
-        assert_eq!(flat[1].id, "c0");
-        assert_eq!(flat[1].parent_block_id.as_deref(), Some("bq"));
+        assert_eq!(flat[1].id, c0);
+        assert_eq!(flat[1].parent_block_id.as_deref(), Some(bq.as_str()));
         assert_eq!(flat[1].ordinal, 0);
         assert_eq!(flat[1].depth, 1);
-        assert_eq!(flat[2].id, "c1");
+        assert_eq!(flat[2].id, c1);
         assert_eq!(flat[2].ordinal, 1);
         assert_eq!(flat[2].depth, 1);
         assert_eq!(flat[1].text_content, "a");
