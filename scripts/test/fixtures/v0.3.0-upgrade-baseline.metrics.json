@@ -1,0 +1,31 @@
+{
+  "aliases_total": 1,
+  "draft": {
+    "nonempty": true,
+    "revision": 1
+  },
+  "entries": {
+    "capture_active": 2,
+    "knowledge_active": 1,
+    "total": 4,
+    "trash_only": 1
+  },
+  "fixture_db": "scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite",
+  "links": {
+    "occurrences": 2,
+    "resolved": 1,
+    "unresolved": 1
+  },
+  "migration_version": 4,
+  "name": "v0.3.0-upgrade-baseline",
+  "not_installer_captured": true,
+  "search_hits_for_query_Gate0": 2,
+  "seed_ids": {
+    "capture_id": "8d4ad8ff-6cda-4423-acf7-52cde2c61d48",
+    "knowledge_id": "a6eef69d-cc88-42bf-b1a9-fb62aea7fa5b",
+    "knowledge_title_key": "gate0 knowledge",
+    "linker_id": "18ce7133-f36f-437c-a832-2b48032e5dd8",
+    "trash_id": "426d2442-99a1-40aa-86a8-0d1892f270dd"
+  },
+  "source": "schema-equivalent-0.3.0-content-baseline"
+}

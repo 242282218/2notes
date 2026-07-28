@@ -880,6 +880,322 @@ mod tests {
         .unwrap();
     }
 
+    /// Schema-equivalent 0.3.0 baseline content (migration v4), not installer-captured.
+    /// Seeds capture / knowledge / alias / resolved+unresolved WikiLinks / trash / draft.
+    fn seed_v030_upgrade_baseline(conn: &mut Connection, now: &str) -> V030FixtureMetrics {
+        use crate::db::repos::DraftsRepo;
+        use crate::knowledge::wiki_links::normalize_knowledge_title;
+
+        let tx = conn.transaction().unwrap();
+        // Keep create content short so auto-title is exactly the promote-time alias source.
+        let knowledge = EntriesRepo::create(&tx, "Gate0 Knowledge Anchor", now).unwrap();
+        let knowledge =
+            KnowledgeRepo::promote(&tx, &knowledge.id, knowledge.revision, now).unwrap();
+        let knowledge = EntriesRepo::update(
+            &tx,
+            &knowledge.id,
+            EntryPatch {
+                title: Some("Gate0 Knowledge".to_string()),
+                current_content: Some(
+                    "Gate0 Knowledge body.\n\nRenamed after promote so alias is retained.".into(),
+                ),
+                entry_type: None,
+                status: None,
+                tags: Some(vec!["gate0".into(), "baseline".into()]),
+            },
+            knowledge.revision,
+            now,
+        )
+        .unwrap();
+
+        let capture = EntriesRepo::create(
+            &tx,
+            "Plain capture note about baseline freeze without wiki links.",
+            now,
+        )
+        .unwrap();
+
+        let linker = EntriesRepo::create(
+            &tx,
+            "Resolved [[Gate0 Knowledge]] and unresolved [[Missing Topic]] for upgrade checks.",
+            now,
+        )
+        .unwrap();
+
+        let trashed =
+            EntriesRepo::create(&tx, "Trashed capture kept for restore metrics.", now).unwrap();
+        let trashed = EntriesRepo::move_to_trash(&tx, &trashed.id, trashed.revision, now).unwrap();
+
+        DraftsRepo::update(
+            &tx,
+            "Unsubmitted quick capture draft for Gate 0 baseline.",
+            0,
+            now,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        // Title rename during knowledge update should keep promote-time title as alias.
+        let aliases = KnowledgeRepo::aliases_for_entry(conn, &knowledge.id).unwrap();
+        assert!(
+            aliases
+                .iter()
+                .any(|alias| alias == "Gate0 Knowledge Anchor"),
+            "expected promote-time alias, got {aliases:?}"
+        );
+
+        let relations = KnowledgeRepo::relations(conn, &linker.id).unwrap();
+        assert_eq!(relations.outgoing.len(), 1);
+        assert_eq!(relations.outgoing[0].id, knowledge.id);
+        assert_eq!(relations.unresolved.len(), 1);
+        assert_eq!(relations.unresolved[0].raw_target, "Missing Topic");
+
+        collect_v030_fixture_metrics(
+            conn,
+            V030FixtureSeedIds {
+                capture_id: capture.id,
+                knowledge_id: knowledge.id,
+                linker_id: linker.id,
+                trash_id: trashed.id,
+                knowledge_title_key: normalize_knowledge_title("Gate0 Knowledge"),
+            },
+        )
+    }
+
+    struct V030FixtureSeedIds {
+        capture_id: String,
+        knowledge_id: String,
+        linker_id: String,
+        trash_id: String,
+        knowledge_title_key: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct V030FixtureMetrics {
+        schema_version: i64,
+        entries_total: i64,
+        capture_active: i64,
+        knowledge_active: i64,
+        trash_only: i64,
+        draft_revision: i64,
+        draft_nonempty: bool,
+        aliases_total: i64,
+        link_occurrences: i64,
+        resolved_links: i64,
+        unresolved_links: i64,
+        search_hits_for_gate0: i64,
+        capture_id: String,
+        knowledge_id: String,
+        linker_id: String,
+        trash_id: String,
+        knowledge_title_key: String,
+    }
+
+    fn collect_v030_fixture_metrics(
+        conn: &Connection,
+        ids: V030FixtureSeedIds,
+    ) -> V030FixtureMetrics {
+        use crate::db::repos::DraftsRepo;
+
+        let schema_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let entries_total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        let capture_active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries
+                 WHERE deleted_at IS NULL AND knowledge_state = 'capture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let knowledge_active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries
+                 WHERE deleted_at IS NULL AND knowledge_state = 'knowledge'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let trash_only: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE deleted_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let aliases_total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_aliases", [], |row| row.get(0))
+            .unwrap();
+        let link_occurrences: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_links", [], |row| row.get(0))
+            .unwrap();
+        let resolved_links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_links WHERE target_entry_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unresolved_links: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entry_links WHERE target_entry_id IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let draft = DraftsRepo::get(conn).unwrap();
+        let mut filter = default_filter();
+        filter.query = Some("Gate0".to_string());
+        let search_hits_for_gate0 = EntriesRepo::list(conn, &filter, &default_page())
+            .unwrap()
+            .items
+            .len() as i64;
+
+        V030FixtureMetrics {
+            schema_version,
+            entries_total,
+            capture_active,
+            knowledge_active,
+            trash_only,
+            draft_revision: draft.revision,
+            draft_nonempty: !draft.content.trim().is_empty(),
+            aliases_total,
+            link_occurrences,
+            resolved_links,
+            unresolved_links,
+            search_hits_for_gate0,
+            capture_id: ids.capture_id,
+            knowledge_id: ids.knowledge_id,
+            linker_id: ids.linker_id,
+            trash_id: ids.trash_id,
+            knowledge_title_key: ids.knowledge_title_key,
+        }
+    }
+
+    fn expected_v030_fixture_metrics(ids: &V030FixtureSeedIds) -> V030FixtureMetrics {
+        V030FixtureMetrics {
+            schema_version: 4,
+            entries_total: 4,
+            capture_active: 2,
+            knowledge_active: 1,
+            trash_only: 1,
+            draft_revision: 1,
+            draft_nonempty: true,
+            aliases_total: 1,
+            link_occurrences: 2,
+            resolved_links: 1,
+            unresolved_links: 1,
+            search_hits_for_gate0: 2,
+            capture_id: ids.capture_id.clone(),
+            knowledge_id: ids.knowledge_id.clone(),
+            linker_id: ids.linker_id.clone(),
+            trash_id: ids.trash_id.clone(),
+            knowledge_title_key: ids.knowledge_title_key.clone(),
+        }
+    }
+
+    #[test]
+    fn v030_upgrade_baseline_fixture_seeds_and_restores() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        let (mut write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let now = now_string();
+        let metrics = seed_v030_upgrade_baseline(&mut write_conn, &now);
+        let expected = expected_v030_fixture_metrics(&V030FixtureSeedIds {
+            capture_id: metrics.capture_id.clone(),
+            knowledge_id: metrics.knowledge_id.clone(),
+            linker_id: metrics.linker_id.clone(),
+            trash_id: metrics.trash_id.clone(),
+            knowledge_title_key: metrics.knowledge_title_key.clone(),
+        });
+        assert_eq!(metrics, expected);
+
+        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        // Mutate live DB so restore has something to replace.
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "post-backup noise that restore must drop", &now).unwrap();
+        tx.commit().unwrap();
+
+        let state = AppState::new(write_conn, read_conn, paths.clone());
+        restore_backup(&state, &backup.path).unwrap();
+
+        let conn = state.read_conn().unwrap();
+        let restored = collect_v030_fixture_metrics(
+            &conn,
+            V030FixtureSeedIds {
+                capture_id: metrics.capture_id.clone(),
+                knowledge_id: metrics.knowledge_id.clone(),
+                linker_id: metrics.linker_id.clone(),
+                trash_id: metrics.trash_id.clone(),
+                knowledge_title_key: metrics.knowledge_title_key.clone(),
+            },
+        );
+        assert_eq!(restored, expected);
+
+        if std::env::var("GENERATE_V030_FIXTURE").ok().as_deref() == Some("1") {
+            let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("src-tauri parent")
+                .to_path_buf();
+            let fixture_dir = repo_root.join("scripts/test/fixtures");
+            fs::create_dir_all(&fixture_dir).unwrap();
+            let fixture_db = fixture_dir.join("v0.3.0-upgrade-baseline.sqlite");
+            if fixture_db.exists() {
+                fs::remove_file(&fixture_db).unwrap();
+            }
+            fs::copy(&backup.path, &fixture_db).unwrap();
+
+            let metrics_json = serde_json::json!({
+                "name": "v0.3.0-upgrade-baseline",
+                "source": "schema-equivalent-0.3.0-content-baseline",
+                "not_installer_captured": true,
+                "migration_version": restored.schema_version,
+                "entries": {
+                    "total": restored.entries_total,
+                    "capture_active": restored.capture_active,
+                    "knowledge_active": restored.knowledge_active,
+                    "trash_only": restored.trash_only
+                },
+                "draft": {
+                    "revision": restored.draft_revision,
+                    "nonempty": restored.draft_nonempty
+                },
+                "aliases_total": restored.aliases_total,
+                "links": {
+                    "occurrences": restored.link_occurrences,
+                    "resolved": restored.resolved_links,
+                    "unresolved": restored.unresolved_links
+                },
+                "search_hits_for_query_Gate0": restored.search_hits_for_gate0,
+                "seed_ids": {
+                    "capture_id": restored.capture_id,
+                    "knowledge_id": restored.knowledge_id,
+                    "linker_id": restored.linker_id,
+                    "trash_id": restored.trash_id,
+                    "knowledge_title_key": restored.knowledge_title_key
+                },
+                "fixture_db": "scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite"
+            });
+            let metrics_path = fixture_dir.join("v0.3.0-upgrade-baseline.metrics.json");
+            fs::write(
+                &metrics_path,
+                serde_json::to_string_pretty(&metrics_json).unwrap() + "\n",
+            )
+            .unwrap();
+            eprintln!(
+                "wrote fixture db={} metrics={}",
+                fixture_db.display(),
+                metrics_path.display()
+            );
+        }
+    }
+
     fn test_paths() -> AppPaths {
         let temp = tempfile::tempdir().unwrap().keep();
         AppPaths {
