@@ -881,6 +881,122 @@ mod tests {
         .unwrap();
     }
 
+    /// Builds an older 2notes schema at the requested top version (3 or 4) so the restore
+    /// path can be exercised against pre-005 backups. The body and current content contain
+    /// a WikiLink that the rebuilt index should re-resolve after migration.
+    fn create_legacy_pre005_database(path: &Path, top_version: i64) {
+        assert!(matches!(top_version, 3 | 4));
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(include_str!("../db/schema/001_init.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../db/schema/002_entries_fts.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../db/schema/003_knowledge_graph.sql"))
+            .unwrap();
+        let now = "2026-07-01T00:00:00Z";
+        conn.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES
+               (1, ?1, ?4), (2, ?2, ?4), (3, ?3, ?4)",
+            params![
+                checksum(include_str!("../db/schema/001_init.sql")),
+                checksum(include_str!("../db/schema/002_entries_fts.sql")),
+                checksum(include_str!("../db/schema/003_knowledge_graph.sql")),
+                now,
+            ],
+        )
+        .unwrap();
+        if top_version >= 4 {
+            conn.execute_batch(include_str!("../db/schema/004_entries_fts_trigram.sql"))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+                params![
+                    4,
+                    checksum(include_str!("../db/schema/004_entries_fts_trigram.sql")),
+                    now,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Seed a knowledge entry and a source linking to it; migration to 005 must still
+        // preserve the current_content that drives WikiLink resolution pre-document.
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content,
+               type, status, revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_title_key
+             ) VALUES
+               ('legacy-target', '目标', 'user', 'target body', 'target body',
+                'material', 'archived', 4, ?1, ?1, NULL, 'knowledge', '目标'),
+               ('legacy-source', NULL, 'auto', 'source body', '正文 [[目标]] 收尾',
+                'unclear', 'pending', 3, ?1, ?1, NULL, 'capture', NULL)",
+            [now],
+        )
+        .unwrap();
+        // Resolve the outgoing link by hand so the rebuild can verify the resolved edge.
+        conn.execute(
+            "INSERT INTO entry_links(source_entry_id, ordinal, raw_target, normalized_target, target_entry_id)
+             VALUES ('legacy-source', 0, '目标', '目标', 'legacy-target')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn restores_legacy_v3_backup_and_migrates_to_block_documents_schema() {
+        restores_legacy_pre005_backup_and_migrates_to_block_documents_schema(3);
+    }
+
+    #[test]
+    fn restores_legacy_v4_backup_and_migrates_to_block_documents_schema() {
+        restores_legacy_pre005_backup_and_migrates_to_block_documents_schema(4);
+    }
+
+    fn restores_legacy_pre005_backup_and_migrates_to_block_documents_schema(top_version: i64) {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        let (write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let legacy = paths
+            .backup_dir
+            .join(format!("2notes-legacy-v{top_version}.sqlite"));
+        create_legacy_pre005_database(&legacy, top_version);
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        restore_backup(&state, &legacy.display().to_string()).unwrap();
+
+        let conn = state.read_conn().unwrap();
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 5);
+
+        // schema 005 introduces entry_documents and blocks and they must be populated for
+        // the source entry, with its current_content preserved verbatim as a legacy snapshot.
+        let (documents, blocks): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM entry_documents WHERE entry_id = 'legacy-source'),
+                        (SELECT COUNT(*) FROM blocks WHERE entry_id = 'legacy-source')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(documents, 1);
+        assert!(blocks > 0);
+
+        let current_content: String = conn
+            .query_row(
+                "SELECT current_content FROM entries WHERE id = 'legacy-source'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_content, "正文 [[目标]] 收尾");
+    }
+
     /// Schema-equivalent 0.3.0 baseline content (migration v4), not installer-captured.
     /// Seeds capture / knowledge / alias / resolved+unresolved WikiLinks / trash / draft.
     fn seed_v030_upgrade_baseline(conn: &mut Connection, now: &str) -> V030FixtureMetrics {

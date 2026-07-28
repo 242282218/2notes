@@ -78,4 +78,6 @@ pub struct KnowledgeIndexReport {
     pub link_occurrences: u32,
     pub unresolved_occurrences: u32,
     pub search_index_available: bool,
+    pub projected_blocks: u32,
+    pub repaired_documents: u32,
 }

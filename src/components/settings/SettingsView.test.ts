@@ -320,6 +320,8 @@ function report(searchIndexAvailable: boolean): KnowledgeIndexReport {
     linkOccurrences: 5,
     unresolvedOccurrences: 1,
     searchIndexAvailable,
+    projectedBlocks: 17,
+    repairedDocuments: 1,
   };
 }
 

@@ -478,7 +478,7 @@ async function updateAutostart(event: Event) {
             aria-live="polite"
           >
             {{
-              `重建完成：来源 ${indexReport.indexedSources}，链接 ${indexReport.linkOccurrences}，未解析 ${indexReport.unresolvedOccurrences}，${indexReport.searchIndexAvailable ? "搜索索引可用" : "搜索索引不可用"}`
+              `重建完成：来源 ${indexReport.indexedSources}，链接 ${indexReport.linkOccurrences}，未解析 ${indexReport.unresolvedOccurrences}，投影块 ${indexReport.projectedBlocks}，修复文档 ${indexReport.repairedDocuments}，${indexReport.searchIndexAvailable ? "搜索索引可用" : "搜索索引不可用"}`
             }}
           </p>
           <p v-if="indexError" class="mt-2 text-ui text-danger" role="alert">

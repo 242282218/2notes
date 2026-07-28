@@ -31,6 +31,8 @@ export type KnowledgeIndexReport = {
   linkOccurrences: number;
   unresolvedOccurrences: number;
   searchIndexAvailable: boolean;
+  projectedBlocks: number;
+  repairedDocuments: number;
 };
 
 export type Tag = {

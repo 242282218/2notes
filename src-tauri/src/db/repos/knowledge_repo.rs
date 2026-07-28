@@ -6,6 +6,7 @@ use crate::{
     db::{
         migrations::now_string,
         repos::{
+            documents_repo::DocumentsRepo,
             entries_repo::{entries_fts_is_trigram, entry_summary},
             EntriesRepo,
         },
@@ -196,6 +197,13 @@ impl KnowledgeRepo {
             rebuild_fts(&tx)?;
         }
         report.search_index_available = search_index_available;
+        // Also verify that `entry_documents` rows have a consistent `blocks` projection and
+        // repair any drift in the same transaction. FTS above was already regenerated from
+        // `entries.current_content`, so a rebuild cannot desync the search index.
+        let (_documents, projected_blocks, repaired_documents) =
+            DocumentsRepo::verify_and_repair_projections(&tx)?;
+        report.projected_blocks = projected_blocks;
+        report.repaired_documents = repaired_documents;
         tx.execute(
             "INSERT INTO settings(key, value, updated_at) VALUES (?1, '1', ?2)
              ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = ?2",
@@ -343,16 +351,24 @@ impl KnowledgeRepo {
         Ok(())
     }
 
+    /// Rebuild outgoing links for `source_id`. The recall source is the stored
+    /// `DocumentRecord.markdown_text`, which preserves `[[wiki]]` as plain text. A missing
+    /// document row falls back to `entries.current_content` so capture entries written before
+    /// schema 005 do not silently lose their links.
     pub fn refresh_source_links(
         tx: &Transaction<'_>,
         source_id: &str,
         current_content: &str,
     ) -> AppResult<()> {
+        let source_text = match DocumentsRepo::markdown_text_with_tx(tx, source_id)? {
+            Some(markdown) => markdown,
+            None => current_content.to_string(),
+        };
         tx.execute(
             "DELETE FROM entry_links WHERE source_entry_id = ?1",
             [source_id],
         )?;
-        for (ordinal, link) in parse_wiki_links(current_content).into_iter().enumerate() {
+        for (ordinal, link) in parse_wiki_links(&source_text).into_iter().enumerate() {
             let target_id = resolve_target_id(tx, &link.normalized_target)?;
             tx.execute(
                 "INSERT INTO entry_links(source_entry_id, ordinal, raw_target, normalized_target, target_entry_id)
@@ -415,6 +431,10 @@ impl KnowledgeRepo {
             link_occurrences: links as u32,
             unresolved_occurrences: unresolved as u32,
             search_index_available,
+            // Populated by `rebuild_all_indexes_inner` after projection verification; zero
+            // when this builder is called directly outside a full rebuild.
+            projected_blocks: 0,
+            repaired_documents: 0,
         })
     }
 
@@ -581,11 +601,15 @@ mod tests {
         db::{
             connection::{open_database, open_in_memory},
             migrations::now_string,
-            repos::EntriesRepo,
+            repos::{documents_repo::DocumentsRepo, EntriesRepo},
         },
         error::AppError,
         types::{
-            entries::{EntryListFilter, EntryPatch, EntryStatus, PageRequest},
+            documents::{BlockAttrs, BlockDocument, BlockKind, BlockNode, InlineMark, InlineNode},
+            entries::{
+                CreateEntrySpec, EntryListFilter, EntryPage, EntryPatch, EntryStatus, EntryType,
+                PageRequest, TitleSource,
+            },
             knowledge::KnowledgeState,
         },
     };
@@ -873,6 +897,195 @@ mod tests {
         assert_eq!(report.indexed_sources, 2);
         assert_eq!(report.link_occurrences, 1);
         assert_eq!(target.knowledge_state, KnowledgeState::Knowledge);
+    }
+
+    #[test]
+    fn structured_document_drives_wikilink_search_export_and_projection() {
+        use crate::{content::document::document_to_markdown, files::markdown::export_entries};
+        use tempfile::tempdir;
+
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+
+        // Build a structured document with heading, bullet list, marks, a hard break, and a
+        // [[目标]] WikiLink embedded as plain text in a paragraph.
+        let target = {
+            let tx = conn.transaction().unwrap();
+            let created = EntriesRepo::create(&tx, "目标", &now).unwrap();
+            let promoted =
+                KnowledgeRepo::promote(&tx, &created.id, created.revision, &now).unwrap();
+            tx.commit().unwrap();
+            promoted
+        };
+
+        // Manually craft the source document so we exercise prose beyond a single paragraph.
+        let block_uuid = |seed: usize| format!("00000000-0000-4000-8000-{seed:012x}");
+        let heading = BlockNode {
+            id: block_uuid(1),
+            kind: BlockKind::Heading,
+            attrs: BlockAttrs {
+                level: Some(2),
+                language: None,
+                start: None,
+            },
+            content: vec![InlineNode::Text {
+                text: "笔记标题".to_string(),
+                marks: Vec::new(),
+            }],
+            children: Vec::new(),
+        };
+        let intro = BlockNode {
+            id: block_uuid(2),
+            kind: BlockKind::Paragraph,
+            attrs: BlockAttrs::default(),
+            content: vec![
+                InlineNode::Text {
+                    text: "粗体".to_string(),
+                    marks: vec![InlineMark::Bold],
+                },
+                InlineNode::Text {
+                    text: "与普通文字和".to_string(),
+                    marks: Vec::new(),
+                },
+                InlineNode::HardBreak,
+                InlineNode::Text {
+                    text: "随后硬换行并提及 [[目标]] 收尾。".to_string(),
+                    marks: Vec::new(),
+                },
+            ],
+            children: Vec::new(),
+        };
+        let list_item_a = BlockNode {
+            id: block_uuid(3),
+            kind: BlockKind::ListItem,
+            attrs: BlockAttrs::default(),
+            content: vec![InlineNode::Text {
+                text: "列表项带 关键字 alpha".to_string(),
+                marks: Vec::new(),
+            }],
+            children: Vec::new(),
+        };
+        let list_item_b = BlockNode {
+            id: block_uuid(4),
+            kind: BlockKind::ListItem,
+            attrs: BlockAttrs::default(),
+            content: vec![InlineNode::Text {
+                text: "列表项带 其它术语".to_string(),
+                marks: Vec::new(),
+            }],
+            children: Vec::new(),
+        };
+        let bullet = BlockNode {
+            id: block_uuid(5),
+            kind: BlockKind::BulletList,
+            attrs: BlockAttrs::default(),
+            content: Vec::new(),
+            children: vec![list_item_a, list_item_b],
+        };
+        let document = BlockDocument::from_blocks(vec![heading, intro, bullet]);
+
+        // Persist the source entry whose document carries WikiLink + structured content.
+        let original_content =
+            "笔记标题\n粗体与普通文字和\n随后硬换行并提及 [[目标]] 收尾。\n- 列表项带 关键字 alpha\n- 列表项带 其它术语"
+                .to_string();
+        let source = {
+            let spec = CreateEntrySpec {
+                title: Some("来源笔记".to_string()),
+                title_source: TitleSource::User,
+                original_content: original_content.clone(),
+                document,
+                entry_type: EntryType::Idea,
+                status: EntryStatus::Pending,
+                tags: Vec::new(),
+            };
+            let tx = conn.transaction().unwrap();
+            let entry = EntriesRepo::create_with_document(&tx, spec, &now).unwrap();
+            tx.commit().unwrap();
+            entry
+        };
+
+        // (a) Resolved outgoing link: refresh_source_links should resolve [[目标]] to target.
+        let relations = KnowledgeRepo::relations(&conn, &source.id).unwrap();
+        assert_eq!(relations.outgoing.len(), 1);
+        assert_eq!(relations.outgoing[0].id, target.id);
+        assert_eq!(relations.outgoing[0].occurrence_count, 1);
+        assert!(relations.unresolved.is_empty());
+
+        // Reach for the stored `markdown_text` to confirm WikiLink survives serialization.
+        let markdown = DocumentsRepo::markdown_text(&conn, &source.id)
+            .unwrap()
+            .expect("expected stored markdown_text for source entry");
+        assert!(markdown.contains("[[目标]]"));
+        assert!(markdown.starts_with("## 笔记标题"));
+
+        // (b) Keyword search via FTS indexes the derived plain text including the heading
+        // and list item content.
+        let page = EntriesRepo::list(
+            &conn,
+            &EntryListFilter {
+                query: Some("关键字".to_string()),
+                entry_type: None,
+                status: None,
+                knowledge_state: None,
+                tag: None,
+                include_deleted: false,
+                trash_only: false,
+            },
+            &PageRequest {
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(page, EntryPage { items, .. } if items.iter().any(|item| item.id == source.id))
+        );
+
+        // (c) Markdown export renders heading, list, marks, and keeps the WikiLink cleanup.
+        let detail = EntriesRepo::get(&conn, &source.id).unwrap();
+        let export_body = document_to_markdown(&detail.document).unwrap();
+        assert!(export_body.contains("## 笔记标题"));
+        assert!(export_body.contains("- 列表项带 关键字 alpha"));
+        assert!(export_body.contains("[[目标]]"));
+        assert!(!export_body.contains(r"\[[目标]]"));
+        let dir = tempdir().unwrap();
+        let paths = export_entries(std::slice::from_ref(&detail), dir.path()).unwrap();
+        let exported = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(exported.contains("## 笔记标题"));
+        assert!(exported.contains("- 列表项带 关键字 alpha"));
+        assert!(exported.contains("[[目标]]"));
+        assert!(!exported.contains(r"\[[目标]]"));
+
+        // (d) Simulate projection drift: nuke blocks rows, then rebuild must repair them.
+        conn.execute("DELETE FROM blocks WHERE entry_id = ?1", [&source.id])
+            .unwrap();
+        let blocks_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = ?1",
+                [&source.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocks_before, 0);
+
+        let report = KnowledgeRepo::rebuild_all_indexes(&mut conn).unwrap();
+        assert_eq!(report.repaired_documents, 1);
+        // Source contributes 5 blocks (heading + intro + bullet + 2 list items); target
+        // contributes 1 (a single legacy paragraph), so the verified total is 6.
+        assert_eq!(report.projected_blocks, 6);
+        let blocks_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = ?1",
+                [&source.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(blocks_after, 5);
+
+        // Link integrity preserved across projection repair.
+        let relations_after = KnowledgeRepo::relations(&conn, &source.id).unwrap();
+        assert_eq!(relations_after.outgoing.len(), 1);
+        assert_eq!(relations_after.outgoing[0].id, target.id);
     }
 
     #[test]

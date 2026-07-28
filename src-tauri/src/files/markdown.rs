@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use crate::db::repos::EntriesRepo;
 use crate::{
+    content::document::document_to_markdown,
     error::{AppError, AppResult},
     types::entries::EntryDetail,
 };
@@ -92,9 +93,14 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         .or_else(|| super::super::db::repos::entries_repo::auto_title(&entry.current_content))
         .unwrap_or_else(|| "untitled".to_string());
 
+    // Body is the document's canonical Markdown, which preserves `[[wiki]]` as plain text
+    // while escaping syntax characters; this keeps exports round-trippable for Task 12.
+    let body_markdown =
+        document_to_markdown(&entry.document).unwrap_or_else(|_| entry.current_content.clone());
+
     Ok(format!(
         "---\n{}\n---\n\n# {}\n\n{}\n\n---\n\n## 原始内容\n\n{}\n",
-        yaml, title, entry.current_content, entry.original_content
+        yaml, title, body_markdown, entry.original_content
     ))
 }
 

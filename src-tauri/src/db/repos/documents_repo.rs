@@ -118,6 +118,75 @@ impl DocumentsRepo {
         Ok(count > 0)
     }
 
+    /// Return the canonical `markdown_text` derived from the stored document. Used as the
+    /// single WikiLink parsing source and the export body. Falls back to `None` when the
+    /// entry has no document row (defensive; every entry is expected to have one post-004).
+    pub fn markdown_text(conn: &Connection, entry_id: &str) -> AppResult<Option<String>> {
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT markdown_text FROM entry_documents WHERE entry_id = ?1",
+                [entry_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(value)
+    }
+
+    /// Transaction-bound variant of [`Self::markdown_text`].
+    pub fn markdown_text_with_tx(
+        tx: &Transaction<'_>,
+        entry_id: &str,
+    ) -> AppResult<Option<String>> {
+        let value: Option<String> = tx
+            .query_row(
+                "SELECT markdown_text FROM entry_documents WHERE entry_id = ?1",
+                [entry_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(value)
+    }
+
+    /// Rebuild `blocks` projection rows that disagree with the stored document JSON, and
+    /// backfill missing `blocks` rows. Returns `(documents_with_documents, projected_blocks,
+    /// repaired_documents)`: count of entries with a stored document, total blocks after
+    /// projection, and the number of entries whose projection had to be rebuilt.
+    pub fn verify_and_repair_projections(tx: &Transaction<'_>) -> AppResult<(u32, u32, u32)> {
+        let mut select = tx.prepare(
+            "SELECT ed.entry_id, ed.document_json,
+                    (SELECT COUNT(*) FROM blocks b WHERE b.entry_id = ed.entry_id) AS block_count
+             FROM entry_documents ed",
+        )?;
+        let rows: Vec<(String, String, i64)> = {
+            let mapped = select.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        drop(select);
+        let mut document_count = 0u32;
+        let mut total_blocks = 0u32;
+        let mut repaired = 0u32;
+        for (entry_id, json, block_count) in rows {
+            document_count += 1;
+            let document: BlockDocument = serde_json::from_str(&json)
+                .map_err(|err| AppError::validation("DOCUMENT_JSON_INVALID", err.to_string()))?;
+            let expected = flatten_blocks(&document).len() as i64;
+            if block_count != expected {
+                let inserted = Self::rebuild_projection(tx, &entry_id)?;
+                repaired += 1;
+                total_blocks += inserted;
+            } else {
+                total_blocks += block_count as u32;
+            }
+        }
+        Ok((document_count, total_blocks, repaired))
+    }
+
     fn insert(
         tx: &Transaction<'_>,
         record: &DocumentRecord,
@@ -185,10 +254,15 @@ impl DocumentRecord {
         let document_json = serde_json::to_string(document).unwrap_or_default();
         let markdown_text = document_to_markdown(document).unwrap_or_default();
         let plain_text = document_to_plain_text(document);
+        // The invariant `entries.current_content == document_to_plain_text(document)` is
+        // what `EntriesRepo::repair_documents` relies on to detect real content changes
+        // versus pure-metadata updates. Use `plain_text` (not `document_json`) so the
+        // checksum matches what stored on the entry row.
+        let source_content_checksum = crate::db::migrations::checksum(&plain_text);
         Self {
             entry_id: entry_id.to_string(),
             entry_revision,
-            source_content_checksum: crate::db::migrations::checksum(&document_json),
+            source_content_checksum,
             document_json,
             markdown_text,
             plain_text,
