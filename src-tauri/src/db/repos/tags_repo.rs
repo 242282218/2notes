@@ -179,6 +179,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: None,
                 entry_type: None,

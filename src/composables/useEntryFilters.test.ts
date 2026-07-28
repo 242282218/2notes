@@ -46,6 +46,18 @@ describe("entryMatchesCurrentFilter", () => {
     titleSource: "auto",
     originalContent: "原始",
     currentContent: "当前",
+    document: {
+      schemaVersion: 1,
+      blocks: [
+        {
+          id: "550e8400-e29b-41d4-a716-446655440000",
+          kind: "paragraph" as const,
+          attrs: { level: null, language: null, start: null },
+          content: [],
+          children: [],
+        },
+      ],
+    },
     entryType: "idea",
     status: "pending",
     knowledgeState: "capture",

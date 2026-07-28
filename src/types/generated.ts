@@ -81,6 +81,7 @@ export type EntryDetail = {
   titleSource: TitleSource;
   originalContent: string;
   currentContent: string;
+  document: BlockDocument;
   entryType: EntryType;
   status: EntryStatus;
   knowledgeState: KnowledgeState;
@@ -95,10 +96,26 @@ export type EntryDetail = {
 
 export type EntryPatch = {
   title: string | null;
+  document: BlockDocument | null;
   currentContent: string | null;
   entryType: EntryType | null;
   status: EntryStatus | null;
   tags: Array<string> | null;
+};
+
+export type CreateEntrySpec = {
+  title: string | null;
+  titleSource: TitleSource;
+  originalContent: string;
+  document: BlockDocument;
+  entryType: EntryType;
+  status: EntryStatus;
+  tags: Array<string>;
+};
+
+export type DocumentRepairReport = {
+  rebuilt: number;
+  synced: number;
 };
 
 export type Draft = { content: string; revision: number; updatedAt: string };

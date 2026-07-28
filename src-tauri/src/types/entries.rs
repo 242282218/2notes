@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::documents::BlockDocument;
 use super::knowledge::{KnowledgeState, SearchSnippet};
 use super::tags::Tag;
 
@@ -142,6 +143,7 @@ pub struct EntryDetail {
     pub title_source: TitleSource,
     pub original_content: String,
     pub current_content: String,
+    pub document: BlockDocument,
     pub entry_type: EntryType,
     pub status: EntryStatus,
     pub knowledge_state: KnowledgeState,
@@ -159,8 +161,28 @@ pub struct EntryDetail {
 #[serde(rename_all = "camelCase")]
 pub struct EntryPatch {
     pub title: Option<String>,
+    pub document: Option<BlockDocument>,
     pub current_content: Option<String>,
     pub entry_type: Option<EntryType>,
     pub status: Option<EntryStatus>,
     pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentRepairReport {
+    pub rebuilt: u32,
+    pub synced: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateEntrySpec {
+    pub title: Option<String>,
+    pub title_source: TitleSource,
+    pub original_content: String,
+    pub document: BlockDocument,
+    pub entry_type: EntryType,
+    pub status: EntryStatus,
+    pub tags: Vec<String>,
 }

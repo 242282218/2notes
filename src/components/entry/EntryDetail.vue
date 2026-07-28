@@ -101,6 +101,7 @@ const autosave = useAutosave<{
     const requestOperationGeneration = operationGeneration;
     const patch: EntryPatch = {
       title: titleDirty ? title.value : null,
+      document: null,
       currentContent: currentContent.value,
       entryType: entryType.value,
       status: status.value,

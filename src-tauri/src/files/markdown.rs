@@ -159,6 +159,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("hello <>:\"/\\|?* world".to_string()),
                 current_content: Some("changed".to_string()),
                 entry_type: None,
@@ -199,6 +200,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("旧标题".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -214,6 +216,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("新标题".to_string()),
                 current_content: None,
                 entry_type: None,

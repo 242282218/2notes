@@ -791,6 +791,21 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function emptyDocument() {
+  return {
+    schemaVersion: 1,
+    blocks: [
+      {
+        id: "550e8400-e29b-41d4-a716-446655440000",
+        kind: "paragraph" as const,
+        attrs: { level: null, language: null, start: null },
+        content: [],
+        children: [],
+      },
+    ],
+  };
+}
+
 function entry(): EntryDetailType {
   return {
     id: "entry-1",
@@ -798,6 +813,7 @@ function entry(): EntryDetailType {
     titleSource: "auto",
     originalContent: "original",
     currentContent: "content",
+    document: emptyDocument(),
     entryType: "unclear",
     status: "pending",
     knowledgeState: "capture",

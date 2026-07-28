@@ -541,6 +541,7 @@ mod tests {
             &tx,
             &target.id,
             EntryPatch {
+                document: None,
                 title: Some("新标题".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -895,6 +896,7 @@ mod tests {
             &tx,
             &knowledge.id,
             EntryPatch {
+                document: None,
                 title: Some("Gate0 Knowledge".to_string()),
                 current_content: Some(
                     "Gate0 Knowledge body.\n\nRenamed after promote so alias is retained.".into(),

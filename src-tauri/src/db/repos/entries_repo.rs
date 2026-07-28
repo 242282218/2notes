@@ -4,16 +4,22 @@ use rusqlite::{params, types::Value, Connection, OptionalExtension, Transaction}
 use uuid::Uuid;
 
 use crate::{
-    db::repos::{
-        knowledge_repo::KnowledgeRepo,
-        tags_repo::{normalize_name, TagsRepo},
+    content::document::{document_to_plain_text, legacy_text_document},
+    db::{
+        migrations::now_string,
+        repos::{
+            documents_repo::DocumentsRepo,
+            knowledge_repo::KnowledgeRepo,
+            tags_repo::{normalize_name, TagsRepo},
+        },
     },
     error::{AppError, AppResult},
     knowledge::wiki_links::canonicalize_knowledge_title,
     types::{
+        documents::BlockDocument,
         entries::{
-            EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
-            EntryType, PageRequest, TitleSource,
+            CreateEntrySpec, DocumentRepairReport, EntryDetail, EntryListFilter, EntryListItem,
+            EntryPage, EntryPatch, EntryStatus, EntryType, PageRequest, TitleSource,
         },
         knowledge::{KnowledgeState, SearchSnippet, SearchSnippetPart},
         tags::Tag,
@@ -52,20 +58,62 @@ impl EntriesRepo {
             ));
         }
 
+        let document = legacy_text_document(content);
+        let spec = CreateEntrySpec {
+            title: auto_title(content),
+            title_source: TitleSource::Auto,
+            original_content: content.to_string(),
+            document,
+            entry_type: EntryType::Unclear,
+            status: EntryStatus::Pending,
+            tags: Vec::new(),
+        };
+        let detail = Self::create_with_document(tx, spec, now)?;
+        // Keep original_content in sync with the trimmed input for the quick-capture path.
+        if detail.original_content != content {
+            tx.execute(
+                "UPDATE entries SET original_content = ?1 WHERE id = ?2",
+                params![content, detail.id],
+            )?;
+        }
+        Self::get_with_tx(tx, &detail.id)
+    }
+
+    pub fn create_with_document(
+        tx: &Transaction<'_>,
+        spec: CreateEntrySpec,
+        now: &str,
+    ) -> AppResult<EntryDetail> {
+        validate_create_spec(&spec)?;
         let id = Uuid::new_v4().to_string();
-        let title = auto_title(content);
+        let derived_content = document_to_plain_text(&spec.document);
         tx.execute(
             "
             INSERT INTO entries(
               id, title, title_source, original_content, current_content, type, status,
               revision, created_at, updated_at, deleted_at
             )
-            VALUES (?1, ?2, 'auto', ?3, ?4, 'unclear', 'pending', 0, ?5, ?5, NULL)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?8, NULL)
             ",
-            params![id, title, content, content, now],
+            params![
+                id,
+                spec.title,
+                spec.title_source.as_str(),
+                spec.original_content,
+                derived_content,
+                spec.entry_type.as_str(),
+                spec.status.as_str(),
+                now,
+            ],
         )?;
 
-        KnowledgeRepo::refresh_source_links(tx, &id, content)?;
+        DocumentsRepo::create(tx, &id, &spec.document, Some(&spec.original_content), now)?;
+
+        if let Some(tags) = (!spec.tags.is_empty()).then_some(spec.tags) {
+            TagsRepo::replace_entry_tags(tx, &id, &tags, now)?;
+        }
+
+        KnowledgeRepo::refresh_source_links(tx, &id, &derived_content)?;
 
         Self::get_with_tx(tx, &id)
     }
@@ -122,14 +170,42 @@ impl EntriesRepo {
 
         let EntryPatch {
             title,
+            document,
             current_content,
             entry_type,
             status,
             tags,
         } = patch;
-        let content_changed = current_content.is_some();
-        let new_content = current_content.unwrap_or_else(|| current.current_content.clone());
-        if new_content.trim().is_empty() {
+
+        // Resolve the next document: explicit document wins, otherwise fall back to
+        // the legacy text compat input, otherwise keep the current document.
+        let (next_document, next_content, content_changed) = match document {
+            Some(next_doc) => {
+                let content = document_to_plain_text(&next_doc);
+                let changed = content != current.current_content;
+                (next_doc, content, changed)
+            }
+            None => match current_content {
+                Some(text) if !text.trim().is_empty() => {
+                    let doc = legacy_text_document(&text);
+                    let content = document_to_plain_text(&doc);
+                    let changed = content != current.current_content;
+                    (doc, content, changed)
+                }
+                Some(_) => {
+                    return Err(AppError::validation(
+                        "VALIDATION_EMPTY_CONTENT",
+                        "内容不能为空",
+                    ));
+                }
+                None => {
+                    let doc = DocumentsRepo::get_with_tx(tx, id)?;
+                    (doc, current.current_content.clone(), false)
+                }
+            },
+        };
+
+        if next_content.trim().is_empty() {
             return Err(AppError::validation(
                 "VALIDATION_EMPTY_CONTENT",
                 "内容不能为空",
@@ -143,13 +219,13 @@ impl EntriesRepo {
                 if is_knowledge {
                     (Some(validated_knowledge_title(&raw)?), TitleSource::User)
                 } else if raw.trim().is_empty() {
-                    (auto_title(&new_content), TitleSource::Auto)
+                    (auto_title(&next_content), TitleSource::Auto)
                 } else {
                     (Some(raw.trim().to_string()), TitleSource::User)
                 }
             }
             None if current.title_source == TitleSource::Auto && content_changed => {
-                (auto_title(&new_content), TitleSource::Auto)
+                (auto_title(&next_content), TitleSource::Auto)
             }
             None => (current.title.clone(), current.title_source.clone()),
         };
@@ -172,7 +248,7 @@ impl EntriesRepo {
             params![
                 title,
                 title_source.as_str(),
-                new_content,
+                next_content,
                 entry_type.as_str(),
                 status.as_str(),
                 next_revision,
@@ -180,6 +256,8 @@ impl EntriesRepo {
                 id
             ],
         )?;
+
+        DocumentsRepo::replace(tx, id, next_revision, &next_document, now)?;
 
         if is_knowledge {
             KnowledgeRepo::sync_title_metadata(
@@ -195,8 +273,8 @@ impl EntriesRepo {
             TagsRepo::replace_entry_tags(tx, id, &tags, now)?;
         }
 
-        if new_content != current.current_content {
-            KnowledgeRepo::refresh_source_links(tx, id, &new_content)?;
+        if content_changed {
+            KnowledgeRepo::refresh_source_links(tx, id, &next_content)?;
         }
 
         Self::get_with_tx(tx, id)
@@ -238,6 +316,62 @@ impl EntriesRepo {
         )?;
         log::info!("entry_restored id={id}");
         Self::get_with_tx(tx, id)
+    }
+
+    /// Repair documents whose projection is out of sync with their entry revision.
+    /// If the source content changed (checksum mismatch) rebuild the document/projection;
+    /// otherwise just sync the stored entry_revision. Must run before documents are read.
+    pub fn repair_documents(conn: &mut Connection) -> AppResult<DocumentRepairReport> {
+        let tx = conn.transaction()?;
+        let mut select = tx.prepare(
+            "
+            SELECT ed.entry_id, ed.entry_revision, ed.source_content_checksum,
+                   ed.legacy_content, e.revision, e.current_content
+            FROM entry_documents ed
+            JOIN entries e ON e.id = ed.entry_id
+            WHERE ed.entry_revision <> e.revision
+              AND e.deleted_at IS NULL
+            ",
+        )?;
+        let rows: Vec<(String, i64, String, Option<String>, i64, String)> = {
+            let rows = select.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?;
+            let result = rows.collect::<Result<Vec<_>, _>>()?;
+            drop(select);
+            result
+        };
+        let mut report = DocumentRepairReport::default();
+        for row in rows {
+            let (id, _stored_revision, stored_checksum, legacy, entry_revision, content) = row;
+            if crate::db::migrations::checksum(&content) != stored_checksum {
+                let document = match legacy.as_deref() {
+                    Some(legacy_content)
+                        if crate::db::migrations::checksum(legacy_content) == stored_checksum =>
+                    {
+                        legacy_text_document(legacy_content)
+                    }
+                    _ => legacy_text_document(&content),
+                };
+                DocumentsRepo::replace(&tx, &id, entry_revision, &document, &now_string())?;
+                report.rebuilt += 1;
+            } else {
+                tx.execute(
+                    "UPDATE entry_documents SET entry_revision = ?1 WHERE entry_id = ?2",
+                    params![entry_revision, id],
+                )?;
+                report.synced += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(report)
     }
 
     pub fn delete_forever(tx: &Transaction<'_>, id: &str) -> AppResult<()> {
@@ -319,6 +453,21 @@ impl EntriesRepo {
         .optional()
         .map_err(Into::into)
     }
+}
+
+fn validate_create_spec(spec: &CreateEntrySpec) -> AppResult<()> {
+    if spec.title_source == TitleSource::User
+        && spec.title.as_deref().unwrap_or_default().trim().is_empty()
+    {
+        return Err(AppError::validation(
+            "ENTRY_TITLE_REQUIRED",
+            "手动标题模式下标题不能为空",
+        ));
+    }
+    if spec.document.blocks.is_empty() {
+        return Err(AppError::validation("DOCUMENT_EMPTY", "文档至少需要一个块"));
+    }
+    Ok(())
 }
 
 fn validated_knowledge_title(input: &str) -> AppResult<String> {
@@ -670,7 +819,8 @@ fn parse_search_snippet(snippet: &str) -> SearchSnippet {
 fn record_to_detail(conn: &Connection, record: EntryRecord) -> AppResult<EntryDetail> {
     let tags = TagsRepo::tags_for_entry(conn, &record.id)?;
     let aliases = KnowledgeRepo::aliases_for_entry(conn, &record.id)?;
-    Ok(detail(record, tags, aliases))
+    let document = DocumentsRepo::get(conn, &record.id)?;
+    Ok(detail(record, tags, aliases, document))
 }
 
 fn records_to_list_items(
@@ -702,7 +852,9 @@ fn records_to_details(conn: &Connection, records: Vec<EntryRecord>) -> AppResult
                 .get(&record.id)
                 .cloned()
                 .unwrap_or_default();
-            detail(record, tags, aliases)
+            let document = DocumentsRepo::get(conn, &record.id)
+                .unwrap_or_else(|_| legacy_text_document(&record.current_content));
+            detail(record, tags, aliases, document)
         })
         .collect())
 }
@@ -759,7 +911,8 @@ fn tags_for_entries(
 fn record_to_detail_tx(tx: &Transaction<'_>, record: EntryRecord) -> AppResult<EntryDetail> {
     let tags = tags_for_entry_tx(tx, &record.id)?;
     let aliases = KnowledgeRepo::aliases_for_entry(tx, &record.id)?;
-    Ok(detail(record, tags, aliases))
+    let document = DocumentsRepo::get_with_tx(tx, &record.id)?;
+    Ok(detail(record, tags, aliases, document))
 }
 
 fn tags_for_entry_tx(tx: &Transaction<'_>, entry_id: &str) -> AppResult<Vec<Tag>> {
@@ -822,7 +975,12 @@ fn list_item(record: EntryRecord, tags: Vec<Tag>) -> EntryListItem {
     }
 }
 
-fn detail(record: EntryRecord, tags: Vec<Tag>, knowledge_aliases: Vec<String>) -> EntryDetail {
+fn detail(
+    record: EntryRecord,
+    tags: Vec<Tag>,
+    knowledge_aliases: Vec<String>,
+    document: BlockDocument,
+) -> EntryDetail {
     debug_assert_eq!(
         record.knowledge_title_key.is_some(),
         record.knowledge_state == KnowledgeState::Knowledge
@@ -833,6 +991,7 @@ fn detail(record: EntryRecord, tags: Vec<Tag>, knowledge_aliases: Vec<String>) -
         title_source: record.title_source,
         original_content: record.original_content,
         current_content: record.current_content,
+        document,
         entry_type: record.entry_type,
         status: record.status,
         knowledge_state: record.knowledge_state,
@@ -856,6 +1015,7 @@ mod tests {
         migrations::now_string,
         repos::KnowledgeRepo,
     };
+    use crate::types::documents::{BlockDocument, BlockNode};
 
     fn default_filter() -> EntryListFilter {
         EntryListFilter {
@@ -953,6 +1113,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("新名".into()),
                 current_content: None,
                 entry_type: None,
@@ -980,6 +1141,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("  ".into()),
                 current_content: Some("不应保存".into()),
                 entry_type: None,
@@ -1010,6 +1172,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("PHASE TWO".into()),
                 current_content: None,
                 entry_type: None,
@@ -1062,6 +1225,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: Some("second".to_string()),
                 entry_type: None,
@@ -1088,6 +1252,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: Some("标题".to_string()),
                 current_content: Some("当前内容".to_string()),
                 entry_type: None,
@@ -1214,6 +1379,7 @@ mod tests {
             &tx,
             &target.id,
             EntryPatch {
+                document: None,
                 title: Some("searchable target".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -1361,6 +1527,7 @@ mod tests {
             &tx,
             &first.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: None,
                 entry_type: None,
@@ -1375,6 +1542,7 @@ mod tests {
             &tx,
             &second.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: None,
                 entry_type: None,
@@ -1452,6 +1620,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: Some("changed".to_string()),
                 entry_type: None,
@@ -1477,6 +1646,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: Some("changed".to_string()),
                 entry_type: None,
@@ -1636,6 +1806,7 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
+                document: None,
                 title: None,
                 current_content: Some(format!("{links}\n预热")),
                 entry_type: None,
@@ -1657,6 +1828,7 @@ mod tests {
                 &tx,
                 &entry.id,
                 EntryPatch {
+                    document: None,
                     title: None,
                     current_content: Some(content),
                     entry_type: None,
@@ -1699,5 +1871,121 @@ mod tests {
 
         assert!(where_sql.contains("entries_fts MATCH"));
         assert!(!where_sql.contains(" LIKE "));
+    }
+
+    #[test]
+    fn create_with_document_generates_projection_and_derived_content() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let document = BlockDocument::from_blocks(vec![
+            BlockNode::paragraph("550e8400-e29b-41d4-a716-446655440000", "hello"),
+            BlockNode::paragraph("6ba7b810-9dad-41d4-80b4-00c04fd430c8", "world"),
+        ]);
+        let spec = CreateEntrySpec {
+            title: Some("用户标题".to_string()),
+            title_source: TitleSource::User,
+            original_content: "hello\nworld".to_string(),
+            document,
+            entry_type: EntryType::Idea,
+            status: EntryStatus::Pending,
+            tags: vec!["tag-a".to_string()],
+        };
+        let entry = EntriesRepo::create_with_document(&tx, spec, &now).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(entry.title.as_deref(), Some("用户标题"));
+        assert_eq!(entry.document.blocks.len(), 2);
+        assert_eq!(entry.original_content, "hello\nworld");
+
+        let block_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(block_count, 2);
+
+        let loaded = EntriesRepo::get(&conn, &entry.id).unwrap();
+        assert_eq!(loaded.document.blocks.len(), 2);
+    }
+
+    #[test]
+    fn update_with_document_replaces_projection_and_keeps_revision() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "first body", &now).unwrap();
+        tx.commit().unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let next_document = BlockDocument::from_blocks(vec![
+            BlockNode::paragraph("550e8400-e29b-41d4-a716-446655440000", "updated"),
+            BlockNode::paragraph("6ba7b810-9dad-41d4-80b4-00c04fd430c8", "blocks"),
+        ]);
+        let updated = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                title: None,
+                document: Some(next_document),
+                current_content: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(updated.revision, 1);
+        assert_eq!(updated.document.blocks.len(), 2);
+
+        let block_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(block_count, 2);
+    }
+
+    #[test]
+    fn repair_rebuilds_document_when_content_changed_and_syncs_otherwise() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "hello", &now).unwrap();
+        tx.commit().unwrap();
+
+        // Simulate content change after document projection: bump entry revision and
+        // change current_content directly so checksum mismatches the stored snapshot.
+        conn.execute(
+            "UPDATE entries SET current_content = ?1, revision = revision + 1 WHERE id = ?2",
+            params!["repaired body", &entry.id],
+        )
+        .unwrap();
+
+        let report = EntriesRepo::repair_documents(&mut conn).unwrap();
+        assert_eq!(report.rebuilt, 1);
+        assert_eq!(report.synced, 0);
+
+        let stored: String = conn
+            .query_row(
+                "SELECT current_content FROM entries WHERE id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "repaired body");
+
+        // A second run with matching revisions should sync nothing and rebuild nothing.
+        let report = EntriesRepo::repair_documents(&mut conn).unwrap();
+        assert_eq!(report.rebuilt, 0);
+        assert_eq!(report.synced, 0);
     }
 }

@@ -683,6 +683,7 @@ mod tests {
             &tx,
             &alias.id,
             EntryPatch {
+                document: None,
                 title: Some("Atlas Second".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -697,6 +698,7 @@ mod tests {
             &tx,
             &alias.id,
             EntryPatch {
+                document: None,
                 title: Some("Canonical Page".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -850,6 +852,7 @@ mod tests {
             &tx,
             &source.id,
             EntryPatch {
+                document: None,
                 title: Some("来源".to_string()),
                 current_content: None,
                 entry_type: None,
@@ -979,6 +982,7 @@ mod tests {
                     &tx,
                     &entry.id,
                     EntryPatch {
+                        document: None,
                         title: Some(format!("知识标题{index}")),
                         current_content: None,
                         entry_type: None,

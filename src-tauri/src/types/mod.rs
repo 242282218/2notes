@@ -16,8 +16,8 @@ mod tests {
             InlineNode, OutlineItem,
         },
         entries::{
-            EntryDetail, EntryListFilter, EntryListItem, EntryPage, EntryPatch, EntryStatus,
-            EntryType, PageRequest, TitleSource,
+            CreateEntrySpec, DocumentRepairReport, EntryDetail, EntryListFilter, EntryListItem,
+            EntryPage, EntryPatch, EntryStatus, EntryType, PageRequest, TitleSource,
         },
         knowledge::{
             KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
@@ -49,6 +49,8 @@ mod tests {
             EntryPage::decl(&config),
             EntryDetail::decl(&config),
             EntryPatch::decl(&config),
+            CreateEntrySpec::decl(&config),
+            DocumentRepairReport::decl(&config),
             Draft::decl(&config),
             ThemeMode::decl(&config),
             AppSettings::decl(&config),
