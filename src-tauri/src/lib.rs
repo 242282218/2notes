@@ -46,6 +46,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::entries::entries_create,
             commands::entries::entries_list,
             commands::entries::entries_get,
             commands::entries::entries_update,

@@ -5,6 +5,7 @@ $commandsDir = Join-Path $repoRoot "src-tauri\src\commands"
 
 # Explicit classification matrix. Unknown #[tauri::command] functions fail the check.
 $mainOnly = [ordered]@{
+  "entries_create"             = "entries.rs"
   "entries_list"               = "entries.rs"
   "entries_get"                = "entries.rs"
   "entries_update"             = "entries.rs"

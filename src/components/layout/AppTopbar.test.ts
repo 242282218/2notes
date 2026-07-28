@@ -25,6 +25,7 @@ function mountTopbar(
     status: EntryStatus | "";
     showDetailActions: boolean;
     tagPanelOpen: boolean;
+    creatingEntry: boolean;
   }> = {},
 ) {
   return mount(AppTopbar, {
@@ -38,6 +39,7 @@ function mountTopbar(
       showDetailActions: true,
       toolbarState,
       tagPanelOpen: false,
+      creatingEntry: false,
       ...props,
     },
   });
@@ -67,12 +69,22 @@ describe("AppTopbar", () => {
     expect(wrapper.emitted("update:tagPanelOpen")?.[0]).toEqual([true]);
   });
 
-  it("emits quickCapture when record button is clicked", async () => {
+  it("emits create and quickCapture from separate controls", async () => {
     const wrapper = mountTopbar();
-    const buttons = wrapper.findAll('[data-testid="topbar-end"] button');
-    const capture = buttons[buttons.length - 1];
-    await capture.trigger("click");
+
+    await wrapper.get('button[aria-label="快速记录"]').trigger("click");
+    await wrapper.get("button.btn-primary").trigger("click");
+
     expect(wrapper.emitted("quickCapture")).toHaveLength(1);
+    expect(wrapper.emitted("create")).toHaveLength(1);
+  });
+
+  it("disables entry creation while a create request is active", () => {
+    const wrapper = mountTopbar({ creatingEntry: true });
+
+    expect(
+      wrapper.get("button.btn-primary").attributes("disabled"),
+    ).toBeDefined();
   });
 
   it("forwards detail action emits from DetailActionBar", async () => {
@@ -108,6 +120,7 @@ describe("AppTopbar", () => {
         showDetailActions: false,
         toolbarState,
         tagPanelOpen: false,
+        creatingEntry: false,
       },
     });
 

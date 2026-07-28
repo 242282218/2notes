@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  entriesCreate,
   entriesDeleteForever,
   entriesGet,
   entriesList,
@@ -13,6 +14,7 @@ import type { EntryDetail, Tag } from "../types/generated";
 import { useEntriesStore } from "./entries";
 
 vi.mock("../services/entryApi", () => ({
+  entriesCreate: vi.fn(),
   entriesDeleteForever: vi.fn(),
   entriesGet: vi.fn(),
   entriesList: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock("../services/tagApi", () => ({
 describe("entries store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    vi.mocked(entriesCreate).mockReset();
     vi.mocked(entriesGet).mockReset();
     vi.mocked(entriesList).mockReset();
     vi.mocked(entriesMoveToTrash).mockReset();
@@ -162,6 +165,60 @@ describe("entries store", () => {
     await selecting;
 
     expect(store.detailLoading).toBe(false);
+  });
+
+  it("creates and selects an entry without changing the current view", async () => {
+    const store = selectedStore();
+    const created = entry("created");
+    vi.mocked(entriesCreate).mockResolvedValue(created);
+
+    await expect(store.createAndSelect()).resolves.toEqual(created);
+
+    expect(store.selectedId).toBe(created.id);
+    expect(store.detail).toEqual(created);
+    expect(store.items[0]?.id).toBe(created.id);
+    expect(store.view).toBe("inbox");
+  });
+
+  it("does not overwrite a later selection when creation completes", async () => {
+    const store = selectedStore();
+    const pendingCreate = deferred<EntryDetail>();
+    vi.mocked(entriesCreate).mockReturnValue(pendingCreate.promise);
+    vi.mocked(entriesGet).mockResolvedValue(entry("entry-b"));
+
+    const creating = store.createAndSelect();
+    await store.select("entry-b");
+    pendingCreate.resolve(entry("created"));
+
+    await expect(creating).resolves.toBeNull();
+    expect(store.selectedId).toBe("entry-b");
+    expect(store.detail?.id).toBe("entry-b");
+    expect(store.items.some((item) => item.id === "created")).toBe(true);
+  });
+
+  it("does not change the selection when entry creation fails", async () => {
+    const store = selectedStore();
+    vi.mocked(entriesCreate).mockRejectedValue(new Error("create failed"));
+
+    await expect(store.createAndSelect()).rejects.toThrow("create failed");
+
+    expect(store.selectedId).toBe("entry-a");
+    expect(store.detail?.id).toBe("entry-a");
+    expect(store.error).toBe("create failed");
+  });
+
+  it("does not add a new capture to a filtered list", async () => {
+    const store = selectedStore();
+    store.view = "knowledge";
+    store.items = [];
+    const created = entry("created");
+    vi.mocked(entriesCreate).mockResolvedValue(created);
+
+    await store.createAndSelect();
+
+    expect(store.selectedId).toBe(created.id);
+    expect(store.detail).toEqual(created);
+    expect(store.items).toEqual([]);
   });
 
   it("does not replace the current detail with a stale saved entry", () => {

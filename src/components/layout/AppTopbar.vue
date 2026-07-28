@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Filter, Search, SquarePen, Tags } from "lucide-vue-next";
+import { FilePlus2, Filter, Search, SquarePen, Tags } from "lucide-vue-next";
 import { nextTick, onMounted, onUnmounted, ref } from "vue";
 
 import type { AppView } from "../../app/routes";
@@ -18,6 +18,7 @@ const props = defineProps<{
   showDetailActions: boolean;
   toolbarState: EntryDetailToolbarState;
   tagPanelOpen: boolean;
+  creatingEntry: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -25,6 +26,7 @@ const emit = defineEmits<{
   "update:tagPanelOpen": [open: boolean];
   typeChange: [value: EntryType | ""];
   statusChange: [value: EntryStatus | ""];
+  create: [];
   quickCapture: [];
   retry: [];
   promote: [];
@@ -230,11 +232,22 @@ defineExpose({
 
       <button
         type="button"
-        class="btn-primary min-w-0 px-3 text-ui"
+        class="btn-secondary min-w-0 px-2.5 text-ui"
+        aria-label="快速记录"
+        title="快速记录"
         @click="emit('quickCapture')"
       >
         <SquarePen :size="15" aria-hidden="true" />
-        <span class="hidden min-[1100px]:inline">记录</span>
+      </button>
+
+      <button
+        type="button"
+        class="btn-primary min-w-0 px-3 text-ui"
+        :disabled="creatingEntry"
+        @click="emit('create')"
+      >
+        <FilePlus2 :size="15" aria-hidden="true" />
+        <span class="hidden min-[1100px]:inline">新建条目</span>
       </button>
     </div>
   </header>

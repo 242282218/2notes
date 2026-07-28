@@ -44,6 +44,7 @@ const wrappers: VueWrapper[] = [];
 
 const detailCommands = {
   flushPendingSave: vi.fn().mockResolvedValue(true),
+  focusTitle: vi.fn(),
   requestMoveToTrash: vi.fn(),
 };
 
@@ -71,6 +72,7 @@ const entries = reactive({
   refreshTags: vi.fn(),
   select: vi.fn(),
   openEntry: vi.fn(),
+  createAndSelect: vi.fn(),
   noteExternalChange: vi.fn(),
   applySavedEntry: vi.fn(),
   applyEntryListUpdate: vi.fn(),
@@ -138,9 +140,18 @@ function mountShell(attachTo?: HTMLElement) {
   return wrapper;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("AppShell selection commit boundary", () => {
   beforeEach(() => {
     detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.focusTitle.mockReset();
     detailCommands.requestMoveToTrash.mockReset();
     entries.view = "inbox";
     entries.selectedId = "entry-1";
@@ -150,6 +161,7 @@ describe("AppShell selection commit boundary", () => {
     entries.refreshTags.mockReset();
     entries.select.mockReset();
     entries.openEntry.mockReset();
+    entries.createAndSelect.mockReset();
     entries.noteExternalChange.mockReset();
     entries.moveSelectedToTrash.mockReset();
     entries.setView.mockReset();
@@ -220,11 +232,81 @@ describe("AppShell selection commit boundary", () => {
     expect(detailCommands.flushPendingSave).toHaveBeenCalled();
     expect(entries.select).toHaveBeenCalledWith("entry-2");
   });
+
+  it("flushes before creating an entry and focuses its title after success", async () => {
+    entries.createAndSelect.mockResolvedValue({ id: "created" });
+    const wrapper = mountShell();
+    await flushPromises();
+
+    await wrapper.get("button.btn-primary").trigger("click");
+    await flushPromises();
+
+    expect(detailCommands.flushPendingSave).toHaveBeenCalled();
+    expect(entries.createAndSelect).toHaveBeenCalledOnce();
+    expect(detailCommands.focusTitle).toHaveBeenCalledOnce();
+  });
+
+  it("creates only one entry while a creation request is pending", async () => {
+    const pendingCreate = deferred<{ id: string }>();
+    entries.createAndSelect.mockReturnValue(pendingCreate.promise);
+    const wrapper = mountShell();
+    await flushPromises();
+
+    const topbar = wrapper.findComponent({ name: "AppTopbar" });
+    await topbar.vm.$emit("create");
+    await topbar.vm.$emit("create");
+    await flushPromises();
+
+    expect(entries.createAndSelect).toHaveBeenCalledOnce();
+    expect(
+      wrapper.get("button.btn-primary").attributes("disabled"),
+    ).toBeDefined();
+
+    pendingCreate.resolve({ id: "created" });
+    await flushPromises();
+    expect(detailCommands.focusTitle).toHaveBeenCalledOnce();
+  });
+
+  it("does not focus when a pending creation no longer owns the selection", async () => {
+    entries.createAndSelect.mockResolvedValue(null);
+    const wrapper = mountShell();
+    await flushPromises();
+
+    await wrapper.get("button.btn-primary").trigger("click");
+    await flushPromises();
+
+    expect(detailCommands.focusTitle).not.toHaveBeenCalled();
+  });
+
+  it("does not create or focus when flush fails", async () => {
+    detailCommands.flushPendingSave.mockResolvedValue(false);
+    const wrapper = mountShell();
+    await flushPromises();
+
+    await wrapper.get("button.btn-primary").trigger("click");
+    await flushPromises();
+
+    expect(entries.createAndSelect).not.toHaveBeenCalled();
+    expect(detailCommands.focusTitle).not.toHaveBeenCalled();
+  });
+
+  it("does not focus the title when entry creation fails", async () => {
+    entries.createAndSelect.mockRejectedValue(new Error("create failed"));
+    const wrapper = mountShell();
+    await flushPromises();
+
+    await wrapper.get("button.btn-primary").trigger("click");
+    await flushPromises();
+
+    expect(entries.createAndSelect).toHaveBeenCalledOnce();
+    expect(detailCommands.focusTitle).not.toHaveBeenCalled();
+  });
 });
 
 describe("AppShell delete flush boundary", () => {
   beforeEach(() => {
     detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.focusTitle.mockReset();
     detailCommands.requestMoveToTrash.mockReset();
     entries.view = "inbox";
     entries.selectedId = "entry-1";
@@ -288,6 +370,7 @@ describe("AppShell delete flush boundary", () => {
 describe("AppShell search input race", () => {
   beforeEach(() => {
     detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.focusTitle.mockReset();
     detailCommands.requestMoveToTrash.mockReset();
     entries.view = "inbox";
     entries.selectedId = "entry-1";
@@ -336,6 +419,7 @@ describe("AppShell search input race", () => {
 describe("AppShell accessibility semantics", () => {
   beforeEach(() => {
     detailCommands.flushPendingSave.mockReset().mockResolvedValue(true);
+    detailCommands.focusTitle.mockReset();
     detailCommands.requestMoveToTrash.mockReset();
     entries.view = "inbox";
     entries.selectedId = "entry-1";

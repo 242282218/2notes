@@ -3,6 +3,7 @@ import { computed, reactive, ref } from "vue";
 
 import type { AppView } from "../app/routes";
 import {
+  entriesCreate,
   entriesDeleteForever,
   entriesGet,
   entriesList,
@@ -223,6 +224,31 @@ export const useEntriesStore = defineStore("entries", () => {
       if (requestId === openRequestId) {
         detailLoading.value = false;
       }
+    }
+  }
+
+  async function createAndSelect(): Promise<EntryDetail | null> {
+    const requestGeneration = selectionGeneration.value;
+    error.value = null;
+    try {
+      const entry = await entriesCreate();
+      if (matchesCurrentFilter(entry) && !upsertListItem(entry)) {
+        items.value = [toListItem(entry), ...items.value];
+      }
+      if (selectionGeneration.value !== requestGeneration) return null;
+
+      beginSelection();
+      openRequestId += 1;
+      selectRequestId += 1;
+      selectedId.value = entry.id;
+      detail.value = entry;
+      detailLoading.value = false;
+      return entry;
+    } catch (createError) {
+      if (selectionGeneration.value === requestGeneration) {
+        error.value = getErrorMessage(createError, "新建条目失败");
+      }
+      throw createError;
     }
   }
 
@@ -471,6 +497,7 @@ export const useEntriesStore = defineStore("entries", () => {
     refreshTags,
     select,
     openEntry,
+    createAndSelect,
     noteExternalChange,
     updateSelected,
     applySavedEntry,

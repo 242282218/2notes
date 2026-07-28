@@ -7,6 +7,10 @@ import type {
   PageRequest,
 } from "../types/generated";
 
+export function entriesCreate(): Promise<EntryDetail> {
+  return invokeCommand("entries_create");
+}
+
 export function entriesList(
   filter: EntryListFilter,
   page: PageRequest,

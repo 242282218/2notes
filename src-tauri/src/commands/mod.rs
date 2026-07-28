@@ -42,7 +42,8 @@ mod tests {
 
     fn classify_command(name: &str) -> Option<CommandClass> {
         match name {
-            "entries_list"
+            "entries_create"
+            | "entries_list"
             | "entries_get"
             | "entries_update"
             | "entries_move_to_trash"
@@ -110,6 +111,7 @@ mod tests {
     #[test]
     fn main_only_commands_reject_quick_capture() {
         let main_only = [
+            "entries_create",
             "entries_list",
             "entries_get",
             "entries_update",
@@ -198,6 +200,7 @@ mod tests {
     #[test]
     fn every_known_command_is_classified() {
         let known = [
+            "entries_create",
             "entries_list",
             "entries_get",
             "entries_update",

@@ -21,6 +21,7 @@ const entries = useEntriesStore();
 const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
 const topbarRef = ref<InstanceType<typeof AppTopbar> | null>(null);
 const tagPanelOpen = ref(false);
+const creatingEntry = ref(false);
 const tagPanelRef = ref<InstanceType<typeof TagFilterPanel> | null>(null);
 const toolbarState = ref<EntryDetailToolbarState>({
   saveState: "idle",
@@ -154,6 +155,21 @@ async function setTypeFilter(value: EntryType | "") {
 async function setStatusFilter(value: EntryStatus | "") {
   if (await flushDetail()) await entries.setStatusFilter(value);
 }
+async function createEntry() {
+  if (creatingEntry.value) return;
+  creatingEntry.value = true;
+  try {
+    if (!(await flushDetail())) return;
+    const entry = await entries.createAndSelect();
+    if (!entry) return;
+    await nextTick();
+    detailRef.value?.focusTitle();
+  } catch {
+    // The store retains the current selection and exposes the operation error.
+  } finally {
+    creatingEntry.value = false;
+  }
+}
 function setQuery(value: string) {
   searchQuery.value = value;
   entries.setQuery(value);
@@ -188,10 +204,12 @@ function setQuery(value: string) {
         :status="entries.filters.status"
         :show-detail-actions="showDetailActions"
         :toolbar-state="toolbarState"
+        :creating-entry="creatingEntry"
         @update:model-value="setQuery"
         @update:tag-panel-open="tagPanelOpen = $event"
         @type-change="setTypeFilter"
         @status-change="setStatusFilter"
+        @create="createEntry"
         @quick-capture="windowOpenQuickCapture"
         @retry="detailRef?.retrySave()"
         @promote="detailRef?.promoteToKnowledge()"

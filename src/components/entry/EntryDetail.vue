@@ -59,6 +59,7 @@ const emit = defineEmits<{
 }>();
 
 const title = ref("");
+const titleInputRef = ref<HTMLInputElement | null>(null);
 const document = ref<BlockDocument>({ schemaVersion: 1, blocks: [] });
 const entryType = ref<EntryType>("unclear");
 const status = ref<EntryStatus>("pending");
@@ -449,6 +450,10 @@ function clearWikiLinkTimer() {
   }
 }
 
+function focusTitle() {
+  titleInputRef.value?.focus();
+}
+
 defineExpose({
   flushPendingSave,
   promoteToKnowledge,
@@ -457,6 +462,7 @@ defineExpose({
   restore,
   requestDeleteForever,
   retrySave,
+  focusTitle,
 });
 </script>
 
@@ -483,6 +489,7 @@ defineExpose({
           class="elevation-panel grid overflow-visible rounded-lg bg-bg-elevated"
         >
           <input
+            ref="titleInputRef"
             v-model="title"
             class="mx-5 mt-4 h-[52px] w-[calc(100%_-_40px)] border-none bg-transparent text-display text-text-primary outline-none placeholder:text-text-placeholder ring-focus disabled:opacity-55"
             type="text"

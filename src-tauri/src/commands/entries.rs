@@ -6,8 +6,42 @@ use crate::{
     db::migrations::now_string,
     db::repos::EntriesRepo,
     error::{AppErrorResponse, CommandResult},
-    types::entries::{EntryDetail, EntryListFilter, EntryPage, EntryPatch, PageRequest},
+    types::{
+        documents::{BlockDocument, BlockNode},
+        entries::{
+            CreateEntrySpec, EntryDetail, EntryListFilter, EntryPage, EntryPatch, EntryStatus,
+            EntryType, PageRequest, TitleSource,
+        },
+    },
 };
+
+fn new_entry_spec() -> CreateEntrySpec {
+    CreateEntrySpec {
+        title: None,
+        title_source: TitleSource::Auto,
+        original_content: String::new(),
+        document: BlockDocument::from_blocks(vec![BlockNode::empty_paragraph(
+            uuid::Uuid::new_v4().to_string(),
+        )]),
+        entry_type: EntryType::Unclear,
+        status: EntryStatus::Pending,
+        tags: Vec::new(),
+    }
+}
+
+#[tauri::command]
+pub fn entries_create(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> CommandResult<EntryDetail> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    let entry = state
+        .with_write_tx(|tx| EntriesRepo::create_with_document(tx, new_entry_spec(), &now))
+        .map_err(AppErrorResponse::from)?;
+    log::info!("entry_created id={}", entry.id);
+    Ok(entry)
+}
 
 #[tauri::command]
 pub fn entries_list(
@@ -87,4 +121,22 @@ pub fn entries_delete_forever(
     state
         .with_write_tx(|tx| EntriesRepo::delete_forever(tx, &id))
         .map_err(AppErrorResponse::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_entry_spec;
+    use crate::types::{documents::BlockKind, entries::TitleSource};
+
+    #[test]
+    fn new_entry_spec_creates_one_empty_paragraph() {
+        let spec = new_entry_spec();
+
+        assert_eq!(spec.title_source, TitleSource::Auto);
+        assert!(spec.title.is_none());
+        assert!(spec.original_content.is_empty());
+        assert_eq!(spec.document.blocks.len(), 1);
+        assert_eq!(spec.document.blocks[0].kind, BlockKind::Paragraph);
+        assert!(spec.document.blocks[0].content.is_empty());
+    }
 }
