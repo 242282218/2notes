@@ -17,7 +17,8 @@
     "test:unit:watch": "vitest",
     "format": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{js,ts,json,md}\" \".github/**/*.yml\"",
     "format:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{js,ts,json,md}\" \".github/**/*.yml\"",
-    "audit:frontend": "node scripts/test/audit-frontend.mjs",
+    "audit:frontend": "node scripts/test/audit-frontend.mjs && node scripts/test/check-minimatch-brace.mjs",
+    "check:minimatch": "node scripts/test/check-minimatch-brace.mjs",
     "audit:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/cargo-audit-if-available.ps1"
   },
   "dependencies": {
