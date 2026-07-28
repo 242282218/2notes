@@ -1,15 +1,45 @@
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::content::document::{
+    document_to_markdown, document_to_plain_text, flatten_blocks, legacy_text_document,
+};
 use crate::error::{AppError, AppResult};
 
-const MIGRATIONS: &[(i64, &str)] = &[
-    (1, include_str!("schema/001_init.sql")),
-    (2, include_str!("schema/002_entries_fts.sql")),
-    (3, include_str!("schema/003_knowledge_graph.sql")),
-    (4, include_str!("schema/004_entries_fts_trigram.sql")),
+struct Migration {
+    version: i64,
+    sql: &'static str,
+    data: Option<fn(&Transaction<'_>) -> AppResult<()>>,
+}
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("schema/001_init.sql"),
+        data: None,
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("schema/002_entries_fts.sql"),
+        data: None,
+    },
+    Migration {
+        version: 3,
+        sql: include_str!("schema/003_knowledge_graph.sql"),
+        data: None,
+    },
+    Migration {
+        version: 4,
+        sql: include_str!("schema/004_entries_fts_trigram.sql"),
+        data: None,
+    },
+    Migration {
+        version: 5,
+        sql: include_str!("schema/005_block_documents.sql"),
+        data: Some(migrate_legacy_content_to_documents),
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
@@ -17,7 +47,10 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
     let fts5_trigram_available = fts5_trigram_available(conn)?;
     let tx = conn.transaction()?;
     let applied = load_applied(&tx)?;
-    let current_max = MIGRATIONS.last().map(|(version, _)| *version).unwrap_or(0);
+    let current_max = MIGRATIONS
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or(0);
 
     if applied.keys().any(|version| *version > current_max) {
         return Err(AppError::migration(
@@ -26,9 +59,9 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
         ));
     }
 
-    for (version, sql) in MIGRATIONS {
-        let checksum = checksum(sql);
-        if let Some(existing) = applied.get(version) {
+    for migration in MIGRATIONS {
+        let checksum = checksum(migration.sql);
+        if let Some(existing) = applied.get(&migration.version) {
             if existing != &checksum {
                 return Err(AppError::migration(
                     "DB_MIGRATION_CHECKSUM_MISMATCH",
@@ -38,32 +71,94 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
             continue;
         }
 
-        if *version == 2 && !fts5_available {
+        if migration.version == 2 && !fts5_available {
             log::warn!("fts5_unavailable migration=2 fallback=like_search");
             tx.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
-                params![version, checksum, now_string()],
+                params![migration.version, checksum, now_string()],
             )?;
             continue;
         }
 
-        if *version == 4 && !fts5_trigram_available {
+        if migration.version == 4 && !fts5_trigram_available {
             log::warn!("fts5_trigram_unavailable migration=4 fallback=fts5_unicode61");
             tx.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
-                params![version, checksum, now_string()],
+                params![migration.version, checksum, now_string()],
             )?;
             continue;
         }
 
-        tx.execute_batch(sql)?;
+        tx.execute_batch(migration.sql)?;
+        if let Some(data_hook) = migration.data {
+            data_hook(&tx)?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
-            params![version, checksum, now_string()],
+            params![migration.version, checksum, now_string()],
         )?;
     }
 
     tx.commit()?;
+    Ok(())
+}
+
+fn migrate_legacy_content_to_documents(tx: &Transaction<'_>) -> AppResult<()> {
+    let now = now_string();
+    let mut select =
+        tx.prepare("SELECT id, current_content, revision FROM entries WHERE deleted_at IS NULL")?;
+    let rows = select.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut insert_document = tx.prepare(
+        "INSERT INTO entry_documents(
+           entry_id, schema_version, entry_revision, source_content_checksum,
+           document_json, markdown_text, plain_text, legacy_content, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    let mut insert_block = tx.prepare(
+        "INSERT INTO blocks(
+           id, entry_id, parent_block_id, ordinal, depth, kind, text_content, attrs_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?;
+    for row in rows {
+        let (id, current_content, revision) = row?;
+        let document = legacy_text_document(&current_content);
+        let document_json = serde_json::to_string(&document)
+            .map_err(|err| AppError::migration("DOCUMENT_JSON_ENCODE", err.to_string()))?;
+        let markdown_text = document_to_markdown(&document)
+            .map_err(|err| AppError::migration("DOCUMENT_MARKDOWN_ENCODE", err.to_string()))?;
+        let plain_text = document_to_plain_text(&document);
+        insert_document.execute(params![
+            id,
+            document.schema_version,
+            revision,
+            checksum(&current_content),
+            document_json,
+            markdown_text,
+            plain_text,
+            current_content,
+            now,
+        ])?;
+
+        for projection in flatten_blocks(&document) {
+            insert_block.execute(params![
+                projection.id,
+                id,
+                projection.parent_block_id,
+                projection.ordinal,
+                projection.depth,
+                format!("{:?}", projection.kind),
+                projection.text_content,
+                serde_json::to_string(&projection.attrs)
+                    .map_err(|err| AppError::migration("BLOCK_ATTRS_ENCODE", err.to_string()))?,
+            ])?;
+        }
+    }
     Ok(())
 }
 
@@ -162,12 +257,12 @@ mod tests {
     #[test]
     fn migration_004_backfills_existing_aliases() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for (version, sql) in &MIGRATIONS[..3] {
-            conn.execute_batch(sql).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration.sql).unwrap();
             conn.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at)
                  VALUES (?1, ?2, ?3)",
-                params![version, checksum(sql), now_string()],
+                params![migration.version, checksum(migration.sql), now_string()],
             )
             .unwrap();
         }
@@ -239,7 +334,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
     }
 
     #[test]
@@ -260,11 +355,11 @@ mod tests {
             conn.execute_batch(include_str!("schema/002_entries_fts.sql"))
                 .unwrap();
         }
-        for (version, sql) in &MIGRATIONS[..2] {
+        for migration in &MIGRATIONS[..2] {
             conn.execute(
                 "INSERT INTO schema_migrations(version, checksum, applied_at)
                  VALUES (?1, ?2, ?3)",
-                rusqlite::params![version, checksum(sql), now_string()],
+                rusqlite::params![migration.version, checksum(migration.sql), now_string()],
             )
             .unwrap();
         }
@@ -315,5 +410,115 @@ mod tests {
         assert!(
             matches!(err, AppError::Migration { code, .. } if code == "DB_MIGRATION_CHECKSUM_MISMATCH")
         );
+    }
+
+    #[test]
+    fn migration_005_projects_legacy_content_into_block_documents() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![migration.version, checksum(migration.sql), now_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_promoted_at, knowledge_title_key
+             ) VALUES ('e1', '标题', 'user', '第一行\n第二行\n\n段落二 [[WikiLink]]', '第一行\n第二行\n\n段落二 [[WikiLink]]',
+                       'idea', 'pending', 3, '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z', NULL,
+                       'capture', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 5);
+
+        let current: String = conn
+            .query_row(
+                "SELECT current_content FROM entries WHERE id = 'e1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, "第一行\n第二行\n\n段落二 [[WikiLink]]");
+
+        let revision: i64 = conn
+            .query_row("SELECT revision FROM entries WHERE id = 'e1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(revision, 3);
+
+        let (legacy, doc_json, markdown, plain, entry_revision, source_checksum): (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT legacy_content, document_json, markdown_text, plain_text,
+                        entry_revision, source_content_checksum
+                 FROM entry_documents WHERE entry_id = 'e1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(legacy, "第一行\n第二行\n\n段落二 [[WikiLink]]");
+        assert_eq!(entry_revision, 3);
+        assert_eq!(
+            source_checksum,
+            checksum("第一行\n第二行\n\n段落二 [[WikiLink]]")
+        );
+        assert!(doc_json.contains("第一行"));
+        assert!(doc_json.contains("段落二"));
+        assert!(markdown.contains("[[WikiLink]]"));
+        assert!(plain.contains("第一行"));
+        assert!(plain.contains("段落二"));
+
+        let block_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = 'e1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(block_count, 2);
+    }
+
+    #[test]
+    fn migration_005_is_idempotent_and_checksum_protects_future() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 5);
     }
 }

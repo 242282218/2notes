@@ -16,7 +16,7 @@
     "resolved": 1,
     "unresolved": 1
   },
-  "migration_version": 4,
+  "migration_version": 5,
   "name": "v0.3.0-upgrade-baseline",
   "not_installer_captured": true,
   "search_hits_for_query_Gate0": 2,

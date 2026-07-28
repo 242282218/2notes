@@ -515,7 +515,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(
             row,
             (
@@ -1079,7 +1079,7 @@ mod tests {
 
     fn expected_v030_fixture_metrics(ids: &V030FixtureSeedIds) -> V030FixtureMetrics {
         V030FixtureMetrics {
-            schema_version: 4,
+            schema_version: 5,
             entries_total: 4,
             capture_active: 2,
             knowledge_active: 1,
