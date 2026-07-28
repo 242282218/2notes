@@ -84,9 +84,7 @@ mod tests {
 
     fn assert_forbidden(result: Result<(), AppError>) {
         let err = result.expect_err("expected COMMAND_FORBIDDEN");
-        assert!(
-            matches!(err, AppError::Validation { code, .. } if code == "COMMAND_FORBIDDEN")
-        );
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "COMMAND_FORBIDDEN"));
     }
 
     #[test]
@@ -194,9 +192,7 @@ mod tests {
     #[test]
     fn knowledge_commands_reject_quick_capture_window() {
         let err = require_main_window("quick-capture").unwrap_err();
-        assert!(
-            matches!(err, AppError::Validation { code, .. } if code == "COMMAND_FORBIDDEN")
-        );
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "COMMAND_FORBIDDEN"));
     }
 
     #[test]

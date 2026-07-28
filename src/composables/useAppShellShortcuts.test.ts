@@ -6,9 +6,7 @@ import { useAppShellShortcuts } from "./useAppShellShortcuts";
 
 const wrappers: VueWrapper[] = [];
 
-function mountShortcuts(
-  options: Parameters<typeof useAppShellShortcuts>[0],
-) {
+function mountShortcuts(options: Parameters<typeof useAppShellShortcuts>[0]) {
   const wrapper = mount(
     defineComponent({
       setup() {
@@ -21,10 +19,7 @@ function mountShortcuts(
   return wrapper;
 }
 
-function dispatchKey(
-  key: string,
-  init: KeyboardEventInit = {},
-): KeyboardEvent {
+function dispatchKey(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key,
     bubbles: true,

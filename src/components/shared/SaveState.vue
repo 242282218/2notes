@@ -38,22 +38,13 @@ const label = computed(() => {
     "
     :aria-live="state === 'saving' || state === 'saved' ? 'polite' : undefined"
     :class="{
-      'text-success bg-success-subtle border-success/20':
-        state === 'saved',
+      'text-success bg-success-subtle border-success/20': state === 'saved',
       'text-danger bg-danger/10 border-danger/25': state === 'failed',
     }"
   >
     <Loader2 v-if="state === 'saving'" :size="14" aria-hidden="true" />
-    <AlertCircle
-      v-else-if="state === 'failed'"
-      :size="14"
-      aria-hidden="true"
-    />
-    <CheckCircle2
-      v-else-if="state === 'saved'"
-      :size="14"
-      aria-hidden="true"
-    />
+    <AlertCircle v-else-if="state === 'failed'" :size="14" aria-hidden="true" />
+    <CheckCircle2 v-else-if="state === 'saved'" :size="14" aria-hidden="true" />
     <span class="hidden min-[1100px]:inline">{{ label }}</span>
     <button
       v-if="state === 'failed'"

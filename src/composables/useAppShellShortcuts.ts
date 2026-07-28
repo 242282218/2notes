@@ -34,7 +34,10 @@ export function useAppShellShortcuts(handlers: AppShellShortcutHandlers) {
       return;
     }
 
-    if (isEditableTarget(event.target) || isEditableTarget(document.activeElement)) {
+    if (
+      isEditableTarget(event.target) ||
+      isEditableTarget(document.activeElement)
+    ) {
       return;
     }
 

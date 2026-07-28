@@ -129,10 +129,7 @@ defineExpose({
           placeholder="搜索标题与内容"
           class="input-base h-[36px] min-w-[120px] pl-9 pr-3 text-ui"
           @input="
-            emit(
-              'update:modelValue',
-              ($event.target as HTMLInputElement).value,
-            )
+            emit('update:modelValue', ($event.target as HTMLInputElement).value)
           "
         />
       </div>

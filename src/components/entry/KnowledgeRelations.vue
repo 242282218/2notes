@@ -90,9 +90,7 @@ function entryTitle(entry: RelatedEntry) {
               class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-fast ease-token ring-focus hover:border-border-hover hover:bg-bg-hover"
               @click="emit('openRelated', entry.id)"
             >
-              <span class="text-heading">{{
-                entryTitle(entry)
-              }}</span>
+              <span class="text-heading">{{ entryTitle(entry) }}</span>
               <small class="text-caption text-text-tertiary truncate">{{
                 entry.summary
               }}</small>
@@ -108,9 +106,7 @@ function entryTitle(entry: RelatedEntry) {
       </section>
 
       <section v-if="relations.backlinks.length" class="grid gap-2">
-        <h4 class="m-0 text-ui font-medium text-text-secondary">
-          反向链接
-        </h4>
+        <h4 class="m-0 text-ui font-medium text-text-secondary">反向链接</h4>
         <ul class="m-0 grid gap-2 p-0 list-none">
           <li v-for="entry in relations.backlinks" :key="entry.id">
             <button
@@ -118,9 +114,7 @@ function entryTitle(entry: RelatedEntry) {
               class="grid w-full gap-0.5 rounded-md border border-border bg-bg-secondary p-3 text-left text-text-primary transition-colors duration-fast ease-token ring-focus hover:border-border-hover hover:bg-bg-hover"
               @click="emit('openRelated', entry.id)"
             >
-              <span class="text-heading">{{
-                entryTitle(entry)
-              }}</span>
+              <span class="text-heading">{{ entryTitle(entry) }}</span>
               <small class="text-caption text-text-tertiary truncate">{{
                 entry.summary
               }}</small>
@@ -136,9 +130,7 @@ function entryTitle(entry: RelatedEntry) {
       </section>
 
       <section v-if="relations.unresolved.length" class="grid gap-2">
-        <h4 class="m-0 text-ui font-medium text-text-secondary">
-          未解析链接
-        </h4>
+        <h4 class="m-0 text-ui font-medium text-text-secondary">未解析链接</h4>
         <ul class="m-0 grid gap-2 p-0 list-none">
           <li
             v-for="entry in relations.unresolved"

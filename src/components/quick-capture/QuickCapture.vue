@@ -183,61 +183,70 @@ async function hideQuickCapture() {
         class="quick-capture-card elevation-2 grid h-full min-h-0 w-full max-h-full translate-y-0 grid-rows-[34px_minmax(0,1fr)_36px] gap-3 overflow-hidden rounded-lg bg-bg-elevated p-4 animate-fade-in"
         aria-labelledby="quick-capture-title"
       >
-      <header class="flex min-w-0 items-center justify-between gap-3">
-        <div class="flex min-w-0 items-center gap-3">
-          <h1 id="quick-capture-title" class="m-0 text-title text-text-primary">快速记录</h1>
-          <span class="whitespace-nowrap text-caption text-text-tertiary" role="status" aria-live="polite">
-            {{ statusText }}
-          </span>
-        </div>
-        <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
-      </header>
+        <header class="flex min-w-0 items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-3">
+            <h1
+              id="quick-capture-title"
+              class="m-0 text-title text-text-primary"
+            >
+              快速记录
+            </h1>
+            <span
+              class="whitespace-nowrap text-caption text-text-tertiary"
+              role="status"
+              aria-live="polite"
+            >
+              {{ statusText }}
+            </span>
+          </div>
+          <IconButton label="隐藏" :icon="X" @click="hideQuickCapture" />
+        </header>
 
-      <label for="quick-capture-content" class="sr-only">记录内容</label>
-      <textarea
-        id="quick-capture-content"
-        ref="textareaRef"
-        v-model="content"
-        autofocus
-        :disabled="!hydrated || submitting"
-        :aria-invalid="Boolean(error)"
-        :aria-describedby="error ? 'quick-capture-error' : undefined"
-        placeholder="记下现在这件事"
-        class="input-base min-h-0 resize-none p-3 text-body"
-        @input="onContentChange"
-        @keydown.enter.exact="onSubmitKeydown"
-        @keydown.esc.prevent="hideQuickCapture"
-      />
+        <label for="quick-capture-content" class="sr-only">记录内容</label>
+        <textarea
+          id="quick-capture-content"
+          ref="textareaRef"
+          v-model="content"
+          autofocus
+          :disabled="!hydrated || submitting"
+          :aria-invalid="Boolean(error)"
+          :aria-describedby="error ? 'quick-capture-error' : undefined"
+          placeholder="记下现在这件事"
+          class="input-base min-h-0 resize-none p-3 text-body"
+          @input="onContentChange"
+          @keydown.enter.exact="onSubmitKeydown"
+          @keydown.esc.prevent="hideQuickCapture"
+        />
 
-      <footer class="flex min-w-0 items-center justify-between gap-3">
-        <p
-          v-if="error"
-          id="quick-capture-error"
-          class="m-0 min-w-0 truncate text-caption text-danger"
-          role="alert"
-          :title="error"
-        >
-          {{ error }}
-        </p>
-        <span v-else aria-hidden="true" />
-        <div class="flex shrink-0 items-center justify-end gap-2">
-          <IconButton
-            label="复制"
-            :icon="Clipboard"
-            :disabled="!hydrated || !content"
-            @click="copyContent"
-          />
-          <button
-            type="button"
-            class="btn-primary"
-            :disabled="!hydrated || !content.trim() || submitting"
-            @click="submit"
+        <footer class="flex min-w-0 items-center justify-between gap-3">
+          <p
+            v-if="error"
+            id="quick-capture-error"
+            class="m-0 min-w-0 truncate text-caption text-danger"
+            role="alert"
+            :title="error"
           >
-            <Send :size="16" aria-hidden="true" />
-            {{ submitting ? "保存中…" : "保存" }}
-          </button>
-        </div>
-      </footer>
+            {{ error }}
+          </p>
+          <span v-else aria-hidden="true" />
+          <div class="flex shrink-0 items-center justify-end gap-2">
+            <IconButton
+              label="复制"
+              :icon="Clipboard"
+              :disabled="!hydrated || !content"
+              @click="copyContent"
+            />
+            <button
+              type="button"
+              class="btn-primary"
+              :disabled="!hydrated || !content.trim() || submitting"
+              @click="submit"
+            >
+              <Send :size="16" aria-hidden="true" />
+              {{ submitting ? "保存中…" : "保存" }}
+            </button>
+          </div>
+        </footer>
       </section>
     </Transition>
   </main>

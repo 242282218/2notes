@@ -16,13 +16,12 @@ async function onThemeChange(mode: "system" | "light" | "dark") {
 
 <template>
   <section class="mb-8 scroll-mt-4">
-    <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+    <h2
+      class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+    >
       外观
     </h2>
-    <SettingRow
-      title="主题"
-      description="选择浅色、深色或跟随系统设置"
-    >
+    <SettingRow title="主题" description="选择浅色、深色或跟随系统设置">
       <ThemeToggle
         :disabled="settingsStore.themeSaving"
         @change="onThemeChange"

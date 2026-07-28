@@ -255,10 +255,7 @@ export const useEntriesStore = defineStore("entries", () => {
     applyEntryListUpdate(updated, updatesCurrentSelection);
   }
 
-  function applyEntryListUpdate(
-    updated: EntryDetail,
-    reloadSearch = false,
-  ) {
+  function applyEntryListUpdate(updated: EntryDetail, reloadSearch = false) {
     if (reloadSearch && view.value === "search" && filters.query.trim()) {
       void reconcileCurrentList();
     } else if (!upsertListItem(updated)) {

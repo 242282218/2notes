@@ -111,15 +111,11 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    expect(wrapper.get('input[placeholder="标题"]').attributes("aria-label")).toBe(
-      "标题",
-    );
     expect(
-      wrapper.get("textarea").attributes("aria-label"),
-    ).toBe("正文");
-    expect(wrapper.get("textarea").attributes("role")).toBe(
-      "combobox",
-    );
+      wrapper.get('input[placeholder="标题"]').attributes("aria-label"),
+    ).toBe("标题");
+    expect(wrapper.get("textarea").attributes("aria-label")).toBe("正文");
+    expect(wrapper.get("textarea").attributes("role")).toBe("combobox");
     expect(
       wrapper.get("select.entry-type-select").attributes("aria-label"),
     ).toBe("类型");
@@ -247,8 +243,7 @@ describe("EntryDetail", () => {
       await wrapper.setProps({ selectionGeneration: 2 });
       pending.resolve({
         ...current,
-        knowledgeState:
-          knowledgeState === "capture" ? "knowledge" : "capture",
+        knowledgeState: knowledgeState === "capture" ? "knowledge" : "capture",
         revision: 1,
       });
       await operation;

@@ -34,7 +34,9 @@ withDefaults(
       class="mb-1 text-border-hover"
       aria-hidden="true"
     />
-    <strong class="text-heading font-medium text-text-secondary">{{ title }}</strong>
+    <strong class="text-heading font-medium text-text-secondary">{{
+      title
+    }}</strong>
     <span v-if="description" class="max-w-65 text-ui">{{ description }}</span>
   </div>
 </template>

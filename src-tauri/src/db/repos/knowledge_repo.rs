@@ -647,19 +647,18 @@ mod tests {
         let empty = KnowledgeRepo::aliases_for_entries(&conn, &[]).unwrap();
         assert!(empty.is_empty());
 
-        let aliases =
-            KnowledgeRepo::aliases_for_entries(&conn, &[target.id.clone()]).unwrap();
+        let aliases = KnowledgeRepo::aliases_for_entries(&conn, &[target.id.clone()]).unwrap();
         assert_eq!(aliases.len(), 1);
         let target_aliases = aliases.get(&target.id).expect("target aliases present");
         assert_eq!(target_aliases.len(), 50);
-        assert!(target_aliases.iter().all(|alias| alias.starts_with("Target Alias ")));
+        assert!(target_aliases
+            .iter()
+            .all(|alias| alias.starts_with("Target Alias ")));
         assert!(!aliases.contains_key(&other.id));
 
-        let both = KnowledgeRepo::aliases_for_entries(
-            &conn,
-            &[target.id.clone(), other.id.clone()],
-        )
-        .unwrap();
+        let both =
+            KnowledgeRepo::aliases_for_entries(&conn, &[target.id.clone(), other.id.clone()])
+                .unwrap();
         assert_eq!(both.len(), 2);
         assert_eq!(both.get(&target.id).map(Vec::len), Some(50));
         assert_eq!(both.get(&other.id).map(Vec::len), Some(50));

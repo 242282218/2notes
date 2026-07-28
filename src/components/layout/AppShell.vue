@@ -179,16 +179,25 @@ function setQuery(value: string) {
     >
       <AppTopbar
         ref="topbarRef"
-        :model-value="searchQuery" :tag-panel-open="tagPanelOpen"
-        :view-label="currentViewLabel" :view="entries.view"
+        :model-value="searchQuery"
+        :tag-panel-open="tagPanelOpen"
+        :view-label="currentViewLabel"
+        :view="entries.view"
         :current-tag="entries.filters.tag"
-        :entry-type="entries.filters.entryType" :status="entries.filters.status"
-        :show-detail-actions="showDetailActions" :toolbar-state="toolbarState"
-        @update:model-value="setQuery" @update:tag-panel-open="tagPanelOpen = $event"
-        @type-change="setTypeFilter" @status-change="setStatusFilter"
-        @quick-capture="windowOpenQuickCapture" @retry="detailRef?.retrySave()"
-        @promote="detailRef?.promoteToKnowledge()" @demote="detailRef?.demoteFromKnowledge()"
-        @restore="detailRef?.restore()" @delete-forever="detailRef?.requestDeleteForever()"
+        :entry-type="entries.filters.entryType"
+        :status="entries.filters.status"
+        :show-detail-actions="showDetailActions"
+        :toolbar-state="toolbarState"
+        @update:model-value="setQuery"
+        @update:tag-panel-open="tagPanelOpen = $event"
+        @type-change="setTypeFilter"
+        @status-change="setStatusFilter"
+        @quick-capture="windowOpenQuickCapture"
+        @retry="detailRef?.retrySave()"
+        @promote="detailRef?.promoteToKnowledge()"
+        @demote="detailRef?.demoteFromKnowledge()"
+        @restore="detailRef?.restore()"
+        @delete-forever="detailRef?.requestDeleteForever()"
         @move-to-trash="requestMoveSelectedToTrash"
       />
       <p
@@ -199,7 +208,10 @@ function setQuery(value: string) {
         {{ entries.error }}
       </p>
       <section class="relative min-h-0 flex-1 overflow-hidden">
-        <section v-if="entries.view === 'settings'" class="h-full overflow-auto">
+        <section
+          v-if="entries.view === 'settings'"
+          class="h-full overflow-auto"
+        >
           <SettingsView />
         </section>
         <section
@@ -207,13 +219,17 @@ function setQuery(value: string) {
           class="grid h-full min-h-0 grid-cols-[minmax(300px,34%)_minmax(0,1fr)]"
         >
           <EntryList
-            :items="entries.items" :selected-id="entries.selectedId"
-            :loading="entries.loading" :has-more="entries.hasMore"
-            @select="selectEntry" @more="entries.loadMore"
+            :items="entries.items"
+            :selected-id="entries.selectedId"
+            :loading="entries.loading"
+            :has-more="entries.hasMore"
+            @select="selectEntry"
+            @more="entries.loadMore"
           />
           <EntryDetail
             ref="detailRef"
-            :detail="entries.detail" :loading="entries.detailLoading"
+            :detail="entries.detail"
+            :loading="entries.detailLoading"
             :refresh-token="entries.externalChangeToken"
             :selection-generation="entries.selectionGeneration"
             @toolbar-change="toolbarState = $event"
@@ -229,9 +245,11 @@ function setQuery(value: string) {
           <TagFilterPanel
             v-if="entries.view === 'tags' && tagPanelOpen"
             ref="tagPanelRef"
-            :tags="entries.tags" :current-tag="entries.filters.tag"
+            :tags="entries.tags"
+            :current-tag="entries.filters.tag"
             :tags-error="entries.tagsError"
-            @select="setTagFilter" @close="closeTagPanel"
+            @select="setTagFilter"
+            @close="closeTagPanel"
             @retry="entries.refreshTags()"
           />
         </Transition>
@@ -243,7 +261,8 @@ function setQuery(value: string) {
 <style scoped>
 .tag-panel-enter-active,
 .tag-panel-leave-active {
-  transition: opacity var(--duration-base) var(--ease-out),
+  transition:
+    opacity var(--duration-base) var(--ease-out),
     transform var(--duration-base) var(--ease-out);
 }
 .tag-panel-enter-from,

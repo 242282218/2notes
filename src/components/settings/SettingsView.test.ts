@@ -247,9 +247,11 @@ describe("SettingsView", () => {
 
     expect(exportMarkdown).toHaveBeenCalledWith();
     expect(wrapper.text()).not.toContain("已导出");
-    expect(wrapper.findAll('[role="alert"]').every((node) => !node.text().includes("导出失败"))).toBe(
-      true,
-    );
+    expect(
+      wrapper
+        .findAll('[role="alert"]')
+        .every((node) => !node.text().includes("导出失败")),
+    ).toBe(true);
   });
 
   it("keeps restored data invalidated when interface refresh fails", async () => {

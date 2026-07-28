@@ -69,7 +69,9 @@ function observeSections() {
       }
       const visible = entries
         .filter((entry) => entry.isIntersecting)
-        .sort((left, right) => right.intersectionRatio - left.intersectionRatio);
+        .sort(
+          (left, right) => right.intersectionRatio - left.intersectionRatio,
+        );
       const id = visible[0]?.target.id;
       if (id) {
         activeCategory.value = id;
@@ -286,7 +288,9 @@ async function updateAutostart(event: Event) {
         <AppearanceSettings id="appearance" />
 
         <section id="shortcut" class="mb-8 scroll-mt-4">
-          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+          <h2
+            class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+          >
             快捷键
           </h2>
           <SettingRow
@@ -301,7 +305,11 @@ async function updateAutostart(event: Event) {
                   : 'bg-danger/10 text-danger'
               "
             >
-              {{ settingsStore.settings.shortcutRegistered ? "已注册" : "注册失败" }}
+              {{
+                settingsStore.settings.shortcutRegistered
+                  ? "已注册"
+                  : "注册失败"
+              }}
             </span>
           </SettingRow>
           <p
@@ -317,7 +325,9 @@ async function updateAutostart(event: Event) {
             class="cursor-pointer"
             title="开机自启动"
             :description="
-              settingsStore.autostartSaving ? '正在更新…' : '随 Windows 会话启动'
+              settingsStore.autostartSaving
+                ? '正在更新…'
+                : '随 Windows 会话启动'
             "
           >
             <input
@@ -332,12 +342,17 @@ async function updateAutostart(event: Event) {
         </section>
 
         <section id="directories" class="mb-8 scroll-mt-4">
-          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+          <h2
+            class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+          >
             目录
           </h2>
           <SettingRow title="数据目录">
             <template #description>
-              <span class="block truncate" :title="settingsStore.settings.dataDir">
+              <span
+                class="block truncate"
+                :title="settingsStore.settings.dataDir"
+              >
                 {{ settingsStore.settings.dataDir }}
               </span>
             </template>
@@ -350,7 +365,10 @@ async function updateAutostart(event: Event) {
 
           <SettingRow title="日志目录">
             <template #description>
-              <span class="block truncate" :title="settingsStore.settings.logDir">
+              <span
+                class="block truncate"
+                :title="settingsStore.settings.logDir"
+              >
                 {{ settingsStore.settings.logDir }}
               </span>
             </template>
@@ -363,7 +381,10 @@ async function updateAutostart(event: Event) {
 
           <SettingRow title="备份目录">
             <template #description>
-              <span class="block truncate" :title="settingsStore.settings.backupDir">
+              <span
+                class="block truncate"
+                :title="settingsStore.settings.backupDir"
+              >
                 {{ settingsStore.settings.backupDir }}
               </span>
             </template>
@@ -376,7 +397,9 @@ async function updateAutostart(event: Event) {
         </section>
 
         <section id="backup" class="mb-8 scroll-mt-4">
-          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+          <h2
+            class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+          >
             备份
           </h2>
           <SettingRow
@@ -423,17 +446,15 @@ async function updateAutostart(event: Event) {
           >
             {{ backupMessage }}
           </p>
-          <p
-            v-if="backupError"
-            class="mt-2 text-ui text-danger"
-            role="alert"
-          >
+          <p v-if="backupError" class="mt-2 text-ui text-danger" role="alert">
             {{ backupError }}
           </p>
         </section>
 
         <section id="knowledge" class="mb-8 scroll-mt-4">
-          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+          <h2
+            class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+          >
             知识索引
           </h2>
           <SettingRow
@@ -460,17 +481,15 @@ async function updateAutostart(event: Event) {
               `重建完成：来源 ${indexReport.indexedSources}，链接 ${indexReport.linkOccurrences}，未解析 ${indexReport.unresolvedOccurrences}，${indexReport.searchIndexAvailable ? "搜索索引可用" : "搜索索引不可用"}`
             }}
           </p>
-          <p
-            v-if="indexError"
-            class="mt-2 text-ui text-danger"
-            role="alert"
-          >
+          <p v-if="indexError" class="mt-2 text-ui text-danger" role="alert">
             {{ indexError }}
           </p>
         </section>
 
         <section id="export" class="mb-8 scroll-mt-4">
-          <h2 class="m-0 border-b border-border-strong pb-2 text-title text-text-primary">
+          <h2
+            class="m-0 border-b border-border-strong pb-2 text-title text-text-primary"
+          >
             导出
           </h2>
           <SettingRow
@@ -495,11 +514,7 @@ async function updateAutostart(event: Event) {
           >
             {{ exportMessage }}
           </p>
-          <p
-            v-if="exportError"
-            class="mt-2 text-ui text-danger"
-            role="alert"
-          >
+          <p v-if="exportError" class="mt-2 text-ui text-danger" role="alert">
             {{ exportError }}
           </p>
         </section>

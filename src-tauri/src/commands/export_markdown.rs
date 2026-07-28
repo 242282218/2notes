@@ -74,10 +74,7 @@ fn validate_export_dir(target: &Path) -> AppResult<PathBuf> {
         std::fs::create_dir_all(target)?;
     }
     let canonical = target.canonicalize().map_err(|err| {
-        AppError::system(
-            "EXPORT_DIR_INVALID",
-            format!("无法解析导出目录: {err}"),
-        )
+        AppError::system("EXPORT_DIR_INVALID", format!("无法解析导出目录: {err}"))
     })?;
     if !canonical.is_dir() {
         return Err(AppError::validation(

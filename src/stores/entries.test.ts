@@ -182,42 +182,48 @@ describe("entries store", () => {
   it.each([
     ["trash", entriesMoveToTrash, "moveSelectedToTrash"],
     ["restore", entriesRestoreFromTrash, "restoreSelected"],
-  ] as const)("discards stale %s responses after selection changes", async (_, api, action) => {
-    const store = selectedStore();
-    const pending = deferred<EntryDetail>();
-    vi.mocked(api).mockReturnValue(pending.promise);
+  ] as const)(
+    "discards stale %s responses after selection changes",
+    async (_, api, action) => {
+      const store = selectedStore();
+      const pending = deferred<EntryDetail>();
+      vi.mocked(api).mockReturnValue(pending.promise);
 
-    vi.mocked(entriesGet)
-      .mockResolvedValueOnce(entry("entry-b"))
-      .mockResolvedValueOnce(entry("entry-a"));
-    const operation = store[action]();
-    await store.select("entry-b");
-    await store.select("entry-a");
-    pending.resolve({ ...entry("entry-a"), revision: 1 });
-    await operation;
+      vi.mocked(entriesGet)
+        .mockResolvedValueOnce(entry("entry-b"))
+        .mockResolvedValueOnce(entry("entry-a"));
+      const operation = store[action]();
+      await store.select("entry-b");
+      await store.select("entry-a");
+      pending.resolve({ ...entry("entry-a"), revision: 1 });
+      await operation;
 
-    expect(store.selectedId).toBe("entry-a");
-    expect(store.detail?.id).toBe("entry-a");
-    expect(store.detail?.revision).toBe(0);
-  });
+      expect(store.selectedId).toBe("entry-a");
+      expect(store.detail?.id).toBe("entry-a");
+      expect(store.detail?.revision).toBe(0);
+    },
+  );
 
   it.each([
     ["trash", entriesMoveToTrash, "moveSelectedToTrash"],
     ["restore", entriesRestoreFromTrash, "restoreSelected"],
-  ] as const)("treats repeated selection as a new lifecycle for stale %s", async (_, api, action) => {
-    const store = selectedStore();
-    const pending = deferred<EntryDetail>();
-    vi.mocked(api).mockReturnValue(pending.promise);
-    vi.mocked(entriesGet).mockResolvedValue(entry("entry-a"));
+  ] as const)(
+    "treats repeated selection as a new lifecycle for stale %s",
+    async (_, api, action) => {
+      const store = selectedStore();
+      const pending = deferred<EntryDetail>();
+      vi.mocked(api).mockReturnValue(pending.promise);
+      vi.mocked(entriesGet).mockResolvedValue(entry("entry-a"));
 
-    const operation = store[action]();
-    await store.select("entry-a");
-    pending.resolve({ ...entry("entry-a"), revision: 2 });
-    await operation;
+      const operation = store[action]();
+      await store.select("entry-a");
+      pending.resolve({ ...entry("entry-a"), revision: 2 });
+      await operation;
 
-    expect(store.detail?.id).toBe("entry-a");
-    expect(store.detail?.revision).toBe(0);
-  });
+      expect(store.detail?.id).toBe("entry-a");
+      expect(store.detail?.revision).toBe(0);
+    },
+  );
 
   it("treats repeated selection as a new lifecycle for stale deletion", async () => {
     const store = selectedStore();
@@ -257,7 +263,10 @@ describe("entries store", () => {
 
   it("reloads a target list when a stale knowledge update is not present", async () => {
     const store = selectedStore();
-    const promoted = { ...entry("entry-a"), knowledgeState: "knowledge" as const };
+    const promoted = {
+      ...entry("entry-a"),
+      knowledgeState: "knowledge" as const,
+    };
     store.selectedId = "entry-b";
     store.detail = entry("entry-b");
     store.view = "knowledge";

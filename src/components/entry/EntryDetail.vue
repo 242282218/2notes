@@ -120,7 +120,11 @@ const autosave = useAutosave<{
       operationGeneration: requestOperationGeneration,
     };
   },
-  onSaved: ({ entry, selectionGeneration, operationGeneration: requestGeneration }) => {
+  onSaved: ({
+    entry,
+    selectionGeneration,
+    operationGeneration: requestGeneration,
+  }) => {
     if (
       editingEntryId.value === entry.id &&
       operationGeneration === requestGeneration
@@ -324,7 +328,8 @@ async function promoteToKnowledge() {
       editingEntryId.value !== requestEntryId ||
       operationGeneration !== requestGeneration ||
       props.selectionGeneration !== requestSelectionGeneration
-    ) return;
+    )
+      return;
     knowledgeError.value = error instanceof Error ? error.message : "沉淀失败";
   }
 }
@@ -353,7 +358,8 @@ async function demoteFromKnowledge() {
       editingEntryId.value !== requestEntryId ||
       operationGeneration !== requestGeneration ||
       props.selectionGeneration !== requestSelectionGeneration
-    ) return;
+    )
+      return;
     knowledgeError.value = error instanceof Error ? error.message : "移出失败";
   }
 }
@@ -503,14 +509,8 @@ defineExpose({
           <div
             class="grid grid-cols-2 gap-3 border-y border-border bg-bg-secondary px-5 py-3"
           >
-            <EntryTypeSelect
-              v-model="entryType"
-              :disabled="editorDisabled"
-            />
-            <EntryStatusSelect
-              v-model="status"
-              :disabled="editorDisabled"
-            />
+            <EntryTypeSelect v-model="entryType" :disabled="editorDisabled" />
+            <EntryStatusSelect v-model="status" :disabled="editorDisabled" />
           </div>
 
           <div class="border-b border-border px-5 py-3">
