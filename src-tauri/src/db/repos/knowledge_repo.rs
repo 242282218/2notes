@@ -647,7 +647,8 @@ mod tests {
         let empty = KnowledgeRepo::aliases_for_entries(&conn, &[]).unwrap();
         assert!(empty.is_empty());
 
-        let aliases = KnowledgeRepo::aliases_for_entries(&conn, &[target.id.clone()]).unwrap();
+        let aliases =
+            KnowledgeRepo::aliases_for_entries(&conn, std::slice::from_ref(&target.id)).unwrap();
         assert_eq!(aliases.len(), 1);
         let target_aliases = aliases.get(&target.id).expect("target aliases present");
         assert_eq!(target_aliases.len(), 50);
