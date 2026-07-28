@@ -1196,6 +1196,82 @@ mod tests {
         }
     }
 
+    /// Opens the committed Gate 0 sqlite fixture (not a freshly seeded temp DB)
+    /// and asserts live metrics match scripts/test/fixtures/*.metrics.json.
+    #[test]
+    fn v030_upgrade_baseline_committed_fixture_matches_metrics_json() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri parent")
+            .to_path_buf();
+        let fixture_db = repo_root.join("scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite");
+        let metrics_path =
+            repo_root.join("scripts/test/fixtures/v0.3.0-upgrade-baseline.metrics.json");
+        assert!(
+            fixture_db.is_file(),
+            "committed fixture missing: {}",
+            fixture_db.display()
+        );
+        assert!(
+            metrics_path.is_file(),
+            "committed metrics missing: {}",
+            metrics_path.display()
+        );
+
+        // Copy out of the repo so open_database WAL sidecars never touch git files.
+        let temp = tempfile::tempdir().unwrap();
+        let live_db = temp.path().join("v0.3.0-upgrade-baseline.sqlite");
+        fs::copy(&fixture_db, &live_db).unwrap();
+
+        let (write_conn, _read_conn) = open_database(&live_db).unwrap();
+        let expected_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metrics_path).unwrap()).unwrap();
+        let seed_ids = &expected_json["seed_ids"];
+        let ids = V030FixtureSeedIds {
+            capture_id: seed_ids["capture_id"].as_str().unwrap().to_string(),
+            knowledge_id: seed_ids["knowledge_id"].as_str().unwrap().to_string(),
+            linker_id: seed_ids["linker_id"].as_str().unwrap().to_string(),
+            trash_id: seed_ids["trash_id"].as_str().unwrap().to_string(),
+            knowledge_title_key: seed_ids["knowledge_title_key"].as_str().unwrap().to_string(),
+        };
+        let live = collect_v030_fixture_metrics(&write_conn, ids);
+        let expected = V030FixtureMetrics {
+            schema_version: expected_json["migration_version"].as_i64().unwrap(),
+            entries_total: expected_json["entries"]["total"].as_i64().unwrap(),
+            capture_active: expected_json["entries"]["capture_active"].as_i64().unwrap(),
+            knowledge_active: expected_json["entries"]["knowledge_active"]
+                .as_i64()
+                .unwrap(),
+            trash_only: expected_json["entries"]["trash_only"].as_i64().unwrap(),
+            draft_revision: expected_json["draft"]["revision"].as_i64().unwrap(),
+            draft_nonempty: expected_json["draft"]["nonempty"].as_bool().unwrap(),
+            aliases_total: expected_json["aliases_total"].as_i64().unwrap(),
+            link_occurrences: expected_json["links"]["occurrences"].as_i64().unwrap(),
+            resolved_links: expected_json["links"]["resolved"].as_i64().unwrap(),
+            unresolved_links: expected_json["links"]["unresolved"].as_i64().unwrap(),
+            search_hits_for_gate0: expected_json["search_hits_for_query_Gate0"]
+                .as_i64()
+                .unwrap(),
+            capture_id: seed_ids["capture_id"].as_str().unwrap().to_string(),
+            knowledge_id: seed_ids["knowledge_id"].as_str().unwrap().to_string(),
+            linker_id: seed_ids["linker_id"].as_str().unwrap().to_string(),
+            trash_id: seed_ids["trash_id"].as_str().unwrap().to_string(),
+            knowledge_title_key: seed_ids["knowledge_title_key"].as_str().unwrap().to_string(),
+        };
+        assert_eq!(live, expected);
+        assert_eq!(
+            expected_json["name"].as_str().unwrap(),
+            "v0.3.0-upgrade-baseline"
+        );
+        assert_eq!(
+            expected_json["fixture_db"].as_str().unwrap(),
+            "scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite"
+        );
+        assert!(expected_json["not_installer_captured"]
+            .as_bool()
+            .unwrap());
+    }
+
     fn test_paths() -> AppPaths {
         let temp = tempfile::tempdir().unwrap().keep();
         AppPaths {
