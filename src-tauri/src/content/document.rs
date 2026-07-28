@@ -116,9 +116,12 @@ fn walk_validate(
 }
 
 fn is_uuid_v4(id: &str) -> bool {
+    // Only accept canonical hyphenated lowercase form so stable IDs compare as strings.
     match Uuid::parse_str(id) {
-        Ok(value) => value.get_version() == Some(uuid::Version::Random),
-        Err(_) => false,
+        Ok(value) if value.get_version() == Some(uuid::Version::Random) => {
+            id == value.hyphenated().to_string()
+        }
+        _ => false,
     }
 }
 
@@ -735,6 +738,26 @@ mod tests {
         )]);
         let err = validate_document(&v1).unwrap_err();
         assert!(matches!(err, AppError::Validation { code, .. } if code == "BLOCK_ID_INVALID"));
+
+        // Same UUID v4, non-canonical spellings must not pass string-stable ID checks.
+        for raw in [
+            "550E8400-E29B-41D4-A716-446655440000",
+            "550e8400e29b41d4a716446655440000",
+            "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+        ] {
+            let document = BlockDocument::from_blocks(vec![BlockNode::paragraph(raw, "x")]);
+            let err = validate_document(&document).unwrap_err();
+            assert!(
+                matches!(err, AppError::Validation { code, .. } if code == "BLOCK_ID_INVALID"),
+                "raw={raw}"
+            );
+        }
+
+        let canonical = BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ok",
+        )]);
+        assert!(validate_document(&canonical).is_ok());
     }
 
     fn paragraph_block_raw(id: &str, text: &str) -> BlockNode {

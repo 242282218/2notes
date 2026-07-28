@@ -73,7 +73,8 @@ $nodeExit = 1
 $testPassed = $false
 
 try {
-  Start-Sleep -Seconds 3
+  # Allow Vue shell, settings hydrate, and window-state restore to settle.
+  Start-Sleep -Seconds 6
 
   $env:TWONOTES_CDP_PORT = [string]$CdpPort
   $env:TWONOTES_NOTE_PREFIX = $notePrefix
@@ -178,30 +179,61 @@ const main = await stableConnect(
 
 const mainReady = await main.evaluate(`
   new Promise((resolve) => {
-    const hasRecordButton = () =>
-      Boolean(document.querySelector('.topbar .primary-button'));
-    if (hasRecordButton()) {
+    const findRecordButton = () => {
+      const byText = Array.from(document.querySelectorAll('button.btn-primary')).find((button) =>
+        (button.textContent || '').includes('记录'),
+      );
+      if (byText) {
+        return byText;
+      }
+      // Inbox empty state has a single topbar primary action.
+      return document.querySelector('header button.btn-primary, button.btn-primary');
+    };
+    if (findRecordButton()) {
       resolve(true);
       return;
     }
     const observer = new MutationObserver(() => {
-      if (hasRecordButton()) {
+      if (findRecordButton()) {
         observer.disconnect();
         resolve(true);
       }
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(() => resolve(hasRecordButton()), 8000);
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    setTimeout(() => resolve(Boolean(findRecordButton())), 15000);
   })
 `);
 
 console.log("MAIN_READY", mainReady);
 if (!mainReady) {
+  const snapshot = await main.evaluate(`({
+    href: location.href,
+    ready: document.readyState,
+    bodyText: (document.body && document.body.innerText || '').slice(0, 500),
+    buttons: Array.from(document.querySelectorAll('button')).map((button) => ({
+      text: (button.textContent || '').trim(),
+      className: button.className,
+    })),
+  })`);
+  console.log("MAIN_SNAPSHOT", JSON.stringify(snapshot));
   throw new Error("main record button missing");
 }
 
 await main.evaluate(`
-  document.querySelector('.topbar .primary-button').click()
+  (() => {
+    const button =
+      Array.from(document.querySelectorAll('button.btn-primary')).find((item) =>
+        (item.textContent || '').includes('记录'),
+      ) || document.querySelector('header button.btn-primary, button.btn-primary');
+    if (!button) {
+      throw new Error('record button disappeared');
+    }
+    button.click();
+  })()
 `);
 
 const quick = await stableConnect((target) =>
@@ -210,18 +242,21 @@ const quick = await stableConnect((target) =>
 
 const hasTextarea = await quick.evaluate(`
   new Promise((resolve) => {
-    if (document.querySelector('textarea')) {
+    if (document.querySelector('#quick-capture-content, textarea')) {
       resolve(true);
       return;
     }
     const observer = new MutationObserver(() => {
-      if (document.querySelector('textarea')) {
+      if (document.querySelector('#quick-capture-content, textarea')) {
         observer.disconnect();
         resolve(true);
       }
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(() => resolve(Boolean(document.querySelector('textarea'))), 4000);
+    setTimeout(
+      () => resolve(Boolean(document.querySelector('#quick-capture-content, textarea'))),
+      4000,
+    );
   })
 `);
 
@@ -229,21 +264,69 @@ if (!hasTextarea) {
   throw new Error("quick capture textarea missing");
 }
 
-await quick.evaluate(`
-  (() => {
-    const textarea = document.querySelector('textarea');
-    textarea.focus();
-    textarea.value = ${JSON.stringify(note)};
-    textarea.dispatchEvent(new Event('input', { bubbles: true }));
-    return textarea.value;
-  })()
-`);
+const noteJson = JSON.stringify(note);
+const fillResult = await quick.evaluate(
+  "(() => {" +
+    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
+    "if (!textarea) throw new Error('textarea missing');" +
+    "textarea.focus();" +
+    "const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;" +
+    "setter.call(textarea, " + noteJson + ");" +
+    "textarea.dispatchEvent(new Event('input', { bubbles: true }));" +
+    "return textarea.value;" +
+  "})()",
+);
+console.log("FILL_RESULT", fillResult);
 
-await sleep(800);
+await sleep(1000);
 
-await quick.evaluate(`
-  document.querySelector('.quick-actions .primary-button').click()
-`);
+const saveState = await quick.evaluate(
+  "(() => {" +
+    "const buttons = Array.from(document.querySelectorAll('button')).map((item) => ({" +
+      "text: (item.textContent || '').replace(/\\s+/g, ' ').trim()," +
+      "className: item.className," +
+      "disabled: item.disabled," +
+      "type: item.type," +
+    "}));" +
+    "const button = Array.from(document.querySelectorAll('button')).find((item) => {" +
+      "const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();" +
+      "return text.includes('保存') && item.className.includes('btn-primary');" +
+    "});" +
+    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
+    "return {" +
+      "hasButton: Boolean(button)," +
+      "disabled: button ? button.disabled : null," +
+      "buttonText: button ? (button.textContent || '').replace(/\\s+/g, ' ').trim() : null," +
+      "value: textarea ? textarea.value : null," +
+      "buttons," +
+    "};" +
+  "})()",
+);
+console.log("SAVE_STATE", JSON.stringify(saveState));
+
+// Prefer Enter submit because QuickCapture binds keydown.enter.exact to submit.
+await quick.evaluate(
+  "(() => {" +
+    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
+    "if (!textarea) throw new Error('textarea missing before submit');" +
+    "textarea.focus();" +
+    "const event = new KeyboardEvent('keydown', {" +
+      "key: 'Enter'," +
+      "code: 'Enter'," +
+      "keyCode: 13," +
+      "which: 13," +
+      "bubbles: true," +
+      "cancelable: true," +
+    "});" +
+    "textarea.dispatchEvent(event);" +
+    "const button = Array.from(document.querySelectorAll('button')).find((item) => {" +
+      "const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();" +
+      "return text.includes('保存') && item.className.includes('btn-primary') && !item.disabled;" +
+    "});" +
+    "if (button) button.click();" +
+    "return Boolean(button);" +
+  "})()",
+);
 
 await sleep(2000);
 
