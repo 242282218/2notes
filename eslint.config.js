@@ -8,6 +8,8 @@ export default tseslint.config(
       "dist/**",
       "src-tauri/target/**",
       "src/types/generated.ts",
+      // Local agent scaffolding, not part of the shipped app source
+      ".superpowers/**",
       "参考项目/**",
     ],
   },
