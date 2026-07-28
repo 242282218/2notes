@@ -709,7 +709,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("Atlas Second".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -724,7 +723,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("Canonical Page".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -878,7 +876,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("来源".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: Some(EntryStatus::Done),
                 tags: None,
@@ -1197,7 +1194,6 @@ mod tests {
                     EntryPatch {
                         document: None,
                         title: Some(format!("知识标题{index}")),
-                        current_content: None,
                         entry_type: None,
                         status: None,
                         tags: None,

@@ -171,46 +171,23 @@ impl EntriesRepo {
         let EntryPatch {
             title,
             document,
-            current_content,
             entry_type,
             status,
             tags,
         } = patch;
 
-        // Resolve the next document: explicit document wins, otherwise fall back to
-        // the legacy text compat input, otherwise keep the current document.
+        // A metadata-only patch keeps the stored document and its text projection.
         let (next_document, next_content, content_changed) = match document {
             Some(next_doc) => {
                 let content = document_to_plain_text(&next_doc);
                 let changed = content != current.current_content;
                 (next_doc, content, changed)
             }
-            None => match current_content {
-                Some(text) if !text.trim().is_empty() => {
-                    let doc = legacy_text_document(&text);
-                    let content = document_to_plain_text(&doc);
-                    let changed = content != current.current_content;
-                    (doc, content, changed)
-                }
-                Some(_) => {
-                    return Err(AppError::validation(
-                        "VALIDATION_EMPTY_CONTENT",
-                        "内容不能为空",
-                    ));
-                }
-                None => {
-                    let doc = DocumentsRepo::get_with_tx(tx, id)?;
-                    (doc, current.current_content.clone(), false)
-                }
-            },
+            None => {
+                let doc = DocumentsRepo::get_with_tx(tx, id)?;
+                (doc, current.current_content.clone(), false)
+            }
         };
-
-        if next_content.trim().is_empty() {
-            return Err(AppError::validation(
-                "VALIDATION_EMPTY_CONTENT",
-                "内容不能为空",
-            ));
-        }
 
         let old_title = current.title.clone().unwrap_or_default();
         let is_knowledge = current.knowledge_state == KnowledgeState::Knowledge;
@@ -1035,6 +1012,13 @@ mod tests {
         samples[(samples.len() * 95 - 1) / 100]
     }
 
+    fn paragraph_document(content: impl Into<String>) -> BlockDocument {
+        BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            Uuid::new_v4().to_string(),
+            content,
+        )])
+    }
+
     #[test]
     fn creates_entry_with_defaults() {
         let (mut conn, _) = open_in_memory().unwrap();
@@ -1115,7 +1099,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("新名".into()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1143,7 +1126,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("  ".into()),
-                current_content: Some("不应保存".into()),
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1174,7 +1156,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("PHASE TWO".into()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1225,9 +1206,8 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
-                document: None,
+                document: Some(paragraph_document("second")),
                 title: None,
-                current_content: Some("second".to_string()),
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1243,6 +1223,35 @@ mod tests {
     }
 
     #[test]
+    fn update_allows_empty_paragraph_document() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "first", &now).unwrap();
+        let updated = EntriesRepo::update(
+            &tx,
+            &entry.id,
+            EntryPatch {
+                document: Some(BlockDocument::from_blocks(vec![
+                    BlockNode::empty_paragraph(Uuid::new_v4().to_string()),
+                ])),
+                title: None,
+                entry_type: None,
+                status: None,
+                tags: None,
+            },
+            entry.revision,
+            &now,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert!(updated.current_content.is_empty());
+        assert_eq!(updated.original_content, "first");
+        assert!(updated.document.blocks[0].content.is_empty());
+    }
+
+    #[test]
     fn search_hits_content_original_and_tags_with_chinese() {
         let (mut conn, _) = open_in_memory().unwrap();
         let now = now_string();
@@ -1252,9 +1261,8 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
-                document: None,
+                document: Some(paragraph_document("当前内容")),
                 title: Some("标题".to_string()),
-                current_content: Some("当前内容".to_string()),
                 entry_type: None,
                 status: None,
                 tags: Some(vec!["项目A".to_string()]),
@@ -1381,7 +1389,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("searchable target".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1529,7 +1536,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: None,
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: Some(vec!["shared".to_string(), "only-a".to_string()]),
@@ -1544,7 +1550,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: None,
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: Some(vec!["shared".to_string(), "only-b".to_string()]),
@@ -1622,7 +1627,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: None,
-                current_content: Some("changed".to_string()),
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1648,7 +1652,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: None,
-                current_content: Some("changed".to_string()),
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1806,9 +1809,8 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
-                document: None,
+                document: Some(paragraph_document(format!("{links}\n预热"))),
                 title: None,
-                current_content: Some(format!("{links}\n预热")),
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1828,9 +1830,8 @@ mod tests {
                 &tx,
                 &entry.id,
                 EntryPatch {
-                    document: None,
+                    document: Some(paragraph_document(content)),
                     title: None,
-                    current_content: Some(content),
                     entry_type: None,
                     status: None,
                     tags: None,
@@ -1930,7 +1931,6 @@ mod tests {
             EntryPatch {
                 title: None,
                 document: Some(next_document),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,

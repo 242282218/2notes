@@ -162,7 +162,6 @@ pub struct EntryDetail {
 pub struct EntryPatch {
     pub title: Option<String>,
     pub document: Option<BlockDocument>,
-    pub current_content: Option<String>,
     pub entry_type: Option<EntryType>,
     pub status: Option<EntryStatus>,
     pub tags: Option<Vec<String>>,

@@ -11,7 +11,6 @@ import { ChevronRight, FileText } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
 import {
-  applyWikiLinkCompletion,
   findWikiLinkCompletion,
   type WikiLinkCompletion,
 } from "../../composables/useWikiLinkCompletion";
@@ -22,6 +21,7 @@ import {
   knowledgeSuggest,
 } from "../../services/knowledgeApi";
 import type {
+  BlockDocument,
   EntryDetail,
   EntryPatch,
   EntryStatus,
@@ -31,6 +31,7 @@ import type {
 import type { EntryDetailToolbarState } from "./entryDetailToolbar";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import EmptyState from "../shared/EmptyState.vue";
+import BlockEditor, { type EditorTextContext } from "./BlockEditor.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
 import EntryTypeSelect from "./EntryTypeSelect.vue";
 import KnowledgeRelations from "./KnowledgeRelations.vue";
@@ -58,11 +59,14 @@ const emit = defineEmits<{
 }>();
 
 const title = ref("");
-const currentContent = ref("");
+const document = ref<BlockDocument>({ schemaVersion: 1, blocks: [] });
 const entryType = ref<EntryType>("unclear");
 const status = ref<EntryStatus>("pending");
 const tagInputRef = ref<{ commitDraft: () => void } | null>(null);
-const contentEditorRef = ref<HTMLTextAreaElement | null>(null);
+const blockEditorRef = ref<{
+  completeWikiLink: (completion: WikiLinkCompletion, title: string) => boolean;
+} | null>(null);
+const wikiTextContext = ref<EditorTextContext | null>(null);
 const tags = ref<string[]>([]);
 const baseRevision = ref(0);
 const editingEntryId = ref<string | null>(null);
@@ -87,7 +91,6 @@ let syncVersion = 0;
 let titleDirty = false;
 let wikiLinkRequestId = 0;
 let wikiLinkTimer: number | undefined;
-let wikiLinkHandledKey: string | null = null;
 let operationGeneration = 0;
 
 const autosave = useAutosave<{
@@ -101,8 +104,7 @@ const autosave = useAutosave<{
     const requestOperationGeneration = operationGeneration;
     const patch: EntryPatch = {
       title: titleDirty ? title.value : null,
-      document: null,
-      currentContent: currentContent.value,
+      document: document.value,
       entryType: entryType.value,
       status: status.value,
       tags: tags.value,
@@ -164,7 +166,7 @@ function isAutosaveBusy() {
 function applyEntrySnapshot(entry: EntryDetail | null) {
   editingEntryId.value = entry?.id || null;
   title.value = entry?.title || "";
-  currentContent.value = entry?.currentContent || "";
+  document.value = entry?.document || { schemaVersion: 1, blocks: [] };
   entryType.value = entry?.entryType || "unclear";
   status.value = entry?.status || "pending";
   tags.value = entry?.tags.map((tag) => tag.name) || [];
@@ -259,7 +261,7 @@ watch(title, () => {
   }
 });
 
-watch([currentContent, entryType, status, tags], () => {
+watch([document, entryType, status, tags], () => {
   if (!initializing && editingEntryId.value && !deletedAt.value) {
     autosave.markDirty();
   }
@@ -365,13 +367,13 @@ async function demoteFromKnowledge() {
   }
 }
 
-function refreshWikiLinkCompletion() {
-  const editor = contentEditorRef.value;
-  if (!editor) {
+function refreshWikiLinkCompletion(context: EditorTextContext | null) {
+  wikiTextContext.value = context;
+  if (!context) {
     resetWikiLinkCompletion();
     return;
   }
-  const next = findWikiLinkCompletion(editor.value, editor.selectionStart);
+  const next = findWikiLinkCompletion(context.text, context.caret);
   if (!next) {
     resetWikiLinkCompletion();
     return;
@@ -399,55 +401,37 @@ function refreshWikiLinkCompletion() {
   }, 120);
 }
 
-function handleWikiLinkKeyup(event: KeyboardEvent) {
-  if (wikiLinkHandledKey === event.key) {
-    wikiLinkHandledKey = null;
-    return;
-  }
-  wikiLinkHandledKey = null;
-  refreshWikiLinkCompletion();
+function handleEditorSelectionChange(context: EditorTextContext | null) {
+  refreshWikiLinkCompletion(context);
 }
 
 function handleWikiLinkKeydown(event: KeyboardEvent) {
-  wikiLinkHandledKey = null;
   if (!wikiLinkSuggestionsOpen.value || event.isComposing) return;
   const count = wikiLinkSuggestions.value.length;
   if (event.key === "ArrowDown") {
-    wikiLinkHandledKey = event.key;
     event.preventDefault();
     wikiLinkActiveIndex.value = (wikiLinkActiveIndex.value + 1) % count;
   } else if (event.key === "ArrowUp") {
-    wikiLinkHandledKey = event.key;
     event.preventDefault();
     wikiLinkActiveIndex.value = (wikiLinkActiveIndex.value - 1 + count) % count;
   } else if (event.key === "Enter") {
-    wikiLinkHandledKey = event.key;
     event.preventDefault();
     void selectWikiLinkSuggestion(
       wikiLinkSuggestions.value[wikiLinkActiveIndex.value],
     );
   } else if (event.key === "Escape") {
-    wikiLinkHandledKey = event.key;
     event.preventDefault();
     resetWikiLinkCompletion();
   }
 }
 
 async function selectWikiLinkSuggestion(suggestion: KnowledgeSuggestion) {
-  const editor = contentEditorRef.value;
   const completion = wikiLinkCompletion.value;
-  if (!editor || !completion) return;
-
-  const applied = applyWikiLinkCompletion(
-    editor.value,
-    completion,
-    suggestion.title,
-  );
-  currentContent.value = applied.value;
-  resetWikiLinkCompletion();
-  await nextTick();
-  editor.focus();
-  editor.setSelectionRange(applied.caret, applied.caret);
+  const context = wikiTextContext.value;
+  if (!completion || !context) return;
+  if (blockEditorRef.value?.completeWikiLink(completion, suggestion.title)) {
+    resetWikiLinkCompletion();
+  }
 }
 
 function resetWikiLinkCompletion() {
@@ -523,28 +507,20 @@ defineExpose({
           </div>
 
           <div class="relative min-h-[260px]">
-            <textarea
-              ref="contentEditorRef"
-              v-model="currentContent"
-              class="min-h-[300px] w-full resize-y border-none bg-transparent px-5 py-4 font-sans text-body text-text-primary outline-none placeholder:text-text-placeholder ring-focus disabled:opacity-55"
-              role="combobox"
-              aria-label="正文"
-              :aria-autocomplete="wikiLinkSuggestionsOpen ? 'list' : undefined"
-              :aria-expanded="wikiLinkSuggestionsOpen ? 'true' : 'false'"
-              :aria-controls="
-                wikiLinkSuggestionsOpen ? wikiLinkListboxId : undefined
-              "
-              :aria-activedescendant="
+            <BlockEditor
+              ref="blockEditorRef"
+              v-model="document"
+              :disabled="editorDisabled"
+              :wiki-suggestions-open="wikiLinkSuggestionsOpen"
+              :wiki-listbox-id="wikiLinkListboxId"
+              :wiki-active-descendant="
                 wikiLinkSuggestionsOpen
                   ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
                   : undefined
               "
-              :disabled="editorDisabled"
-              @input="refreshWikiLinkCompletion"
-              @click="refreshWikiLinkCompletion"
-              @keyup="handleWikiLinkKeyup"
-              @keydown="handleWikiLinkKeydown"
-              @blur="resetWikiLinkCompletion"
+              @selection-change="handleEditorSelectionChange"
+              @editor-keydown="handleWikiLinkKeydown"
+              @editor-blur="resetWikiLinkCompletion"
             />
             <WikiLinkSuggestions
               v-if="wikiLinkSuggestionsOpen"

@@ -181,7 +181,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: None,
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: Some(vec!["work".to_string()]),

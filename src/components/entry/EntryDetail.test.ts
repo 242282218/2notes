@@ -1,4 +1,5 @@
-import { flushPromises, mount } from "@vue/test-utils";
+import { config, flushPromises, mount } from "@vue/test-utils";
+import { defineComponent, h } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { entriesUpdate } from "../../services/entryApi";
@@ -8,6 +9,7 @@ import {
   knowledgeSuggest,
 } from "../../services/knowledgeApi";
 import type {
+  BlockDocument,
   EntryDetail as EntryDetailType,
   KnowledgeSuggestion,
 } from "../../types/generated";
@@ -27,6 +29,65 @@ vi.mock("../../services/knowledgeApi", () => ({
 vi.mock("../../services/tagApi", () => ({
   tagsSuggest: vi.fn().mockResolvedValue([]),
 }));
+
+const BlockEditorStub = defineComponent({
+  name: "BlockEditor",
+  props: {
+    modelValue: { type: Object, required: true },
+    disabled: Boolean,
+    wikiSuggestionsOpen: Boolean,
+    wikiListboxId: { type: String, default: undefined },
+    wikiActiveDescendant: { type: String, default: undefined },
+  },
+  emits: [
+    "update:modelValue",
+    "selectionChange",
+    "editorKeydown",
+    "editorBlur",
+  ],
+  setup(props, { emit, expose }) {
+    expose({
+      completeWikiLink: (
+        completion: { start: number; query: string },
+        title: string,
+      ) => {
+        const block = props.modelValue.blocks[0];
+        const text =
+          block?.content
+            .filter((node: { type: string }) => node.type === "text")
+            .map((node: { text: string }) => node.text)
+            .join("") ?? "";
+        const value = `${text.slice(0, completion.start - 2)}[[${title}]]${text.slice(
+          completion.start + completion.query.length,
+        )}`;
+        emit("update:modelValue", documentWithText(value));
+        emit("selectionChange", {
+          text: value,
+          caret: completion.start + title.length + 4,
+        });
+        return true;
+      },
+    });
+    return () =>
+      h("div", {
+        contenteditable: !props.disabled,
+        role: "combobox",
+        "aria-activedescendant": props.wikiSuggestionsOpen
+          ? props.wikiActiveDescendant
+          : undefined,
+        "aria-autocomplete": props.wikiSuggestionsOpen ? "list" : undefined,
+        "aria-controls": props.wikiSuggestionsOpen
+          ? props.wikiListboxId
+          : undefined,
+        "aria-expanded": props.wikiSuggestionsOpen ? "true" : "false",
+        "aria-label": "正文",
+        onKeydown: (event: KeyboardEvent) => emit("editorKeydown", event),
+        onBlur: () => emit("editorBlur"),
+      });
+  },
+});
+
+config.global.stubs.BlockEditor = BlockEditorStub;
 
 describe("EntryDetail", () => {
   beforeEach(() => {
@@ -52,7 +113,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea").setValue("updated content");
+    await setEditor(wrapper, "updated content");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
@@ -60,7 +121,7 @@ describe("EntryDetail", () => {
       detail.id,
       expect.objectContaining({
         title: null,
-        currentContent: "updated content",
+        document: documentContainingText("updated content"),
       }),
       0,
     );
@@ -114,8 +175,8 @@ describe("EntryDetail", () => {
     expect(
       wrapper.get('input[placeholder="标题"]').attributes("aria-label"),
     ).toBe("标题");
-    expect(wrapper.get("textarea").attributes("aria-label")).toBe("正文");
-    expect(wrapper.get("textarea").attributes("role")).toBe("combobox");
+    expect(contentEditor(wrapper).attributes("aria-label")).toBe("正文");
+    expect(contentEditor(wrapper).attributes("role")).toBe("combobox");
     expect(
       wrapper.get("select.entry-type-select").attributes("aria-label"),
     ).toBe("类型");
@@ -271,17 +332,19 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea").setValue("first draft");
+    await setEditor(wrapper, "first draft");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
     expect(entriesUpdate).toHaveBeenCalledTimes(1);
     expect(entriesUpdate).toHaveBeenLastCalledWith(
       detail.id,
-      expect.objectContaining({ currentContent: "first draft" }),
+      expect.objectContaining({
+        document: documentContainingText("first draft"),
+      }),
       0,
     );
 
-    await wrapper.get("textarea").setValue("second draft");
+    await setEditor(wrapper, "second draft");
     firstSave.resolve({
       ...detail,
       currentContent: "first draft",
@@ -294,12 +357,12 @@ describe("EntryDetail", () => {
     expect(entriesUpdate).toHaveBeenCalledTimes(2);
     expect(entriesUpdate).toHaveBeenLastCalledWith(
       detail.id,
-      expect.objectContaining({ currentContent: "second draft" }),
+      expect.objectContaining({
+        document: documentContainingText("second draft"),
+      }),
       1,
     );
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "second draft",
-    );
+    expect(editorText(wrapper)).toBe("second draft");
   });
 
   it("keeps local fields when a newer same-id detail arrives while dirty", async () => {
@@ -311,7 +374,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea").setValue("local dirty content");
+    await setEditor(wrapper, "local dirty content");
     await wrapper.get('input[placeholder="标题"]').setValue("local title");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
@@ -335,9 +398,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "local dirty content",
-    );
+    expect(editorText(wrapper)).toBe("local dirty content");
     expect(
       (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
         .value,
@@ -355,9 +416,7 @@ describe("EntryDetail", () => {
 
     // After the in-flight save settles, same-id prop replacement still must not
     // clobber the local editor with the external server snapshot.
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "local dirty content",
-    );
+    expect(editorText(wrapper)).toBe("local dirty content");
     expect(
       (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
         .value,
@@ -372,7 +431,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea").setValue("unsaved local body");
+    await setEditor(wrapper, "unsaved local body");
     await wrapper.get('input[placeholder="标题"]').setValue("unsaved title");
 
     await wrapper.setProps({
@@ -385,9 +444,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "unsaved local body",
-    );
+    expect(editorText(wrapper)).toBe("unsaved local body");
     expect(
       (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
         .value,
@@ -406,6 +463,7 @@ describe("EntryDetail", () => {
         ...detail,
         title: "external title",
         currentContent: "external content",
+        document: documentWithText("external content"),
         entryType: "idea",
         status: "done",
         revision: 3,
@@ -426,9 +484,7 @@ describe("EntryDetail", () => {
       (wrapper.get('input[placeholder="标题"]').element as HTMLInputElement)
         .value,
     ).toBe("external title");
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "external content",
-    );
+    expect(editorText(wrapper)).toBe("external content");
     expect(
       (wrapper.get("select.entry-type-select").element as HTMLSelectElement)
         .value,
@@ -452,7 +508,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    await wrapper.get("textarea").setValue("saved content");
+    await setEditor(wrapper, "saved content");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
@@ -465,16 +521,16 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe(
-      "saved content",
-    );
-    await wrapper.get("textarea").setValue("follow-up edit");
+    expect(editorText(wrapper)).toBe("saved content");
+    await setEditor(wrapper, "follow-up edit");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
     expect(entriesUpdate).toHaveBeenLastCalledWith(
       detail.id,
-      expect.objectContaining({ currentContent: "follow-up edit" }),
+      expect.objectContaining({
+        document: documentContainingText("follow-up edit"),
+      }),
       1,
     );
   });
@@ -484,7 +540,7 @@ describe("EntryDetail", () => {
       props: { detail: entry(), loading: false },
     });
     await flushPromises();
-    await wrapper.get("textarea").setValue("dirty content");
+    await setEditor(wrapper, "dirty content");
 
     wrapper.unmount();
     await vi.advanceTimersByTimeAsync(500);
@@ -566,7 +622,7 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
 
-    const editor = wrapper.get("textarea");
+    const editor = contentEditor(wrapper);
     expect(editor.attributes("role")).toBe("combobox");
     expect(editor.attributes("aria-expanded")).toBe("false");
     expect(editor.attributes("aria-controls")).toBeUndefined();
@@ -583,7 +639,7 @@ describe("EntryDetail", () => {
       suggestion("one", "Canonical One"),
       suggestion("two", "Canonical Two"),
     ]);
-    const editor = wrapper.get("textarea");
+    const editor = contentEditor(wrapper);
     const listbox = wrapper.get('[role="listbox"]');
 
     expect(listbox.attributes("id")).toBe("entry-wiki-link-suggestions");
@@ -629,17 +685,13 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
     await openSuggestions(wrapper, "[[ca", [suggestion("one", "Canonical")]);
-    const editor = wrapper.get("textarea");
-    const title = wrapper.get('input[placeholder="标题"]');
-    (editor.element as HTMLTextAreaElement).focus();
-
-    (title.element as HTMLInputElement).focus();
+    const editor = contentEditor(wrapper);
+    await editor.trigger("blur");
     await flushPromises();
 
     expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
-    (editor.element as HTMLTextAreaElement).focus();
     await editor.trigger("keydown", { key: "Enter" });
-    expect((editor.element as HTMLTextAreaElement).value).toBe("[[ca");
+    expect(editorText(wrapper)).toBe("[[ca");
     wrapper.unmount();
   });
 
@@ -649,7 +701,6 @@ describe("EntryDetail", () => {
     });
     await flushPromises();
     await openSuggestions(wrapper, "[[ca", [suggestion("one", "Canonical")]);
-    const editor = wrapper.get("textarea");
     const enter = new KeyboardEvent("keydown", {
       key: "Enter",
       isComposing: true,
@@ -657,27 +708,24 @@ describe("EntryDetail", () => {
       cancelable: true,
     });
 
-    editor.element.dispatchEvent(enter);
+    await emitEditorKeydown(wrapper, enter);
     await flushPromises();
 
     expect(enter.defaultPrevented).toBe(false);
-    expect((editor.element as HTMLTextAreaElement).value).toBe("[[ca");
+    expect(editorText(wrapper)).toBe("[[ca");
     expect(wrapper.find('[role="listbox"]').exists()).toBe(true);
   });
 
-  it("recomputes completion on arrow keyup while suggestions are closed", async () => {
+  it("recomputes completion from the current text node selection", async () => {
     const wrapper = mount(EntryDetail, {
       props: { detail: entry(), loading: false },
     });
     await flushPromises();
-    const value = "[[first]]\n[[second";
-    await setEditor(wrapper, value, 4);
-    const editor = wrapper.get("textarea");
-    const element = editor.element as HTMLTextAreaElement;
-    element.setSelectionRange(value.length, value.length);
-
-    await editor.trigger("keydown", { key: "ArrowDown" });
-    await editor.trigger("keyup", { key: "ArrowDown" });
+    const editor = wrapper.findComponent({ name: "BlockEditor" });
+    await editor.vm.$emit("selectionChange", {
+      text: "[[first]] [[second",
+      caret: "[[first]] [[second".length,
+    });
     await vi.advanceTimersByTimeAsync(120);
     await flushPromises();
 
@@ -728,23 +776,17 @@ describe("EntryDetail", () => {
       [suggestion("canonical", "Canonical", "Legacy")],
       12,
     );
-    const editor = wrapper.get("textarea");
-
     await wrapper.get('[role="option"]').trigger("click");
     await flushPromises();
 
-    expect((editor.element as HTMLTextAreaElement).value).toBe(
-      "Before [[Canonical]] after",
-    );
-    expect((editor.element as HTMLTextAreaElement).selectionStart).toBe(20);
-    expect(document.activeElement).toBe(editor.element);
+    expect(editorText(wrapper)).toBe("Before [[Canonical]] after");
 
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
     expect(entriesUpdate).toHaveBeenCalledWith(
       detail.id,
       expect.objectContaining({
-        currentContent: "Before [[Canonical]] after",
+        document: documentContainingText("Before [[Canonical]] after"),
       }),
       0,
     );
@@ -763,16 +805,68 @@ async function openSuggestions(
   await flushPromises();
 }
 
+function contentEditor(wrapper: ReturnType<typeof mount>) {
+  return wrapper.get("[contenteditable]");
+}
+
+function editorDocument(wrapper: ReturnType<typeof mount>): BlockDocument {
+  return wrapper
+    .findComponent(EntryDetail)
+    .findComponent({ name: "BlockEditor" })
+    .props("modelValue") as BlockDocument;
+}
+
+function editorText(wrapper: ReturnType<typeof mount>): string {
+  return editorDocument(wrapper)
+    .blocks.flatMap((block) => block.content)
+    .filter((node) => node.type === "text")
+    .map((node) => node.text)
+    .join("");
+}
+
 async function setEditor(
   wrapper: ReturnType<typeof mount>,
   value: string,
   caret = value.length,
 ) {
-  const editor = wrapper.get("textarea");
-  const element = editor.element as HTMLTextAreaElement;
-  element.value = value;
-  element.setSelectionRange(caret, caret);
-  await editor.trigger("input");
+  const editor = wrapper.findComponent({ name: "BlockEditor" });
+  await editor.vm.$emit("update:modelValue", documentWithText(value));
+  await editor.vm.$emit("selectionChange", { text: value, caret });
+}
+
+async function emitEditorKeydown(
+  wrapper: ReturnType<typeof mount>,
+  event: KeyboardEvent,
+) {
+  await wrapper
+    .findComponent({ name: "BlockEditor" })
+    .vm.$emit("editorKeydown", event);
+}
+
+function documentContainingText(text: string) {
+  return expect.objectContaining({
+    blocks: [
+      expect.objectContaining({
+        kind: "paragraph",
+        content: [expect.objectContaining({ type: "text", text })],
+      }),
+    ],
+  });
+}
+
+function documentWithText(text: string): BlockDocument {
+  return {
+    schemaVersion: 1,
+    blocks: [
+      {
+        id: "550e8400-e29b-41d4-a716-446655440000",
+        kind: "paragraph",
+        attrs: { level: null, language: null, start: null },
+        content: text ? [{ type: "text", text, marks: [] }] : [],
+        children: [],
+      },
+    ],
+  };
 }
 
 function suggestion(

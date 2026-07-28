@@ -99,7 +99,6 @@ export type EntryDetail = {
 export type EntryPatch = {
   title: string | null;
   document: BlockDocument | null;
-  currentContent: string | null;
   entryType: EntryType | null;
   status: EntryStatus | null;
   tags: Array<string> | null;

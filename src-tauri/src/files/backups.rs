@@ -438,10 +438,18 @@ mod tests {
             repos::{EntriesRepo, KnowledgeRepo},
         },
         types::{
+            documents::{BlockDocument, BlockNode},
             entries::{EntryListFilter, EntryPatch, PageRequest},
             knowledge::KnowledgeState,
         },
     };
+
+    fn paragraph_document(content: impl Into<String>) -> BlockDocument {
+        BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            uuid::Uuid::new_v4().to_string(),
+            content,
+        )])
+    }
 
     #[test]
     fn creates_and_lists_sqlite_backup() {
@@ -543,7 +551,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("新标题".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -1012,11 +1019,10 @@ mod tests {
             &tx,
             &knowledge.id,
             EntryPatch {
-                document: None,
+                document: Some(paragraph_document(
+                    "Gate0 Knowledge body.\n\nRenamed after promote so alias is retained.",
+                )),
                 title: Some("Gate0 Knowledge".to_string()),
-                current_content: Some(
-                    "Gate0 Knowledge body.\n\nRenamed after promote so alias is retained.".into(),
-                ),
                 entry_type: None,
                 status: None,
                 tags: Some(vec!["gate0".into(), "baseline".into()]),

@@ -12,9 +12,32 @@ const LIST_ID = "6ba7b811-9dad-41d4-80b4-00c04fd430c8";
 const ITEM_ID = "6ba7b812-9dad-41d4-80b4-00c04fd430c8";
 
 type BlockEditorExposed = {
+  completeWikiLink: (
+    completion: { start: number; query: string },
+    title: string,
+  ) => boolean;
+  getEditor: () => {
+    commands: { setTextSelection: (position: number) => boolean };
+    state: { selection: { from: number } };
+  } | null;
   getEditorJson: () => Record<string, unknown> | null;
   setSnapshot: (snapshot: BlockDocument) => void;
 };
+
+function paragraphDocument(text: string): BlockDocument {
+  return {
+    schemaVersion: 1,
+    blocks: [
+      {
+        id: PARAGRAPH_ID,
+        kind: "paragraph",
+        attrs: { level: null, language: null, start: null },
+        content: text ? [{ type: "text", text, marks: [] }] : [],
+        children: [],
+      },
+    ],
+  };
+}
 
 function fixtureDocument(): BlockDocument {
   return {
@@ -134,6 +157,61 @@ describe("BlockEditor", () => {
         exposed.getEditorJson() as Parameters<typeof fromTiptapDocument>[0],
       ),
     ).toEqual(localDocument);
+
+    wrapper.unmount();
+  });
+
+  it("replaces only the current text node wiki link query and restores the caret", async () => {
+    const original = "Before [[leg after";
+    const wrapper = mount(BlockEditor, {
+      props: { modelValue: paragraphDocument(original) },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as BlockEditorExposed;
+    const editor = exposed.getEditor();
+    expect(editor).not.toBeNull();
+    editor?.commands.setTextSelection(1 + "Before [[leg".length);
+
+    expect(
+      exposed.completeWikiLink({ start: 9, query: "leg" }, "Canonical"),
+    ).toBe(true);
+    await nextTick();
+
+    const text = fromTiptapDocument(
+      exposed.getEditorJson() as Parameters<typeof fromTiptapDocument>[0],
+    )
+      .blocks[0].content.filter((node) => node.type === "text")
+      .map((node) => node.text)
+      .join("");
+    expect(text).toBe("Before [[Canonical]] after");
+    expect(editor?.state.selection.from).toBe(
+      1 + "Before [[Canonical]]".length,
+    );
+
+    wrapper.unmount();
+  });
+
+  it("does not replace text when completion is not a current wiki link", async () => {
+    const original = "Before leg after";
+    const wrapper = mount(BlockEditor, {
+      props: { modelValue: paragraphDocument(original) },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as BlockEditorExposed;
+    exposed.getEditor()?.commands.setTextSelection(1 + "Before leg".length);
+
+    expect(
+      exposed.completeWikiLink({ start: 7, query: "leg" }, "Canonical"),
+    ).toBe(false);
+    const text = fromTiptapDocument(
+      exposed.getEditorJson() as Parameters<typeof fromTiptapDocument>[0],
+    )
+      .blocks[0].content.filter((node) => node.type === "text")
+      .map((node) => node.text)
+      .join("");
+    expect(text).toBe(original);
 
     wrapper.unmount();
   });

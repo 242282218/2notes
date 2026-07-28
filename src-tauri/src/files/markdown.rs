@@ -152,8 +152,18 @@ mod tests {
             migrations::now_string,
             repos::{EntriesRepo, KnowledgeRepo},
         },
-        types::entries::{EntryPatch, EntryStatus},
+        types::{
+            documents::{BlockDocument, BlockNode},
+            entries::{EntryPatch, EntryStatus},
+        },
     };
+
+    fn paragraph_document(content: impl Into<String>) -> BlockDocument {
+        BlockDocument::from_blocks(vec![BlockNode::paragraph(
+            uuid::Uuid::new_v4().to_string(),
+            content,
+        )])
+    }
 
     #[test]
     fn exports_parseable_frontmatter_and_sanitized_names() {
@@ -165,9 +175,8 @@ mod tests {
             &tx,
             &entry.id,
             EntryPatch {
-                document: None,
+                document: Some(paragraph_document("changed")),
                 title: Some("hello <>:\"/\\|?* world".to_string()),
-                current_content: Some("changed".to_string()),
                 entry_type: None,
                 status: Some(EntryStatus::Done),
                 tags: Some(vec!["a:b".to_string(), "中文".to_string()]),
@@ -208,7 +217,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("旧标题".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,
@@ -224,7 +232,6 @@ mod tests {
             EntryPatch {
                 document: None,
                 title: Some("新标题".to_string()),
-                current_content: None,
                 entry_type: None,
                 status: None,
                 tags: None,

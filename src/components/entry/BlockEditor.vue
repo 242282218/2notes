@@ -12,21 +12,68 @@ import {
   toTiptapDocument,
   type TiptapNode,
 } from "../../editor/tiptapAdapter";
+import type { WikiLinkCompletion } from "../../composables/useWikiLinkCompletion";
+
+export interface EditorTextContext {
+  text: string;
+  caret: number;
+}
+
+type TextContextEditor = {
+  state: {
+    selection: {
+      empty: boolean;
+      $from: {
+        parent: { isTextblock: boolean };
+        nodeBefore: { isText: boolean; text?: string; nodeSize: number } | null;
+        nodeAfter: { isText: boolean; text?: string; nodeSize: number } | null;
+        textOffset: number;
+      };
+    };
+  };
+};
 
 const props = withDefaults(
   defineProps<{
     modelValue: BlockDocument;
     disabled?: boolean;
+    wikiSuggestionsOpen?: boolean;
+    wikiListboxId?: string;
+    wikiActiveDescendant?: string;
   }>(),
-  { disabled: false },
+  {
+    disabled: false,
+    wikiSuggestionsOpen: false,
+    wikiListboxId: undefined,
+    wikiActiveDescendant: undefined,
+  },
 );
 
 const emit = defineEmits<{
   "update:modelValue": [document: BlockDocument];
+  selectionChange: [context: EditorTextContext | null];
+  editorKeydown: [event: KeyboardEvent];
+  editorBlur: [];
 }>();
 
 const editor = shallowRef<Editor | null>(null);
 let lastEmittedSnapshot: string | null = null;
+
+function editorAttributes(): Record<string, string> {
+  const attributes: Record<string, string> = {
+    "aria-expanded": props.wikiSuggestionsOpen ? "true" : "false",
+    "aria-label": "正文",
+    role: "combobox",
+  };
+  if (props.wikiSuggestionsOpen) {
+    attributes["aria-autocomplete"] = "list";
+    if (props.wikiListboxId) attributes["aria-controls"] = props.wikiListboxId;
+    if (props.wikiActiveDescendant) {
+      attributes["aria-activedescendant"] = props.wikiActiveDescendant;
+    }
+  }
+  return attributes;
+}
 
 function snapshotKey(snapshot: BlockDocument): string {
   return JSON.stringify(snapshot);
@@ -60,8 +107,74 @@ function createEditor() {
       const document = fromTiptapDocument(activeEditor.getJSON());
       lastEmittedSnapshot = snapshotKey(document);
       emit("update:modelValue", document);
+      emit("selectionChange", getTextContext(activeEditor));
+    },
+    onSelectionUpdate: ({ editor: activeEditor }) => {
+      emit("selectionChange", getTextContext(activeEditor));
+    },
+    onBlur: () => emit("editorBlur"),
+    editorProps: {
+      attributes: editorAttributes(),
+      handleKeyDown: (_, event) => {
+        emit("editorKeydown", event);
+        return event.defaultPrevented;
+      },
     },
   });
+}
+
+function getTextContext(
+  activeEditor: TextContextEditor,
+): EditorTextContext | null {
+  const selection = activeEditor.state.selection;
+  if (!selection.empty || !selection.$from.parent.isTextblock) return null;
+
+  const before = selection.$from.nodeBefore;
+  const after = selection.$from.nodeAfter;
+  if (selection.$from.textOffset > 0 && before?.isText && after?.isText) {
+    return {
+      text: `${before.text ?? ""}${after.text ?? ""}`,
+      caret: selection.$from.textOffset,
+    };
+  }
+  if (before?.isText) {
+    return { text: before.text ?? "", caret: before.nodeSize };
+  }
+  if (after?.isText) {
+    return { text: after.text ?? "", caret: 0 };
+  }
+  return { text: "", caret: 0 };
+}
+
+function completeWikiLink(
+  completion: WikiLinkCompletion,
+  title: string,
+): boolean {
+  const activeEditor = editor.value;
+  if (!activeEditor) return false;
+  const context = getTextContext(activeEditor);
+  if (
+    !context ||
+    completion.start < 2 ||
+    completion.start + completion.query.length !== context.caret ||
+    context.text.slice(completion.start - 2, completion.start) !== "[["
+  ) {
+    return false;
+  }
+
+  const from =
+    activeEditor.state.selection.from - (context.caret - completion.start + 2);
+  const replacement = `[[${title}]]`;
+  activeEditor
+    .chain()
+    .focus()
+    .insertContentAt(
+      { from, to: activeEditor.state.selection.from },
+      replacement,
+    )
+    .setTextSelection(from + replacement.length)
+    .run();
+  return true;
 }
 
 function setSnapshot(snapshot: BlockDocument) {
@@ -94,6 +207,24 @@ watch(
   (disabled) => editor.value?.setEditable(!disabled),
 );
 
+watch(
+  [
+    () => props.wikiSuggestionsOpen,
+    () => props.wikiListboxId,
+    () => props.wikiActiveDescendant,
+  ],
+  () =>
+    editor.value?.setOptions({
+      editorProps: {
+        attributes: editorAttributes(),
+        handleKeyDown: (_, event) => {
+          emit("editorKeydown", event);
+          return event.defaultPrevented;
+        },
+      },
+    }),
+);
+
 onMounted(() => {
   editor.value = createEditor();
 });
@@ -103,7 +234,12 @@ onBeforeUnmount(() => {
   editor.value = null;
 });
 
-defineExpose({ getEditorJson, setSnapshot });
+defineExpose({
+  completeWikiLink,
+  getEditor: () => editor.value,
+  getEditorJson,
+  setSnapshot,
+});
 </script>
 
 <template>
