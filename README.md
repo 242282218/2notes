@@ -57,6 +57,20 @@ pnpm run tauri:build
 
 这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证真实打包链路。
 
+### 已安装 NSIS 冒烟
+
+以下命令会静默安装 NSIS 包到唯一的 `.tmp` 目录，并且只从安装目录中的 `two_notes.exe` 启动。它以 `TWONOTES_TEST_ROOT` 隔离数据，使用真实 CDP 鼠标/键盘和原生目录对话框完成快速捕获、主窗编辑、WikiLink、搜索、知识树/大纲/健康、回收站、Markdown 导入导出、备份恢复与重启；SQLite 仅以只读查询生成最终证据。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/installed-nsis-smoke.ps1 `
+  -InstallerPath src-tauri/target/release/bundle/nsis/2notes_0.3.0_x64-setup.exe `
+  -EvidenceRoot .tmp/installed-nsis-full-smoke `
+  -CdpPort 9822 `
+  -KeepArtifacts
+```
+
+成功时控制台输出 `NSIS_SMOKE_STATUS=passed`。每次运行的 manifest、CDP 截图与事件、原生目录对话框记录、导出清单和 SQLite 只读结论都保存在 `.tmp/installed-nsis-full-smoke/<run-id>/evidence/`。该 runner 不使用源码 release EXE、直接 Tauri command、store/composable/Tiptap API 或 SQL 预置业务数据替代 UI 流程。
+
 ## 开发
 
 ```bash
