@@ -129,6 +129,8 @@ function refresh() {
 watch(
   () => props.invalidatedToken,
   () => {
+    summaryRequestId += 1;
+    summaryLoading.value = false;
     stale.value = true;
   },
 );

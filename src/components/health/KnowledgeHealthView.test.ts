@@ -89,6 +89,23 @@ describe("KnowledgeHealthView", () => {
     expect(wrapper.emitted("openEntry")).toEqual([["entry-1"]]);
   });
 
+  it("keeps the stale marker when an invalidated summary request resolves", async () => {
+    const pendingSummary = deferred<typeof summary>();
+    vi.mocked(knowledgeHealthSummaryGet).mockReturnValue(
+      pendingSummary.promise,
+    );
+    const wrapper = mount(KnowledgeHealthView, {
+      props: { invalidatedToken: 0 },
+    });
+
+    await wrapper.setProps({ invalidatedToken: 1 });
+    pendingSummary.resolve(summary);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("数据已变化，点击刷新查看最新报告。");
+    expect(knowledgeHealthSummaryGet).toHaveBeenCalledOnce();
+  });
+
   it("marks data stale without issuing a request after invalidation", async () => {
     const wrapper = mount(KnowledgeHealthView, {
       props: { invalidatedToken: 0 },
