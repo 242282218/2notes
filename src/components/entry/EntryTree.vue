@@ -283,6 +283,7 @@ onBeforeUnmount(() =>
           type="button"
           :aria-label="expandedIds.has(node.id) ? '折叠' : '展开'"
           :aria-expanded="expandedIds.has(node.id)"
+          :data-tree-toggle="node.id"
           @click="toggle(node)"
         >
           <ChevronDown
@@ -346,6 +347,7 @@ onBeforeUnmount(() =>
             class="menu-item max-w-56 truncate text-left"
             type="button"
             role="menuitem"
+            :data-tree-move-target="target.id"
             @click="emit('move', node.id, target.id)"
           >
             {{ target.title || "无标题" }}

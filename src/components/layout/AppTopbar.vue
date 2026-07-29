@@ -241,6 +241,7 @@ defineExpose({
       </button>
 
       <button
+        data-testid="create-entry"
         type="button"
         class="btn-primary min-w-0 px-3 text-ui"
         :disabled="creatingEntry"

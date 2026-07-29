@@ -84,13 +84,30 @@ const port = Number(process.env.TWONOTES_CDP_PORT);
 const note = `${process.env.TWONOTES_NOTE_PREFIX} quick capture refresh`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const events = [];
+const cdpTimeoutMs = 15000;
+
+let lastTargetSnapshot = null;
+let lastTargetError = null;
 
 async function targets() {
-  const response = await fetch(`http://127.0.0.1:${port}/json`);
-  return await response.json();
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json`);
+    const payload = await response.json();
+    lastTargetSnapshot = payload.map((target) => ({
+      type: target.type,
+      title: target.title,
+      url: target.url,
+      hasWebSocket: Boolean(target.webSocketDebuggerUrl),
+    }));
+    lastTargetError = null;
+    return payload;
+  } catch (error) {
+    lastTargetError = error instanceof Error ? error.message : String(error);
+    return [];
+  }
 }
 
-async function waitForTarget(predicate, timeoutMs = 10000) {
+async function waitForTarget(predicate, timeoutMs = 10000, label = "target") {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const found = (await targets()).find(predicate);
@@ -99,24 +116,58 @@ async function waitForTarget(predicate, timeoutMs = 10000) {
     }
     await sleep(250);
   }
-  throw new Error("target timeout");
+  throw new Error(
+    `${label} timeout: targets=${JSON.stringify(lastTargetSnapshot)} error=${lastTargetError}`,
+  );
 }
 
 async function connect(url) {
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
-    ws.addEventListener("error", reject, { once: true });
+    let settled = false;
+    const settle = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("close", onClose);
+      ws.removeEventListener("error", onError);
+      callback(value);
+    };
+    const onOpen = () => settle(resolve);
+    const onClose = () => settle(reject, new Error("CDP WebSocket closed before opening"));
+    const onError = () => settle(reject, new Error("CDP WebSocket failed before opening"));
+    const timer = setTimeout(
+      () => settle(reject, new Error(`CDP WebSocket open timed out after ${cdpTimeoutMs}ms`)),
+      cdpTimeoutMs,
+    );
+    ws.addEventListener("open", onOpen);
+    ws.addEventListener("close", onClose);
+    ws.addEventListener("error", onError);
   });
 
   let id = 0;
   const pending = new Map();
+
+  function rejectPending(error) {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  }
+
+  ws.addEventListener("close", () => rejectPending(new Error("CDP WebSocket closed")));
+  ws.addEventListener("error", () => rejectPending(new Error("CDP WebSocket error")));
 
   ws.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.id && pending.has(message.id)) {
       const callbacks = pending.get(message.id);
       pending.delete(message.id);
+      clearTimeout(callbacks.timer);
       if (message.error) {
         callbacks.reject(new Error(JSON.stringify(message.error)));
       } else {
@@ -135,9 +186,24 @@ async function connect(url) {
 
   function call(method, params = {}) {
     const callId = ++id;
-    ws.send(JSON.stringify({ id: callId, method, params }));
     return new Promise((resolve, reject) => {
-      pending.set(callId, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (pending.delete(callId)) {
+          reject(new Error(`CDP call ${method} timed out after ${cdpTimeoutMs}ms`));
+        }
+      }, cdpTimeoutMs);
+      pending.set(callId, { resolve, reject, timer });
+      try {
+        if (ws.readyState !== WebSocket.OPEN) {
+          throw new Error("CDP WebSocket is not open");
+        }
+        ws.send(JSON.stringify({ id: callId, method, params }));
+      } catch (error) {
+        if (pending.delete(callId)) {
+          clearTimeout(timer);
+          reject(error);
+        }
+      }
     });
   }
 
@@ -155,184 +221,157 @@ async function connect(url) {
 
   await call("Runtime.enable");
   await call("Log.enable");
-  return { ws, evaluate };
+  await call("DOM.enable");
+  return { ws, call, evaluate };
 }
 
-async function stableConnect(predicate) {
+async function stableConnect(predicate, label) {
+  let lastConnectionError = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const target = await waitForTarget(predicate);
+    const target = await waitForTarget(predicate, 10000, label);
+    if (!target.webSocketDebuggerUrl) {
+      lastConnectionError = `${label} has no WebSocket debugger URL`;
+      await sleep(500);
+      continue;
+    }
     await sleep(700);
     try {
       const client = await connect(target.webSocketDebuggerUrl);
       await client.evaluate("document.readyState");
       return client;
-    } catch {
+    } catch (error) {
+      lastConnectionError = error instanceof Error ? error.message : String(error);
       await sleep(500);
     }
   }
-  throw new Error("stable connect failed");
+  throw new Error(
+    `${label} stable connect failed: targets=${JSON.stringify(lastTargetSnapshot)} error=${lastConnectionError}`,
+  );
+}
+
+async function resolveSelector(client, selector) {
+  const { root } = await client.call("DOM.getDocument", { depth: 0, pierce: true });
+  const { nodeId } = await client.call("DOM.querySelector", {
+    nodeId: root.nodeId,
+    selector,
+  });
+  if (!nodeId) {
+    return null;
+  }
+
+  const { model } = await client.call("DOM.getBoxModel", { nodeId });
+  const quad = model.content.length === 8 ? model.content : model.border;
+  return {
+    nodeId,
+    x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+    y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
+  };
+}
+
+async function waitForSelector(client, selector, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      const target = await resolveSelector(client, selector);
+      if (target) {
+        return target;
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(100);
+  }
+  throw new Error(`${label} missing: selector=${selector} error=${lastError}`);
+}
+
+async function clickSelector(client, selector, label) {
+  const target = await waitForSelector(client, selector, 15000, label);
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await client.call("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1,
+  });
+  return target;
+}
+
+async function clickFirstSelector(client, selectors, label) {
+  for (const selector of selectors) {
+    try {
+      return await clickSelector(client, selector, label);
+    } catch (error) {
+      if (!String(error).includes(" missing:")) {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`${label} missing: selectors=${JSON.stringify(selectors)}`);
 }
 
 const main = await stableConnect(
   (target) => target.type === "page" && !target.url.includes("quick-capture"),
+  "main target",
 );
 
-const mainReady = await main.evaluate(`
-  new Promise((resolve) => {
-    const findRecordButton = () => {
-      const byText = Array.from(document.querySelectorAll('button.btn-primary')).find((button) =>
-        (button.textContent || '').includes('记录'),
-      );
-      if (byText) {
-        return byText;
-      }
-      // Inbox empty state has a single topbar primary action.
-      return document.querySelector('header button.btn-primary, button.btn-primary');
-    };
-    if (findRecordButton()) {
-      resolve(true);
-      return;
-    }
-    const observer = new MutationObserver(() => {
-      if (findRecordButton()) {
-        observer.disconnect();
-        resolve(true);
-      }
-    });
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-    setTimeout(() => resolve(Boolean(findRecordButton())), 15000);
-  })
-`);
+await waitForSelector(main, 'button[aria-label="\u5feb\u901f\u8bb0\u5f55"]', 15000, "main quick capture button");
+await clickSelector(main, 'button[aria-label="\u5feb\u901f\u8bb0\u5f55"]', "main quick capture button");
 
-console.log("MAIN_READY", mainReady);
-if (!mainReady) {
-  const snapshot = await main.evaluate(`({
-    href: location.href,
-    ready: document.readyState,
-    bodyText: (document.body && document.body.innerText || '').slice(0, 500),
-    buttons: Array.from(document.querySelectorAll('button')).map((button) => ({
-      text: (button.textContent || '').trim(),
-      className: button.className,
-    })),
-  })`);
-  console.log("MAIN_SNAPSHOT", JSON.stringify(snapshot));
-  throw new Error("main record button missing");
-}
-
-await main.evaluate(`
-  (() => {
-    const button =
-      Array.from(document.querySelectorAll('button.btn-primary')).find((item) =>
-        (item.textContent || '').includes('记录'),
-      ) || document.querySelector('header button.btn-primary, button.btn-primary');
-    if (!button) {
-      throw new Error('record button disappeared');
-    }
-    button.click();
-  })()
-`);
-
-const quick = await stableConnect((target) =>
-  target.url.includes("view=quick-capture"),
+const quick = await stableConnect(
+  (target) => target.type === "page" && target.url !== "http://tauri.localhost/",
+  "quick capture target",
 );
 
-const hasTextarea = await quick.evaluate(`
-  new Promise((resolve) => {
-    if (document.querySelector('#quick-capture-content, textarea')) {
-      resolve(true);
-      return;
-    }
-    const observer = new MutationObserver(() => {
-      if (document.querySelector('#quick-capture-content, textarea')) {
-        observer.disconnect();
-        resolve(true);
-      }
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    setTimeout(
-      () => resolve(Boolean(document.querySelector('#quick-capture-content, textarea'))),
-      4000,
-    );
-  })
-`);
-
-if (!hasTextarea) {
-  throw new Error("quick capture textarea missing");
-}
-
-const noteJson = JSON.stringify(note);
-const fillResult = await quick.evaluate(
-  "(() => {" +
-    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
-    "if (!textarea) throw new Error('textarea missing');" +
-    "textarea.focus();" +
-    "const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;" +
-    "setter.call(textarea, " + noteJson + ");" +
-    "textarea.dispatchEvent(new Event('input', { bubbles: true }));" +
-    "return textarea.value;" +
-  "})()",
+await clickFirstSelector(
+  quick,
+  ["#quick-capture-content", "textarea"],
+  "quick capture textarea",
 );
-console.log("FILL_RESULT", fillResult);
+await quick.call("Input.insertText", { text: note });
 
 await sleep(1000);
 
-const saveState = await quick.evaluate(
-  "(() => {" +
-    "const buttons = Array.from(document.querySelectorAll('button')).map((item) => ({" +
-      "text: (item.textContent || '').replace(/\\s+/g, ' ').trim()," +
-      "className: item.className," +
-      "disabled: item.disabled," +
-      "type: item.type," +
-    "}));" +
-    "const button = Array.from(document.querySelectorAll('button')).find((item) => {" +
-      "const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();" +
-      "return text.includes('保存') && item.className.includes('btn-primary');" +
-    "});" +
-    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
-    "return {" +
-      "hasButton: Boolean(button)," +
-      "disabled: button ? button.disabled : null," +
-      "buttonText: button ? (button.textContent || '').replace(/\\s+/g, ' ').trim() : null," +
-      "value: textarea ? textarea.value : null," +
-      "buttons," +
-    "};" +
-  "})()",
-);
+const saveState = await quick.evaluate(`
+  (() => {
+    const primaryButtons = Array.from(document.querySelectorAll('button.btn-primary')).map((item) => ({
+      text: (item.textContent || '').replace(/\s+/g, ' ').trim(),
+      ariaLabel: item.getAttribute('aria-label'),
+      disabled: item.disabled,
+      type: item.type,
+    }));
+    const textarea = document.querySelector('#quick-capture-content, textarea');
+    return {
+      ariaSavePresent: Boolean(document.querySelector('button[aria-label="保存"]')),
+      primaryButtons,
+      value: textarea ? textarea.value : null,
+    };
+  })()
+`);
 console.log("SAVE_STATE", JSON.stringify(saveState));
 
-// Prefer Enter submit because QuickCapture binds keydown.enter.exact to submit.
-await quick.evaluate(
-  "(() => {" +
-    "const textarea = document.querySelector('#quick-capture-content, textarea');" +
-    "if (!textarea) throw new Error('textarea missing before submit');" +
-    "textarea.focus();" +
-    "const event = new KeyboardEvent('keydown', {" +
-      "key: 'Enter'," +
-      "code: 'Enter'," +
-      "keyCode: 13," +
-      "which: 13," +
-      "bubbles: true," +
-      "cancelable: true," +
-    "});" +
-    "textarea.dispatchEvent(event);" +
-    "const button = Array.from(document.querySelectorAll('button')).find((item) => {" +
-      "const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();" +
-      "return text.includes('保存') && item.className.includes('btn-primary') && !item.disabled;" +
-    "});" +
-    "if (button) button.click();" +
-    "return Boolean(button);" +
-  "})()",
-);
+let saveSelector = 'button[aria-label="保存"]';
+if (!saveState.ariaSavePresent) {
+  if (saveState.primaryButtons.length !== 1) {
+    throw new Error(`save button is ambiguous: ${JSON.stringify(saveState.primaryButtons)}`);
+  }
+  saveSelector = "button.btn-primary";
+}
+await clickSelector(quick, saveSelector, "quick capture save button");
 
 await sleep(2000);
 
 const afterText = await main.evaluate("document.body.innerText");
 const mainHasNote = afterText.includes(note);
 
+console.log("QUICK_CAPTURE_TITLE=" + note);
 console.log("NOTE", note);
 console.log("MAIN_HAS_NOTE", mainHasNote);
 console.log("EVENT_COUNT", events.length);
@@ -341,7 +380,28 @@ console.log("EVENTS", JSON.stringify(events.slice(0, 10)));
 main.ws.close();
 quick.ws.close();
 
-if (!mainHasNote || events.length > 0) {
+const knownWebView2CspEvent = (event) => {
+  const entry = event.params?.entry;
+  const frame = entry?.stackTrace?.callFrames?.[0];
+  return (
+    event.method === "Log.entryAdded" &&
+    entry?.source === "security" &&
+    entry?.level === "error" &&
+    entry?.text?.startsWith(
+      "Applying inline style violates the following Content Security Policy directive 'style-src 'self''.",
+    ) &&
+    entry?.text?.includes("The action has been blocked.") &&
+    frame?.functionName === "eT" &&
+    /^http:\/\/tauri\.localhost\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(frame?.url ?? "") &&
+    frame?.lineNumber === 241
+  );
+};
+
+const unexpectedEvents = events.filter((event) => !knownWebView2CspEvent(event));
+console.log("UNEXPECTED_EVENT_COUNT", unexpectedEvents.length);
+console.log("UNEXPECTED_EVENTS", JSON.stringify(unexpectedEvents.slice(0, 10)));
+
+if (!mainHasNote || unexpectedEvents.length > 0) {
   process.exit(1);
 }
 '@

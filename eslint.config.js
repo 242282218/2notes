@@ -6,6 +6,8 @@ export default tseslint.config(
   {
     ignores: [
       "dist/**",
+      ".tmp/**",
+      "output/**",
       "src-tauri/target/**",
       "src/types/generated.ts",
       // Local agent scaffolding, not part of the shipped app source
