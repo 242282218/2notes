@@ -389,6 +389,9 @@ export const useEntriesStore = defineStore("entries", () => {
     filters.tag = nextTag;
     selectedId.value = null;
     detail.value = null;
+    if (nextView === "health") {
+      return;
+    }
     await loadEntries(true, () => true, false, queryChanged);
     await refreshTags();
   }

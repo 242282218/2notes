@@ -52,6 +52,8 @@ mod tests {
             | "knowledge_suggest"
             | "knowledge_tree_get"
             | "knowledge_breadcrumbs_get"
+            | "knowledge_health_summary_get"
+            | "knowledge_health_issues_get"
             | "knowledge_relations_get"
             | "knowledge_rebuild_index"
             | "knowledge_promote"
@@ -124,6 +126,8 @@ mod tests {
             "knowledge_suggest",
             "knowledge_tree_get",
             "knowledge_breadcrumbs_get",
+            "knowledge_health_summary_get",
+            "knowledge_health_issues_get",
             "knowledge_relations_get",
             "knowledge_rebuild_index",
             "knowledge_promote",
@@ -216,6 +220,8 @@ mod tests {
             "knowledge_suggest",
             "knowledge_tree_get",
             "knowledge_breadcrumbs_get",
+            "knowledge_health_summary_get",
+            "knowledge_health_issues_get",
             "knowledge_relations_get",
             "knowledge_rebuild_index",
             "knowledge_promote",

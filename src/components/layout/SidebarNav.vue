@@ -2,6 +2,7 @@
 import {
   BookOpen,
   Feather,
+  HeartPulse,
   Inbox,
   Search,
   Settings,
@@ -23,6 +24,7 @@ defineEmits<{
 const primaryItems: Array<{ view: AppView; label: string; icon: Component }> = [
   { view: "inbox", label: "收集箱", icon: Inbox },
   { view: "knowledge", label: "知识库", icon: BookOpen },
+  { view: "health", label: "知识健康", icon: HeartPulse },
   { view: "search", label: "搜索", icon: Search },
   { view: "tags", label: "标签", icon: Tags },
   { view: "trash", label: "回收站", icon: Trash2 },

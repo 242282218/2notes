@@ -417,6 +417,21 @@ describe("entries store", () => {
     expect(store.items.map((item) => item.id)).toEqual(["new-entry"]);
   });
 
+  it("does not load entries or tags for the health workspace", async () => {
+    const store = useEntriesStore();
+    store.items = pageWith(entry("old-entry")).items;
+    store.selectedId = "old-entry";
+    store.detail = entry("old-entry");
+
+    await store.setView("health");
+
+    expect(store.view).toBe("health");
+    expect(store.selectedId).toBeNull();
+    expect(store.detail).toBeNull();
+    expect(entriesList).not.toHaveBeenCalled();
+    expect(tagsList).not.toHaveBeenCalled();
+  });
+
   it("keeps current items visible during a reconcile reload", async () => {
     const store = selectedStore();
     const pendingPage = deferred<ReturnType<typeof pageWith>>();

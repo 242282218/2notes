@@ -5,11 +5,13 @@ use crate::{
     commands::{require_main_window, run_blocking},
     db::{
         migrations::now_string,
-        repos::{HierarchyRepo, KnowledgeRepo},
+        repos::{HealthRepo, HierarchyRepo, KnowledgeRepo},
     },
     error::{AppErrorResponse, CommandResult},
     types::{
         entries::EntryDetail,
+        entries::PageRequest,
+        health::{HealthIssueKind, HealthIssuePage, KnowledgeHealthSummary},
         hierarchy::{EntryBreadcrumb, EntryTreeNode},
         knowledge::{KnowledgeIndexReport, KnowledgeRelations, KnowledgeSuggestion},
     },
@@ -47,6 +49,29 @@ pub fn knowledge_breadcrumbs_get(
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     let conn = state.read_conn().map_err(AppErrorResponse::from)?;
     HierarchyRepo::breadcrumbs(&conn, &id).map_err(AppErrorResponse::from)
+}
+
+#[tauri::command]
+pub fn knowledge_health_summary_get(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> CommandResult<KnowledgeHealthSummary> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
+    HealthRepo::summary(&conn, time::OffsetDateTime::now_utc()).map_err(AppErrorResponse::from)
+}
+
+#[tauri::command]
+pub fn knowledge_health_issues_get(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    kind: HealthIssueKind,
+    page: PageRequest,
+) -> CommandResult<HealthIssuePage> {
+    require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
+    HealthRepo::issues(&conn, kind, &page, time::OffsetDateTime::now_utc())
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]

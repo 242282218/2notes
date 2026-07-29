@@ -34,6 +34,30 @@ export type KnowledgeIndexReport = {
   projectedBlocks: number;
   repairedDocuments: number;
 };
+export type HealthIssueKind =
+  | "unresolved_link"
+  | "orphan_knowledge"
+  | "untagged_knowledge"
+  | "stale_capture";
+export type KnowledgeHealthSummary = {
+  unresolvedLink: number;
+  orphanKnowledge: number;
+  untaggedKnowledge: number;
+  staleCapture: number;
+};
+export type HealthIssue = {
+  entryId: string;
+  title: string | null;
+  updatedAt: string;
+  rawTarget: string | null;
+  occurrenceCount: number | null;
+};
+export type HealthIssuePage = {
+  items: Array<HealthIssue>;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+};
 export type EntryTreeNode = {
   id: string;
   title: string;

@@ -1,6 +1,7 @@
 pub mod backups;
 pub mod documents;
 pub mod entries;
+pub mod health;
 pub mod hierarchy;
 pub mod knowledge;
 pub mod settings;
@@ -20,6 +21,7 @@ mod tests {
             CreateEntrySpec, DocumentRepairReport, EntryDetail, EntryListFilter, EntryListItem,
             EntryPage, EntryPatch, EntryStatus, EntryType, PageRequest, TitleSource,
         },
+        health::{HealthIssue, HealthIssueKind, HealthIssuePage, KnowledgeHealthSummary},
         hierarchy::{EntryBreadcrumb, EntryTreeNode},
         knowledge::{
             KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
@@ -44,6 +46,10 @@ mod tests {
             SearchSnippetPart::decl(&config),
             SearchSnippet::decl(&config),
             KnowledgeIndexReport::decl(&config),
+            HealthIssueKind::decl(&config),
+            KnowledgeHealthSummary::decl(&config),
+            HealthIssue::decl(&config),
+            HealthIssuePage::decl(&config),
             EntryTreeNode::decl(&config),
             EntryBreadcrumb::decl(&config),
             Tag::decl(&config),

@@ -14,6 +14,7 @@ import EntryDetail from "../entry/EntryDetail.vue";
 import type { EntryDetailToolbarState } from "../entry/entryDetailToolbar";
 import EntryList from "../entry/EntryList.vue";
 import EntryTree from "../entry/EntryTree.vue";
+import KnowledgeHealthView from "../health/KnowledgeHealthView.vue";
 import SettingsView from "../settings/SettingsView.vue";
 import AppTopbar from "./AppTopbar.vue";
 import SidebarNav from "./SidebarNav.vue";
@@ -25,6 +26,7 @@ const topbarRef = ref<InstanceType<typeof AppTopbar> | null>(null);
 const tagPanelOpen = ref(false);
 const creatingEntry = ref(false);
 const knowledgeTreeToken = ref(0);
+const healthInvalidationToken = ref(0);
 const tagPanelRef = ref<InstanceType<typeof TagFilterPanel> | null>(null);
 const toolbarState = ref<EntryDetailToolbarState>({
   saveState: "idle",
@@ -40,6 +42,7 @@ let disposed = false;
 const viewLabels: Record<AppView, string> = {
   inbox: "收集箱",
   knowledge: "知识库",
+  health: "知识健康",
   search: "搜索",
   tags: "标签",
   trash: "回收站",
@@ -47,7 +50,10 @@ const viewLabels: Record<AppView, string> = {
 };
 const currentViewLabel = computed(() => viewLabels[entries.view]);
 const showDetailActions = computed(
-  () => entries.view !== "settings" && Boolean(entries.detail),
+  () =>
+    entries.view !== "settings" &&
+    entries.view !== "health" &&
+    Boolean(entries.detail),
 );
 const searchQuery = ref(entries.filters.query);
 watch(
@@ -113,8 +119,10 @@ onMounted(async () => {
   if (!isTauri()) return;
   const unlisten = await listen("entries-changed", async () => {
     if (await flushDetail()) {
-      await entries.load();
-      await entries.refreshTags();
+      if (entries.view !== "health") {
+        await entries.load();
+        await entries.refreshTags();
+      }
       entries.noteExternalChange();
     }
   });
@@ -162,6 +170,7 @@ async function moveKnowledgeEntry(id: string, parentId: string | null) {
       entries.applyEntryListUpdate(updated);
     }
     knowledgeTreeToken.value += 1;
+    healthInvalidationToken.value += 1;
   } catch (cause) {
     if (
       entries.selectionGeneration === requestGeneration &&
@@ -269,6 +278,17 @@ function setQuery(value: string) {
           <SettingsView />
         </section>
         <section
+          v-else-if="entries.view === 'health'"
+          class="h-full overflow-auto"
+        >
+          <KnowledgeHealthView
+            :invalidated-token="
+              healthInvalidationToken + entries.externalChangeToken
+            "
+            @open-entry="openRelatedEntry"
+          />
+        </section>
+        <section
           v-else
           class="grid h-full min-h-0 grid-cols-[minmax(300px,34%)_minmax(0,1fr)]"
         >
@@ -299,30 +319,35 @@ function setQuery(value: string) {
               (entry, generation) => {
                 entries.applySavedEntry(entry, generation);
                 knowledgeTreeToken += 1;
+                healthInvalidationToken += 1;
               }
             "
             @entry-updated="
               (entry) => {
                 entries.applyEntryListUpdate(entry);
                 knowledgeTreeToken += 1;
+                healthInvalidationToken += 1;
               }
             "
             @trash="
               async () => {
                 await entries.moveSelectedToTrash();
                 knowledgeTreeToken += 1;
+                healthInvalidationToken += 1;
               }
             "
             @restore="
               async () => {
                 await entries.restoreSelected();
                 knowledgeTreeToken += 1;
+                healthInvalidationToken += 1;
               }
             "
             @delete-forever="
               async () => {
                 await entries.deleteSelectedForever();
                 knowledgeTreeToken += 1;
+                healthInvalidationToken += 1;
               }
             "
             @open-related="openRelatedEntry"

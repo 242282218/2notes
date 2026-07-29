@@ -56,6 +56,8 @@ pub fn run() {
             commands::knowledge::knowledge_suggest,
             commands::knowledge::knowledge_tree_get,
             commands::knowledge::knowledge_breadcrumbs_get,
+            commands::knowledge::knowledge_health_summary_get,
+            commands::knowledge::knowledge_health_issues_get,
             commands::knowledge::knowledge_relations_get,
             commands::knowledge::knowledge_rebuild_index,
             commands::knowledge::knowledge_promote,

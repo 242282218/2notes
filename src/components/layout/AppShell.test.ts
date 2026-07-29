@@ -138,6 +138,7 @@ function mountShell(attachTo?: HTMLElement) {
         SidebarNav: true,
         EntryList: EntryListStub,
         EntryTree: true,
+        KnowledgeHealthView: true,
         EntryDetail: EntryDetailStub,
         SettingsView: true,
       },
@@ -184,6 +185,18 @@ describe("AppShell selection commit boundary", () => {
     }
   });
 
+  it("renders the health workspace without the entry list or detail", async () => {
+    entries.view = "health";
+    const wrapper = mountShell();
+    await flushPromises();
+
+    expect(
+      wrapper.findComponent({ name: "KnowledgeHealthView" }).exists(),
+    ).toBe(true);
+    expect(wrapper.find('[data-testid="entry-list"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="entry-detail"]').exists()).toBe(false);
+  });
+
   it("does not replace store detail when flush fails for selection and navigation", async () => {
     detailCommands.flushPendingSave.mockResolvedValue(false);
     const wrapper = mountShell();
@@ -227,6 +240,29 @@ describe("AppShell selection commit boundary", () => {
     expect(entries.load).not.toHaveBeenCalled();
     expect(entries.refreshTags).not.toHaveBeenCalled();
     expect(entries.noteExternalChange).not.toHaveBeenCalled();
+  });
+
+  it("does not reload entries when an external change arrives in health", async () => {
+    const handlers: Array<() => Promise<void> | void> = [];
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.listen.mockImplementation(async (_event, handler) => {
+      handlers.push(handler as () => Promise<void> | void);
+      return vi.fn();
+    });
+    entries.view = "health";
+
+    mountShell();
+    await flushPromises();
+    entries.load.mockClear();
+    entries.refreshTags.mockClear();
+    entries.noteExternalChange.mockClear();
+
+    await handlers[0]();
+    await flushPromises();
+
+    expect(entries.load).not.toHaveBeenCalled();
+    expect(entries.refreshTags).not.toHaveBeenCalled();
+    expect(entries.noteExternalChange).toHaveBeenCalledOnce();
   });
 
   it("commits selection after a successful flush", async () => {
