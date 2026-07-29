@@ -433,8 +433,14 @@ fn build_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
     use crate::{
-        db::{connection::open_in_memory, migrations::now_string, repos::KnowledgeRepo},
+        db::{
+            connection::{open_database, open_in_memory},
+            migrations::now_string,
+            repos::KnowledgeRepo,
+        },
         types::knowledge::KnowledgeState,
     };
 
@@ -457,6 +463,71 @@ mod tests {
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
+    }
+
+    #[test]
+    #[ignore = "10k knowledge tree on-disk scale verification"]
+    fn loads_ten_thousand_node_knowledge_tree_with_p95_under_two_hundred_milliseconds() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write, read) = open_database(&database_path).unwrap();
+        let journal_mode: String = write
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+
+        let now = now_string();
+        let tx = write.transaction().unwrap();
+        let mut insert_entry = tx
+            .prepare(
+                "INSERT INTO entries(
+                   id, title, title_source, original_content, current_content, type, status,
+                   revision, created_at, updated_at, deleted_at, knowledge_state,
+                   knowledge_promoted_at, knowledge_title_key
+                 ) VALUES (?1, ?2, 'user', '', '', 'unclear', 'pending', 0, ?3, ?3, NULL,
+                   'knowledge', ?3, ?4)",
+            )
+            .unwrap();
+        let mut insert_hierarchy = tx
+            .prepare(
+                "INSERT INTO entry_hierarchy(entry_id, parent_entry_id, sibling_order, updated_at)
+                 VALUES (?1, NULL, ?2, ?3)",
+            )
+            .unwrap();
+        for index in 0..10_000 {
+            let id = format!("knowledge-{index}");
+            let title = format!("Knowledge {index}");
+            insert_entry
+                .execute(params![id, title, now, format!("knowledge {index}")])
+                .unwrap();
+            insert_hierarchy
+                .execute(params![format!("knowledge-{index}"), index, now])
+                .unwrap();
+        }
+        drop(insert_hierarchy);
+        drop(insert_entry);
+        tx.commit().unwrap();
+
+        assert_eq!(HierarchyRepo::tree(&read).unwrap().len(), 10_000);
+        let mut samples = Vec::with_capacity(10);
+        for _ in 0..10 {
+            let started = Instant::now();
+            let tree = HierarchyRepo::tree(&read).unwrap();
+            samples.push(started.elapsed());
+            assert_eq!(tree.len(), 10_000);
+        }
+        let tree_p95 = p95(&mut samples);
+        eprintln!(
+            "loads_ten_thousand_node_knowledge_tree p95_ms={:.2}",
+            tree_p95.as_secs_f64() * 1000.0
+        );
+        assert!(tree_p95 < Duration::from_millis(200));
+    }
+
+    fn p95(samples: &mut [Duration]) -> Duration {
+        assert!(!samples.is_empty());
+        samples.sort_unstable();
+        samples[(samples.len() * 95 - 1) / 100]
     }
 
     #[test]

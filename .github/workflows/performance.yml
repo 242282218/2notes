@@ -1,0 +1,14 @@
+name: performance
+
+on:
+  workflow_dispatch:
+
+jobs:
+  release-scale:
+    name: Release scale checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run block-document release-scale checks
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/block-document-scale.ps1

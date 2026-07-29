@@ -237,7 +237,14 @@ fn commit_import_session(
         ));
     }
 
-    let state = app.state::<AppState>();
+    commit_scanned_import(app.state::<AppState>().inner(), root, candidates)
+}
+
+fn commit_scanned_import(
+    state: &AppState,
+    root: PathBuf,
+    candidates: Vec<ImportSessionCandidate>,
+) -> AppResult<MarkdownImportReport> {
     let mut report = MarkdownImportReport {
         imported_count: 0,
         skipped_count: 0,
@@ -245,7 +252,7 @@ fn commit_import_session(
         failures: Vec::new(),
     };
     for candidate in candidates {
-        match commit_one(&state, &root, &candidate) {
+        match commit_one(state, &root, &candidate) {
             Ok(CommitOutcome::Imported) => report.imported_count += 1,
             Ok(CommitOutcome::Skipped) => report.skipped_count += 1,
             Err(err) => {
@@ -400,6 +407,10 @@ fn display_relative_path(root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use crate::{app_state::AppState, db::connection::open_database, files::paths::prepare_paths};
+
     use super::*;
 
     #[test]
@@ -460,6 +471,50 @@ mod tests {
         assert_ne!(
             blake3::hash(&bytes).to_hex().to_string(),
             candidate.source_hash
+        );
+    }
+
+    #[test]
+    #[ignore = "1k Markdown import on-disk release-scale verification"]
+    fn imports_one_thousand_small_markdown_files_under_sixty_seconds() {
+        const FILE_COUNT: usize = 1_000;
+
+        let temp = tempfile::tempdir().unwrap();
+        let import_root = temp.path().join("markdown-import");
+        fs::create_dir(&import_root).unwrap();
+        for index in 0..FILE_COUNT {
+            fs::write(
+                import_root.join(format!("note-{index:04}.md")),
+                format!("# Scale note {index}\n\nSmall import fixture.\n"),
+            )
+            .unwrap();
+        }
+        let paths = prepare_paths(&temp.path().join("config"), &temp.path().join("data")).unwrap();
+        let (write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        let started = Instant::now();
+        let scanned = scan_import_root(&import_root).unwrap();
+        let report = commit_scanned_import(&state, scanned.root, scanned.candidates).unwrap();
+        let elapsed = started.elapsed();
+        let created_count: usize = state
+            .read_conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+
+        println!(
+            "release scale markdown import: {FILE_COUNT} files in {:.3}s",
+            elapsed.as_secs_f64()
+        );
+        assert_eq!(report.imported_count, FILE_COUNT as u32);
+        assert_eq!(report.skipped_count, 0);
+        assert_eq!(report.failed_count, 0);
+        assert_eq!(created_count, FILE_COUNT);
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "imported {FILE_COUNT} files in {:.3}s, expected under 60s",
+            elapsed.as_secs_f64()
         );
     }
 }

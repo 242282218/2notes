@@ -1410,6 +1410,184 @@ mod tests {
         assert!(expected_json["not_installer_captured"].as_bool().unwrap());
     }
 
+    #[test]
+    fn v030_upgrade_preserves_legacy_content_and_metadata() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri parent")
+            .to_path_buf();
+        let fixture_db = repo_root.join("scripts/test/fixtures/v0.3.0-upgrade-baseline.sqlite");
+        let temp = tempfile::tempdir().unwrap();
+        let legacy_db = temp.path().join("v0.3.0-upgrade-baseline.sqlite");
+        fs::copy(&fixture_db, &legacy_db).unwrap();
+
+        let before = Connection::open(&legacy_db).unwrap();
+        let entries_before = before
+            .prepare(
+                "SELECT id, current_content, revision, updated_at, deleted_at FROM entries ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let fts_before = before
+            .prepare("SELECT entry_id, current_content FROM entries_fts ORDER BY entry_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let tags_before = before
+            .prepare(
+                "SELECT et.entry_id, t.name
+                 FROM entry_tags et JOIN tags t ON t.id = et.tag_id
+                 ORDER BY et.entry_id, t.name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let links_before = before
+            .prepare(
+                "SELECT source_entry_id, ordinal, raw_target, normalized_target, target_entry_id
+                 FROM entry_links ORDER BY source_entry_id, ordinal",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let draft_before: (String, i64, String) = before
+            .query_row(
+                "SELECT content, revision, updated_at FROM drafts WHERE id = 'quick_capture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        drop(before);
+
+        let (write_conn, _read_conn) = open_database(&legacy_db).unwrap();
+
+        let entries_after = write_conn
+            .prepare(
+                "SELECT id, current_content, revision, updated_at, deleted_at FROM entries ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(entries_after, entries_before);
+        let fts_after = write_conn
+            .prepare("SELECT entry_id, current_content FROM entries_fts ORDER BY entry_id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(fts_after, fts_before);
+
+        let legacy_documents = write_conn
+            .prepare(
+                "SELECT entry_id, legacy_content, entry_revision
+                 FROM entry_documents ORDER BY entry_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let expected_legacy_documents = entries_before
+            .iter()
+            .map(|(id, current_content, revision, _, _)| {
+                (id.clone(), current_content.clone(), *revision)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(legacy_documents, expected_legacy_documents);
+
+        let tags_after = write_conn
+            .prepare(
+                "SELECT et.entry_id, t.name
+                 FROM entry_tags et JOIN tags t ON t.id = et.tag_id
+                 ORDER BY et.entry_id, t.name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(tags_after, tags_before);
+
+        let links_after = write_conn
+            .prepare(
+                "SELECT source_entry_id, ordinal, raw_target, normalized_target, target_entry_id
+                 FROM entry_links ORDER BY source_entry_id, ordinal",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(links_after, links_before);
+
+        let draft_after: (String, i64, String) = write_conn
+            .query_row(
+                "SELECT content, revision, updated_at FROM drafts WHERE id = 'quick_capture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(draft_after, draft_before);
+    }
+
     fn test_paths() -> AppPaths {
         let temp = tempfile::tempdir().unwrap().keep();
         AppPaths {

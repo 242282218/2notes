@@ -115,8 +115,7 @@ pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
 
 fn migrate_legacy_content_to_documents(tx: &Transaction<'_>) -> AppResult<()> {
     let now = now_string();
-    let mut select =
-        tx.prepare("SELECT id, current_content, revision FROM entries WHERE deleted_at IS NULL")?;
+    let mut select = tx.prepare("SELECT id, current_content, revision FROM entries")?;
     let rows = select.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -441,6 +440,97 @@ mod tests {
         assert!(
             matches!(err, AppError::Migration { code, .. } if code == "DB_MIGRATION_CHECKSUM_MISMATCH")
         );
+    }
+
+    #[test]
+    fn migration_rejects_database_with_newer_schema_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn).unwrap();
+        let supported_version = MIGRATIONS.last().unwrap().version;
+        conn.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+            params![supported_version + 1, "future-checksum", now_string()],
+        )
+        .unwrap();
+
+        let err = run_migrations(&mut conn).unwrap_err();
+
+        assert!(matches!(err, AppError::Migration { code, .. } if code == "DB_VERSION_TOO_NEW"));
+        let recorded_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(recorded_version, supported_version + 1);
+    }
+
+    #[test]
+    #[ignore = "10k v4-to-v5 on-disk migration scale verification"]
+    fn migration_v4_to_v5_projects_ten_thousand_entries_under_thirty_seconds() {
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let mut conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+            .unwrap();
+
+        for migration in &MIGRATIONS[..4] {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+                params![migration.version, checksum(migration.sql), now_string()],
+            )
+            .unwrap();
+        }
+        let tx = conn.transaction().unwrap();
+        for index in 0..10_000 {
+            tx.execute(
+                "INSERT INTO entries(
+                   id, title, title_source, original_content, current_content, type, status,
+                   revision, created_at, updated_at, deleted_at, knowledge_state,
+                   knowledge_promoted_at, knowledge_title_key
+                 ) VALUES (?1, NULL, 'auto', ?2, ?2, 'unclear', 'pending', 0, ?3, ?3, NULL,
+                   'capture', NULL, NULL)",
+                params![
+                    format!("legacy-{index}"),
+                    format!("legacy content {index}"),
+                    now_string()
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let started = Instant::now();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(MIGRATIONS[4].sql).unwrap();
+        MIGRATIONS[4].data.unwrap()(&tx).unwrap();
+        tx.execute(
+            "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+            params![
+                MIGRATIONS[4].version,
+                checksum(MIGRATIONS[4].sql),
+                now_string()
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let elapsed = started.elapsed();
+
+        let document_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entry_documents", [], |row| row.get(0))
+            .unwrap();
+        let block_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))
+            .unwrap();
+        eprintln!(
+            "migration_v4_to_v5_projects_ten_thousand_entries elapsed_ms={:.2}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+        assert_eq!(document_count, 10_000);
+        assert_eq!(block_count, 10_000);
+        assert!(elapsed < Duration::from_secs(30));
     }
 
     #[test]

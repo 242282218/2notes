@@ -222,9 +222,11 @@ fn untagged_knowledge_sql() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
     use crate::{
         db::{
-            connection::open_in_memory,
+            connection::{open_database, open_in_memory},
             repos::{EntriesRepo, KnowledgeRepo},
         },
         types::entries::PageRequest,
@@ -367,5 +369,60 @@ mod tests {
         assert!(!max_page.has_more);
         assert_eq!(max_page.items.len(), 3);
         assert_eq!(first, max_page.items[2].entry_id);
+    }
+
+    #[test]
+    #[ignore = "release-scale benchmark"]
+    fn health_issue_page_fifty_rows_has_p95_under_one_hundred_fifty_milliseconds() {
+        const ELIGIBLE_ENTRY_COUNT: usize = 10_000;
+        const QUERY_COUNT: usize = 100;
+        const P95_LIMIT_MILLIS: u128 = 150;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("health-scale.db");
+        let (mut write, read) = open_database(&db_path).unwrap();
+        let tx = write.transaction().unwrap();
+        let mut insert = tx
+            .prepare(
+                "INSERT INTO entries(
+                   id, title, title_source, original_content, current_content, type, status,
+                   revision, created_at, updated_at, deleted_at,
+                   knowledge_state, knowledge_promoted_at, knowledge_title_key
+                 ) VALUES (?1, ?2, 'user', ?3, ?3, 'material', 'pending', 0, ?4, ?4, NULL,
+                           'capture', NULL, NULL)",
+            )
+            .unwrap();
+        for index in 0..ELIGIBLE_ENTRY_COUNT {
+            let id = format!("scale-entry-{index:05}");
+            let title = format!("Scale entry {index}");
+            insert
+                .execute(params![id, title, "eligible", "2026-06-01T00:00:00Z"])
+                .unwrap();
+        }
+        drop(insert);
+        tx.commit().unwrap();
+
+        let mut durations = Vec::with_capacity(QUERY_COUNT);
+        for _ in 0..QUERY_COUNT {
+            let started = Instant::now();
+            let issues = HealthRepo::issues(
+                &read,
+                HealthIssueKind::StaleCapture,
+                &page(Some(50), Some(0)),
+                fixed_now(),
+            )
+            .unwrap();
+            durations.push(started.elapsed());
+            assert_eq!(issues.items.len(), 50);
+        }
+
+        durations.sort_unstable();
+        let p95 = durations[(QUERY_COUNT * 95 - 1) / 100];
+        let p95_millis = p95.as_secs_f64() * 1_000.0;
+        eprintln!("health_issue_page_fifty_rows p95_ms={p95_millis:.2}");
+        assert!(
+            p95_millis < P95_LIMIT_MILLIS as f64,
+            "health issue page p95 was {p95_millis:.2}ms, expected below {P95_LIMIT_MILLIS}ms"
+        );
     }
 }

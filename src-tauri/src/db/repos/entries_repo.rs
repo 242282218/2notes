@@ -1879,6 +1879,137 @@ mod tests {
         }
     }
 
+    fn multi_block_document(block_count: usize, suffix: &str) -> BlockDocument {
+        BlockDocument::from_blocks(
+            (0..block_count)
+                .map(|index| {
+                    BlockNode::paragraph(
+                        Uuid::new_v4().to_string(),
+                        format!("block {index} {suffix}"),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    #[ignore = "block document on-disk scale verification"]
+    fn saves_one_hundred_block_document_with_p95_under_one_hundred_milliseconds() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write_conn, read_conn) = open_database(&database_path).unwrap();
+        let journal_mode: String = write_conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+
+        let tx = write_conn.transaction().unwrap();
+        let mut entry = EntriesRepo::create_with_document(
+            &tx,
+            CreateEntrySpec {
+                title: None,
+                title_source: TitleSource::Auto,
+                original_content: "warmup".to_string(),
+                document: multi_block_document(100, "warmup"),
+                entry_type: EntryType::Unclear,
+                status: EntryStatus::Pending,
+                tags: Vec::new(),
+            },
+            &now_string(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let mut samples = Vec::with_capacity(20);
+        for sample in 0..20 {
+            let started = Instant::now();
+            let tx = write_conn.transaction().unwrap();
+            entry = EntriesRepo::update(
+                &tx,
+                &entry.id,
+                EntryPatch {
+                    document: Some(multi_block_document(100, &format!("sample {sample}"))),
+                    title: None,
+                    entry_type: None,
+                    status: None,
+                    tags: None,
+                },
+                entry.revision,
+                &now_string(),
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            samples.push(started.elapsed());
+        }
+
+        let save_p95 = p95(&mut samples);
+        let block_count: i64 = read_conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE entry_id = ?1",
+                [&entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        eprintln!(
+            "saves_one_hundred_block_document p95_ms={:.2}",
+            save_p95.as_secs_f64() * 1000.0
+        );
+        assert_eq!(block_count, 100);
+        assert!(save_p95 < Duration::from_millis(100));
+    }
+
+    #[test]
+    #[ignore = "block document on-disk scale verification"]
+    fn opens_five_hundred_block_document_with_p95_under_one_hundred_fifty_milliseconds() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("2notes.sqlite");
+        let (mut write_conn, read_conn) = open_database(&database_path).unwrap();
+        let journal_mode: String = write_conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+
+        let tx = write_conn.transaction().unwrap();
+        let entry = EntriesRepo::create_with_document(
+            &tx,
+            CreateEntrySpec {
+                title: None,
+                title_source: TitleSource::Auto,
+                original_content: "open benchmark".to_string(),
+                document: multi_block_document(500, "open benchmark"),
+                entry_type: EntryType::Unclear,
+                status: EntryStatus::Pending,
+                tags: Vec::new(),
+            },
+            &now_string(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(
+            EntriesRepo::get(&read_conn, &entry.id)
+                .unwrap()
+                .document
+                .blocks
+                .len(),
+            500
+        );
+        let mut samples = Vec::with_capacity(20);
+        for _ in 0..20 {
+            let started = Instant::now();
+            let document = EntriesRepo::get(&read_conn, &entry.id).unwrap().document;
+            samples.push(started.elapsed());
+            assert_eq!(document.blocks.len(), 500);
+        }
+
+        let open_p95 = p95(&mut samples);
+        eprintln!(
+            "opens_five_hundred_block_document p95_ms={:.2}",
+            open_p95.as_secs_f64() * 1000.0
+        );
+        assert!(open_p95 < Duration::from_millis(150));
+    }
+
     #[test]
     fn fts_filter_does_not_mix_in_like_scan() {
         let mut filter = default_filter();

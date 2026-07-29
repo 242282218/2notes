@@ -28,14 +28,16 @@
 
 - 快速记录窗口：快捷键呼出、Enter 提交、Esc 隐藏、单份草稿恢复。
 - 主窗口：收集箱、搜索、标签、回收站、设置。
-- 知识库：同一条目可直接沉淀或移出知识库，不复制正文；支持唯一标题和历史标题别名。
-- WikiLink：纯文本正文支持 `[[标题]]` 补全，并展示出链、反向链接及未解析链接。
+- 知识库：同一条目可直接沉淀或移出知识库，不复制正文；支持唯一标题、历史标题别名、单父层级、面包屑和大纲。
+- 结构化编辑：正文以稳定块 ID 保存，支持常用块、行内样式、撤销重做与自动保存；搜索、链接和导出从块文档派生。
+- WikiLink：正文支持 `[[标题]]` 补全，并展示出链、反向链接及未解析链接。
+- 知识健康：集中查看孤立条目、未解析链接等问题并跳转处理。
 - 条目模型：标题、原始内容、当前内容、类型、状态、标签、修订号。
 - 自动保存：详情编辑 debounce 保存，切换条目/视图/退出前会先 flush。
 - 搜索筛选：标题、当前内容、原始内容、标签和历史标题；三字及以上查询使用 trigram FTS 排名与安全片段，一到两字按词回退 LIKE。
 - 回收站：普通删除先移入回收站，永久删除只允许在回收站内发生。
-- Markdown 导出：仅导出未进入回收站的记录，文件名自动清理和避让，不覆盖已有文件。
-- 本地优先：SQLite 是唯一内容真相源；Markdown 仍是单向导出，不与 SQLite 形成双主存储。
+- Markdown 导入与导出：导入会创建新条目，预览不支持内容的降级 warning，重复来源会跳过；导出仅包含未进入回收站的记录，文件名自动清理和避让，不覆盖已有文件。
+- 本地优先：SQLite 是唯一内容真相源；Markdown 导入和导出均为显式复制，不与 SQLite 形成双主存储。
 - Windows 集成：系统托盘、开机自启动开关、全局快捷键、安装包构建。
 
 ## 构建产物
@@ -50,8 +52,8 @@ pnpm run tauri:build
 构建完成后会生成：
 
 - 应用可执行文件：`src-tauri/target/release/two_notes.exe`
-- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_0.3.0_x64_en-US.msi`
-- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_0.3.0_x64-setup.exe`
+- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_<version>_x64_en-US.msi`
+- NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_<version>_x64-setup.exe`
 
 这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证真实打包链路。
 
@@ -89,18 +91,28 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 
 ## 项目状态
 
-第二阶段已完成本地知识库最小闭环：捕获条目沉淀、`[[标题]]` 补全、出链与反链、历史标题、未解析链接、trigram 搜索、安全命中片段及索引重建；快速捕获和不丢内容仍是基础链路。
+第三阶段已完成块级本地知识库实现：稳定块 ID 与结构化编辑、主窗口新建、知识树与大纲、知识健康、Markdown 预览与导入，以及旧内容迁移到块文档。快速捕获和不丢内容仍是基础链路。
 
-最近一次本地验证通过：
+本地自动门禁与发布前证据需要分开看待：
 
+- 常规 CI（push / pull request）验证前端、Rust 和 Tauri 打包链路。
+- 手动触发的 [performance workflow](.github/workflows/performance.yml) 在 Windows release 模式运行块文档规模预算；常规 push / pull request CI 不执行高成本的 10,000 条目测试。
+- Markdown 导入人工 fixture 位于 [`scripts/test/markdown-import-fixtures`](scripts/test/markdown-import-fixtures)，覆盖 2notes 导出、YAML 元数据、WikiLinks、HTML 降级 warning 和空文件。
+- 真实 Windows 安装包中的快捷捕获、结构化编辑、导入导出、备份恢复和升级冒烟，必须在本地实际安装后留存记录；它不是 CI 或源码级测试的替代品。
+
+常用验证：
+
+- `pnpm run format:check`
 - `pnpm run lint`
 - `pnpm run typecheck`
 - `pnpm run test:unit`
 - `pnpm run build`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/knowledge-scale.ps1`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/block-document-scale.ps1`
 - `pnpm run tauri:build`
 
 ## 暂不做
 
-当前仍不做块编辑器、图谱、AI、云同步、多人协作、插件、MCP、剪贴板流水、Markdown 双主存储、附件和富文本。先保持“快速捕获 + 不丢内容 + 本地知识闭环”简单可靠。
+当前仍不做图谱、AI、云同步、多人协作、插件、MCP、剪贴板流水、Markdown 双主存储、附件和富文本。先保持“快速捕获 + 不丢内容 + 本地知识闭环”简单可靠。
