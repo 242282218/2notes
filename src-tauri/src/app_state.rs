@@ -32,6 +32,7 @@ pub struct AppState {
     quit_request: Mutex<Option<QuitRequest>>,
     restore_request: Mutex<Option<RestoreRequest>>,
     restore_ready: Condvar,
+    import_sessions: Mutex<std::collections::HashMap<String, ImportSession>>,
 }
 
 #[derive(Debug)]
@@ -44,6 +45,20 @@ struct QuitRequest {
 struct RestoreRequest {
     id: String,
     ready: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSessionCandidate {
+    pub relative_path: PathBuf,
+    pub source_hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportSession {
+    pub root: PathBuf,
+    pub candidates: Vec<ImportSessionCandidate>,
+    pub expires_at: std::time::Instant,
 }
 
 impl AppState {
@@ -60,6 +75,7 @@ impl AppState {
             quit_request: Mutex::new(None),
             restore_request: Mutex::new(None),
             restore_ready: Condvar::new(),
+            import_sessions: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -247,6 +263,43 @@ impl AppState {
         }
         Ok(should_cancel)
     }
+
+    pub fn create_import_session(
+        &self,
+        root: PathBuf,
+        candidates: Vec<ImportSessionCandidate>,
+        ttl: std::time::Duration,
+    ) -> AppResult<String> {
+        let id = Uuid::new_v4().to_string();
+        let mut sessions = self
+            .import_sessions
+            .lock()
+            .map_err(|_| AppError::system("IMPORT_SESSION_FAILED", "导入会话状态不可用"))?;
+        let now = std::time::Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        sessions.clear();
+        sessions.insert(
+            id.clone(),
+            ImportSession {
+                root,
+                candidates,
+                expires_at: now + ttl,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn consume_import_session(&self, id: &str) -> AppResult<ImportSession> {
+        let mut sessions = self
+            .import_sessions
+            .lock()
+            .map_err(|_| AppError::system("IMPORT_SESSION_FAILED", "导入会话状态不可用"))?;
+        let now = std::time::Instant::now();
+        sessions.retain(|_, session| session.expires_at > now);
+        sessions.remove(id).ok_or_else(|| {
+            AppError::validation("IMPORT_SESSION_INVALID", "导入预览已失效，请重新选择目录")
+        })
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -281,6 +334,76 @@ mod tests {
             .wait_restore_ready(&timed_out, std::time::Duration::from_millis(1))
             .unwrap());
     }
+    #[test]
+    fn import_session_is_consumed_once() {
+        let state = test_state();
+        let id = state
+            .create_import_session(
+                PathBuf::from("C:/imports"),
+                vec![ImportSessionCandidate {
+                    relative_path: PathBuf::from("note.md"),
+                    source_hash: "hash".to_string(),
+                    size_bytes: 1,
+                }],
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let session = state.consume_import_session(&id).unwrap();
+        assert_eq!(session.candidates.len(), 1);
+        let err = state.consume_import_session(&id).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Validation { code, .. } if code == "IMPORT_SESSION_INVALID"
+        ));
+    }
+
+    #[test]
+    fn expired_import_session_is_rejected() {
+        let state = test_state();
+        let id = state
+            .create_import_session(
+                PathBuf::from("C:/imports"),
+                Vec::new(),
+                std::time::Duration::ZERO,
+            )
+            .unwrap();
+
+        let err = state.consume_import_session(&id).unwrap_err();
+        assert!(matches!(
+            err,
+            AppError::Validation { code, .. } if code == "IMPORT_SESSION_INVALID"
+        ));
+    }
+
+    #[test]
+    fn new_import_preview_invalidates_the_previous_session() {
+        let state = test_state();
+        let first = state
+            .create_import_session(
+                PathBuf::from("C:/first"),
+                Vec::new(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        let second = state
+            .create_import_session(
+                PathBuf::from("C:/second"),
+                Vec::new(),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            state.consume_import_session(&first),
+            Err(AppError::Validation { code, .. }) if code == "IMPORT_SESSION_INVALID"
+        ));
+        assert_eq!(
+            state.consume_import_session(&second).unwrap().root,
+            PathBuf::from("C:/second")
+        );
+    }
+
     fn test_state() -> AppState {
         let (write_conn, read_conn) = open_in_memory().unwrap();
         let root = tempfile::tempdir().unwrap().keep();

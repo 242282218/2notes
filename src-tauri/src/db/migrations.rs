@@ -45,6 +45,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("schema/006_entry_hierarchy.sql"),
         data: Some(migrate_knowledge_hierarchy),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("schema/007_entry_imports.sql"),
+        data: None,
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
@@ -360,7 +365,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
     }
 
     #[test]
@@ -469,7 +474,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
 
         let current: String = conn
             .query_row(
@@ -606,6 +611,6 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, 7);
     }
 }

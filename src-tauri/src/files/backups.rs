@@ -523,7 +523,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(
             row,
             (
@@ -979,7 +979,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         // schema 005 introduces entry_documents and blocks and they must be populated for
         // the source entry, with its current_content preserved verbatim as a legacy snapshot.
@@ -1213,7 +1213,7 @@ mod tests {
 
     fn expected_v030_fixture_metrics(ids: &V030FixtureSeedIds) -> V030FixtureMetrics {
         V030FixtureMetrics {
-            schema_version: 6,
+            schema_version: 7,
             entries_total: 4,
             capture_active: 2,
             knowledge_active: 1,

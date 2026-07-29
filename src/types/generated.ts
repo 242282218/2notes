@@ -65,6 +65,21 @@ export type EntryTreeNode = {
 };
 export type EntryBreadcrumb = { id: string; title: string };
 
+export type MarkdownImportPreview = {
+  sessionId: string;
+  fileCount: number;
+  totalBytes: number;
+  paths: Array<string>;
+  warnings: Array<string>;
+};
+
+export type MarkdownImportReport = {
+  importedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  failures: Array<string>;
+};
+
 export type Tag = {
   id: string;
   name: string;

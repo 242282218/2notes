@@ -71,6 +71,8 @@ pub fn run() {
             commands::drafts::draft_update,
             commands::drafts::quick_capture_submit,
             commands::export_markdown::export_markdown,
+            commands::import_markdown::markdown_import_preview,
+            commands::import_markdown::markdown_import_commit,
             commands::backups::backups_create,
             commands::backups::backups_list,
             commands::backups::backups_restore,

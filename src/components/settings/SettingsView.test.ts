@@ -82,7 +82,7 @@ describe("SettingsView", () => {
     const appearanceButton = wrapper.get('button[data-category="appearance"]');
     const backupButton = wrapper.get('button[data-category="backup"]');
     expect(appearanceButton.attributes("aria-current")).toBe("location");
-    expect(observe).toHaveBeenCalledTimes(6);
+    expect(observe).toHaveBeenCalledTimes(7);
 
     observerCallback(
       [intersectionEntry(wrapper.get("#backup").element, true, 0.8)],

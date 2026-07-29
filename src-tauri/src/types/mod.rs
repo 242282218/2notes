@@ -3,6 +3,7 @@ pub mod documents;
 pub mod entries;
 pub mod health;
 pub mod hierarchy;
+pub mod imports;
 pub mod knowledge;
 pub mod settings;
 pub mod tags;
@@ -23,6 +24,7 @@ mod tests {
         },
         health::{HealthIssue, HealthIssueKind, HealthIssuePage, KnowledgeHealthSummary},
         hierarchy::{EntryBreadcrumb, EntryTreeNode},
+        imports::{MarkdownImportPreview, MarkdownImportReport},
         knowledge::{
             KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
             RelatedEntry, SearchSnippet, SearchSnippetPart, UnresolvedWikiLink,
@@ -52,6 +54,8 @@ mod tests {
             HealthIssuePage::decl(&config),
             EntryTreeNode::decl(&config),
             EntryBreadcrumb::decl(&config),
+            MarkdownImportPreview::decl(&config),
+            MarkdownImportReport::decl(&config),
             Tag::decl(&config),
             EntryListFilter::decl(&config),
             PageRequest::decl(&config),

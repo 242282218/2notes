@@ -2,6 +2,7 @@ pub mod backups;
 pub mod drafts;
 pub mod entries;
 pub mod export_markdown;
+pub mod import_markdown;
 pub mod knowledge;
 pub mod settings;
 pub mod tags;
@@ -64,6 +65,8 @@ mod tests {
             | "settings_get"
             | "settings_update"
             | "export_markdown"
+            | "markdown_import_preview"
+            | "markdown_import_commit"
             | "backups_create"
             | "backups_list"
             | "backups_restore"
@@ -138,6 +141,8 @@ mod tests {
             "settings_get",
             "settings_update",
             "export_markdown",
+            "markdown_import_preview",
+            "markdown_import_commit",
             "backups_create",
             "backups_list",
             "backups_restore",
@@ -235,6 +240,8 @@ mod tests {
             "draft_update",
             "quick_capture_submit",
             "export_markdown",
+            "markdown_import_preview",
+            "markdown_import_commit",
             "backups_create",
             "backups_list",
             "backups_restore",

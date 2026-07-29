@@ -14,6 +14,7 @@ import { useEntriesStore } from "../../stores/entries";
 import { useSettingsStore } from "../../stores/settings";
 import type { BackupInfo, KnowledgeIndexReport } from "../../types/generated";
 import AppearanceSettings from "./AppearanceSettings.vue";
+import MarkdownImportPanel from "./MarkdownImportPanel.vue";
 import ConfirmDialog from "../shared/ConfirmDialog.vue";
 import IconButton from "../shared/IconButton.vue";
 import SettingRow from "./SettingRow.vue";
@@ -26,6 +27,7 @@ const categories = [
   { id: "directories", label: "目录" },
   { id: "backup", label: "备份" },
   { id: "knowledge", label: "知识索引" },
+  { id: "import", label: "导入" },
   { id: "export", label: "导出" },
 ];
 
@@ -485,6 +487,8 @@ async function updateAutostart(event: Event) {
             {{ indexError }}
           </p>
         </section>
+
+        <MarkdownImportPanel />
 
         <section id="export" class="mb-8 scroll-mt-4">
           <h2
