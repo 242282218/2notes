@@ -6,12 +6,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { AppView } from "../../app/routes";
 import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
 import { useAppShellShortcuts } from "../../composables/useAppShellShortcuts";
+import { knowledgeMove } from "../../services/knowledgeApi";
 import { windowOpenQuickCapture } from "../../services/windowApi";
 import { useEntriesStore } from "../../stores/entries";
 import type { EntryStatus, EntryType } from "../../types/generated";
 import EntryDetail from "../entry/EntryDetail.vue";
 import type { EntryDetailToolbarState } from "../entry/entryDetailToolbar";
 import EntryList from "../entry/EntryList.vue";
+import EntryTree from "../entry/EntryTree.vue";
 import SettingsView from "../settings/SettingsView.vue";
 import AppTopbar from "./AppTopbar.vue";
 import SidebarNav from "./SidebarNav.vue";
@@ -22,6 +24,7 @@ const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
 const topbarRef = ref<InstanceType<typeof AppTopbar> | null>(null);
 const tagPanelOpen = ref(false);
 const creatingEntry = ref(false);
+const knowledgeTreeToken = ref(0);
 const tagPanelRef = ref<InstanceType<typeof TagFilterPanel> | null>(null);
 const toolbarState = ref<EntryDetailToolbarState>({
   saveState: "idle",
@@ -136,6 +139,39 @@ async function selectEntry(id: string) {
 async function openRelatedEntry(id: string) {
   if (await flushDetail()) await entries.openEntry(id);
 }
+async function moveKnowledgeEntry(id: string, parentId: string | null) {
+  const requestGeneration = entries.selectionGeneration;
+  if (
+    !entries.detail ||
+    entries.detail.id !== id ||
+    !(await flushDetail()) ||
+    entries.selectionGeneration !== requestGeneration ||
+    entries.detail?.id !== id
+  ) {
+    return;
+  }
+  const expectedRevision = entries.detail.revision;
+  try {
+    const updated = await knowledgeMove(id, parentId, 0, expectedRevision);
+    if (
+      entries.selectionGeneration === requestGeneration &&
+      entries.selectedId === id
+    ) {
+      entries.applySavedEntry(updated, requestGeneration);
+    } else {
+      entries.applyEntryListUpdate(updated);
+    }
+    knowledgeTreeToken.value += 1;
+  } catch (cause) {
+    if (
+      entries.selectionGeneration === requestGeneration &&
+      entries.selectedId === id
+    ) {
+      entries.error =
+        cause instanceof Error ? cause.message : "移动知识条目失败";
+    }
+  }
+}
 async function changeView(view: AppView) {
   if (await flushDetail()) {
     tagPanelOpen.value = false;
@@ -236,7 +272,15 @@ function setQuery(value: string) {
           v-else
           class="grid h-full min-h-0 grid-cols-[minmax(300px,34%)_minmax(0,1fr)]"
         >
+          <EntryTree
+            v-if="entries.view === 'knowledge'"
+            :selected-id="entries.selectedId"
+            :refresh-token="knowledgeTreeToken + entries.externalChangeToken"
+            @select="selectEntry"
+            @move="moveKnowledgeEntry"
+          />
           <EntryList
+            v-else
             :items="entries.items"
             :selected-id="entries.selectedId"
             :loading="entries.loading"
@@ -251,11 +295,36 @@ function setQuery(value: string) {
             :refresh-token="entries.externalChangeToken"
             :selection-generation="entries.selectionGeneration"
             @toolbar-change="toolbarState = $event"
-            @saved="entries.applySavedEntry"
-            @entry-updated="entries.applyEntryListUpdate"
-            @trash="entries.moveSelectedToTrash"
-            @restore="entries.restoreSelected"
-            @delete-forever="entries.deleteSelectedForever"
+            @saved="
+              (entry, generation) => {
+                entries.applySavedEntry(entry, generation);
+                knowledgeTreeToken += 1;
+              }
+            "
+            @entry-updated="
+              (entry) => {
+                entries.applyEntryListUpdate(entry);
+                knowledgeTreeToken += 1;
+              }
+            "
+            @trash="
+              async () => {
+                await entries.moveSelectedToTrash();
+                knowledgeTreeToken += 1;
+              }
+            "
+            @restore="
+              async () => {
+                await entries.restoreSelected();
+                knowledgeTreeToken += 1;
+              }
+            "
+            @delete-forever="
+              async () => {
+                await entries.deleteSelectedForever();
+                knowledgeTreeToken += 1;
+              }
+            "
             @open-related="openRelatedEntry"
           />
         </section>

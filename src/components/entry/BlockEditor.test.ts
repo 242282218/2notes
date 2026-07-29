@@ -22,6 +22,7 @@ type BlockEditorExposed = {
   } | null;
   getEditorJson: () => Record<string, unknown> | null;
   setSnapshot: (snapshot: BlockDocument) => void;
+  focusBlock: (id: string) => boolean;
 };
 
 function paragraphDocument(text: string): BlockDocument {
@@ -212,6 +213,20 @@ describe("BlockEditor", () => {
       .map((node) => node.text)
       .join("");
     expect(text).toBe(original);
+
+    wrapper.unmount();
+  });
+
+  it("focuses a stable block id and rejects an unknown block", async () => {
+    const wrapper = mount(BlockEditor, {
+      props: { modelValue: fixtureDocument() },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as BlockEditorExposed;
+    expect(exposed.focusBlock(HEADING_ID)).toBe(true);
+    expect(exposed.getEditor()?.state.selection.from).toBe(1);
+    expect(exposed.focusBlock("missing-id")).toBe(false);
 
     wrapper.unmount();
   });

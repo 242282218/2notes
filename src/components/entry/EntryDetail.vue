@@ -34,6 +34,8 @@ import EmptyState from "../shared/EmptyState.vue";
 import BlockEditor, { type EditorTextContext } from "./BlockEditor.vue";
 import EntryStatusSelect from "./EntryStatusSelect.vue";
 import EntryTypeSelect from "./EntryTypeSelect.vue";
+import EntryBreadcrumbs from "./EntryBreadcrumbs.vue";
+import EntryOutline from "./EntryOutline.vue";
 import KnowledgeRelations from "./KnowledgeRelations.vue";
 import TagInput from "./TagInput.vue";
 import WikiLinkSuggestions from "./WikiLinkSuggestions.vue";
@@ -66,6 +68,7 @@ const status = ref<EntryStatus>("pending");
 const tagInputRef = ref<{ commitDraft: () => void } | null>(null);
 const blockEditorRef = ref<{
   completeWikiLink: (completion: WikiLinkCompletion, title: string) => boolean;
+  focusBlock: (id: string) => boolean;
 } | null>(null);
 const wikiTextContext = ref<EditorTextContext | null>(null);
 const tags = ref<string[]>([]);
@@ -454,6 +457,10 @@ function focusTitle() {
   titleInputRef.value?.focus();
 }
 
+function focusBlock(id: string) {
+  return blockEditorRef.value?.focusBlock(id) ?? false;
+}
+
 defineExpose({
   flushPendingSave,
   promoteToKnowledge,
@@ -463,6 +470,7 @@ defineExpose({
   requestDeleteForever,
   retrySave,
   focusTitle,
+  focusBlock,
 });
 </script>
 
@@ -488,6 +496,11 @@ defineExpose({
         <article
           class="elevation-panel grid overflow-visible rounded-lg bg-bg-elevated"
         >
+          <EntryBreadcrumbs
+            :entry-id="editingEntryId"
+            :enabled="knowledgeState === 'knowledge' && !deletedAt"
+            @open="emit('openRelated', $event)"
+          />
           <input
             ref="titleInputRef"
             v-model="title"
@@ -513,29 +526,32 @@ defineExpose({
             />
           </div>
 
-          <div class="relative min-h-[260px]">
-            <BlockEditor
-              ref="blockEditorRef"
-              v-model="document"
-              :disabled="editorDisabled"
-              :wiki-suggestions-open="wikiLinkSuggestionsOpen"
-              :wiki-listbox-id="wikiLinkListboxId"
-              :wiki-active-descendant="
-                wikiLinkSuggestionsOpen
-                  ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
-                  : undefined
-              "
-              @selection-change="handleEditorSelectionChange"
-              @editor-keydown="handleWikiLinkKeydown"
-              @editor-blur="resetWikiLinkCompletion"
-            />
-            <WikiLinkSuggestions
-              v-if="wikiLinkSuggestionsOpen"
-              :suggestions="wikiLinkSuggestions"
-              :active-index="wikiLinkActiveIndex"
-              :listbox-id="wikiLinkListboxId"
-              @select="selectWikiLinkSuggestion"
-            />
+          <div class="grid min-h-[260px] lg:grid-cols-[minmax(0,1fr)_208px]">
+            <div class="relative min-w-0">
+              <BlockEditor
+                ref="blockEditorRef"
+                v-model="document"
+                :disabled="editorDisabled"
+                :wiki-suggestions-open="wikiLinkSuggestionsOpen"
+                :wiki-listbox-id="wikiLinkListboxId"
+                :wiki-active-descendant="
+                  wikiLinkSuggestionsOpen
+                    ? `${wikiLinkListboxId}-option-${wikiLinkActiveIndex}`
+                    : undefined
+                "
+                @selection-change="handleEditorSelectionChange"
+                @editor-keydown="handleWikiLinkKeydown"
+                @editor-blur="resetWikiLinkCompletion"
+              />
+              <WikiLinkSuggestions
+                v-if="wikiLinkSuggestionsOpen"
+                :suggestions="wikiLinkSuggestions"
+                :active-index="wikiLinkActiveIndex"
+                :listbox-id="wikiLinkListboxId"
+                @select="selectWikiLinkSuggestion"
+              />
+            </div>
+            <EntryOutline :document="document" @focus="focusBlock" />
           </div>
         </article>
 

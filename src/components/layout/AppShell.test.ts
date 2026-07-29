@@ -25,7 +25,12 @@ vi.mock("../../services/backupApi", () => ({
   backupsRestore: vi.fn(),
 }));
 
+const knowledgeMocks = vi.hoisted(() => ({
+  knowledgeMove: vi.fn(),
+}));
+
 vi.mock("../../services/knowledgeApi", () => ({
+  knowledgeMove: knowledgeMocks.knowledgeMove,
   knowledgeRebuildIndex: vi.fn(),
 }));
 
@@ -60,6 +65,7 @@ const entries = reactive({
     title: "记录",
     knowledgeState: "capture",
     deletedAt: null,
+    revision: 0,
   },
   loading: false,
   detailLoading: false,
@@ -131,6 +137,7 @@ function mountShell(attachTo?: HTMLElement) {
       stubs: {
         SidebarNav: true,
         EntryList: EntryListStub,
+        EntryTree: true,
         EntryDetail: EntryDetailStub,
         SettingsView: true,
       },
@@ -162,6 +169,7 @@ describe("AppShell selection commit boundary", () => {
     entries.select.mockReset();
     entries.openEntry.mockReset();
     entries.createAndSelect.mockReset();
+    knowledgeMocks.knowledgeMove.mockReset();
     entries.noteExternalChange.mockReset();
     entries.moveSelectedToTrash.mockReset();
     entries.setView.mockReset();
@@ -231,6 +239,41 @@ describe("AppShell selection commit boundary", () => {
     await flushPromises();
     expect(detailCommands.flushPendingSave).toHaveBeenCalled();
     expect(entries.select).toHaveBeenCalledWith("entry-2");
+  });
+
+  it("drops a tree move when selection changes while its flush is pending", async () => {
+    const pendingFlush = deferred<boolean>();
+    detailCommands.flushPendingSave.mockReturnValue(pendingFlush.promise);
+    entries.view = "knowledge";
+    entries.selectedId = "entry-1";
+    entries.selectionGeneration = 1;
+    entries.detail = {
+      id: "entry-1",
+      title: "记录",
+      knowledgeState: "knowledge",
+      deletedAt: null,
+      revision: 4,
+    };
+    const wrapper = mountShell();
+    await flushPromises();
+
+    const tree = wrapper.findComponent({ name: "EntryTree" });
+    await tree.vm.$emit("move", "entry-1", null);
+    await flushPromises();
+
+    entries.selectedId = "entry-2";
+    entries.selectionGeneration = 2;
+    entries.detail = {
+      id: "entry-2",
+      title: "新记录",
+      knowledgeState: "knowledge",
+      deletedAt: null,
+      revision: 9,
+    };
+    pendingFlush.resolve(true);
+    await flushPromises();
+
+    expect(knowledgeMocks.knowledgeMove).not.toHaveBeenCalled();
   });
 
   it("flushes before creating an entry and focuses its title after success", async () => {
@@ -431,6 +474,7 @@ describe("AppShell accessibility semantics", () => {
       title: "记录",
       knowledgeState: "capture",
       deletedAt: null,
+      revision: 0,
     };
     entries.setView.mockReset();
     entries.setTagFilter.mockReset();

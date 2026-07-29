@@ -177,6 +177,29 @@ function completeWikiLink(
   return true;
 }
 
+function focusBlock(blockId: string): boolean {
+  const activeEditor = editor.value;
+  if (!activeEditor) return false;
+
+  let position: number | null = null;
+  activeEditor.state.doc.descendants((node, pos) => {
+    if (node.attrs[BLOCK_ID_ATTR] === blockId) {
+      position = pos + 1;
+      return false;
+    }
+    return true;
+  });
+  if (position === null) return false;
+
+  activeEditor
+    .chain()
+    .focus()
+    .setTextSelection(position)
+    .scrollIntoView()
+    .run();
+  return true;
+}
+
 function setSnapshot(snapshot: BlockDocument) {
   const activeEditor = editor.value;
   if (!activeEditor) return;
@@ -236,6 +259,7 @@ onBeforeUnmount(() => {
 
 defineExpose({
   completeWikiLink,
+  focusBlock,
   getEditor: () => editor.value,
   getEditorJson,
   setSnapshot,
