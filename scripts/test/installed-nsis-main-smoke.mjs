@@ -195,6 +195,15 @@ async function waitForSelector(client, selector, label = selector) {
   return waitFor(() => query(client, selector), label);
 }
 
+function isRetryableClickError(error) {
+  return error instanceof Error && (
+    error.message.startsWith("Could not compute box model.") ||
+    error.message.startsWith("Could not find node with given id") ||
+    error.message.startsWith("Click target not found:") ||
+    error.message.startsWith("Click point does not hit target:")
+  );
+}
+
 async function click(client, selector) {
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
@@ -219,12 +228,7 @@ async function click(client, selector) {
       await client.call("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
       return;
     } catch (error) {
-      const retryable = error instanceof Error && (
-        error.message.startsWith("Could not compute box model.") ||
-        error.message.startsWith("Could not find node with given id") ||
-        error.message.startsWith("Click target not found:")
-      );
-      if (attempt === 5 || !retryable) {
+      if (attempt === 5 || !isRetryableClickError(error)) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`CDP click failed for ${selector} after ${attempt} attempt(s): ${message}`, { cause: error });
       }
@@ -698,6 +702,12 @@ async function selfTest() {
     throw new Error("console error classification self-test failed");
   }
   if (!snapshotExpression().includes("selectedTree")) throw new Error("snapshot self-test failed");
+  if (!isRetryableClickError(new Error("Click point does not hit target: button[aria-label=移动到]"))) {
+    throw new Error("transient click hit-test classification self-test failed");
+  }
+  if (isRetryableClickError(new Error("Unexpected click failure"))) {
+    throw new Error("non-retryable click error classification self-test failed");
+  }
 
   const keyboardCalls = [];
   await clearFocusedTextInput({
