@@ -523,7 +523,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(
             row,
             (
@@ -979,7 +979,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         // schema 005 introduces entry_documents and blocks and they must be populated for
         // the source entry, with its current_content preserved verbatim as a legacy snapshot.
@@ -993,6 +993,16 @@ mod tests {
             .unwrap();
         assert_eq!(documents, 1);
         assert!(blocks > 0);
+
+        let hierarchy: (Option<String>, i64) = conn
+            .query_row(
+                "SELECT parent_entry_id, sibling_order
+                 FROM entry_hierarchy WHERE entry_id = 'legacy-target'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(hierarchy, (None, 0));
 
         let current_content: String = conn
             .query_row(
@@ -1203,7 +1213,7 @@ mod tests {
 
     fn expected_v030_fixture_metrics(ids: &V030FixtureSeedIds) -> V030FixtureMetrics {
         V030FixtureMetrics {
-            schema_version: 5,
+            schema_version: 6,
             entries_total: 4,
             capture_active: 2,
             knowledge_active: 1,

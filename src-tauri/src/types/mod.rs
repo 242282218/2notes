@@ -1,6 +1,7 @@
 pub mod backups;
 pub mod documents;
 pub mod entries;
+pub mod hierarchy;
 pub mod knowledge;
 pub mod settings;
 pub mod tags;
@@ -19,6 +20,7 @@ mod tests {
             CreateEntrySpec, DocumentRepairReport, EntryDetail, EntryListFilter, EntryListItem,
             EntryPage, EntryPatch, EntryStatus, EntryType, PageRequest, TitleSource,
         },
+        hierarchy::{EntryBreadcrumb, EntryTreeNode},
         knowledge::{
             KnowledgeIndexReport, KnowledgeRelations, KnowledgeState, KnowledgeSuggestion,
             RelatedEntry, SearchSnippet, SearchSnippetPart, UnresolvedWikiLink,
@@ -42,6 +44,8 @@ mod tests {
             SearchSnippetPart::decl(&config),
             SearchSnippet::decl(&config),
             KnowledgeIndexReport::decl(&config),
+            EntryTreeNode::decl(&config),
+            EntryBreadcrumb::decl(&config),
             Tag::decl(&config),
             EntryListFilter::decl(&config),
             PageRequest::decl(&config),

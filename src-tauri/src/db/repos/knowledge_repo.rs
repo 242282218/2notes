@@ -8,7 +8,7 @@ use crate::{
         repos::{
             documents_repo::DocumentsRepo,
             entries_repo::{entries_fts_is_trigram, entry_summary},
-            EntriesRepo,
+            EntriesRepo, HierarchyRepo,
         },
     },
     error::{AppError, AppResult},
@@ -204,6 +204,7 @@ impl KnowledgeRepo {
             DocumentsRepo::verify_and_repair_projections(&tx)?;
         report.projected_blocks = projected_blocks;
         report.repaired_documents = repaired_documents;
+        HierarchyRepo::repair(&tx, &now_string())?;
         tx.execute(
             "INSERT INTO settings(key, value, updated_at) VALUES (?1, '1', ?2)
              ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = ?2",
@@ -273,6 +274,7 @@ impl KnowledgeRepo {
              WHERE target_entry_id IS NULL AND normalized_target = ?2",
             params![id, key],
         )?;
+        HierarchyRepo::insert_root(tx, id, now)?;
         EntriesRepo::get_with_tx(tx, id)
     }
 
@@ -299,6 +301,8 @@ impl KnowledgeRepo {
                 "条目不在知识库中",
             ));
         }
+        HierarchyRepo::assert_demotable(tx, id)?;
+        HierarchyRepo::remove_entry(tx, id)?;
         tx.execute(
             "UPDATE entries SET knowledge_state = 'capture', knowledge_promoted_at = NULL,
              knowledge_title_key = NULL, revision = revision + 1, updated_at = ?1 WHERE id = ?2",

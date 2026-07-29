@@ -34,6 +34,12 @@ export type KnowledgeIndexReport = {
   projectedBlocks: number;
   repairedDocuments: number;
 };
+export type EntryTreeNode = {
+  id: string;
+  title: string;
+  children: Array<EntryTreeNode>;
+};
+export type EntryBreadcrumb = { id: string; title: string };
 
 export type Tag = {
   id: string;

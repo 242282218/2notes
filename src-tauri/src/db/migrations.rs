@@ -40,6 +40,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("schema/005_block_documents.sql"),
         data: Some(migrate_legacy_content_to_documents),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("schema/006_entry_hierarchy.sql"),
+        data: Some(migrate_knowledge_hierarchy),
+    },
 ];
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
@@ -158,6 +163,27 @@ fn migrate_legacy_content_to_documents(tx: &Transaction<'_>) -> AppResult<()> {
                     .map_err(|err| AppError::migration("BLOCK_ATTRS_ENCODE", err.to_string()))?,
             ])?;
         }
+    }
+    Ok(())
+}
+
+fn migrate_knowledge_hierarchy(tx: &Transaction<'_>) -> AppResult<()> {
+    let now = now_string();
+    let mut entries = tx.prepare(
+        "SELECT id FROM entries
+         WHERE deleted_at IS NULL AND knowledge_state = 'knowledge'
+         ORDER BY updated_at DESC, id ASC",
+    )?;
+    let ids = entries
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(entries);
+    for (sibling_order, id) in ids.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO entry_hierarchy(entry_id, parent_entry_id, sibling_order, updated_at)
+             VALUES (?1, NULL, ?2, ?3)",
+            params![id, sibling_order as i64, now],
+        )?;
     }
     Ok(())
 }
@@ -334,7 +360,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
     }
 
     #[test]
@@ -443,7 +469,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
 
         let current: String = conn
             .query_row(
@@ -509,6 +535,67 @@ mod tests {
     }
 
     #[test]
+    fn migration_006_backfills_active_knowledge_roots_in_stable_order() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..5] {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, checksum, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![migration.version, checksum(migration.sql), now_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO entries(
+               id, title, title_source, original_content, current_content, type, status,
+               revision, created_at, updated_at, deleted_at,
+               knowledge_state, knowledge_promoted_at, knowledge_title_key
+             ) VALUES
+               ('knowledge-newest', 'Newest', 'user', 'body', 'body', 'idea', 'archived', 0,
+                '2026-07-20T00:00:00Z', '2026-07-22T00:00:00Z', NULL,
+                'knowledge', '2026-07-20T00:00:00Z', 'newest'),
+               ('knowledge-tie-a', 'Tie A', 'user', 'body', 'body', 'idea', 'archived', 0,
+                '2026-07-20T00:00:00Z', '2026-07-21T00:00:00Z', NULL,
+                'knowledge', '2026-07-20T00:00:00Z', 'tie a'),
+               ('capture', NULL, 'auto', 'body', 'body', 'idea', 'pending', 0,
+                '2026-07-20T00:00:00Z', '2026-07-23T00:00:00Z', NULL,
+                'capture', NULL, NULL),
+               ('knowledge-trash', 'Trash', 'user', 'body', 'body', 'idea', 'archived', 0,
+                '2026-07-20T00:00:00Z', '2026-07-24T00:00:00Z', '2026-07-25T00:00:00Z',
+                'knowledge', '2026-07-20T00:00:00Z', 'trash')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let rows = conn
+            .prepare(
+                "SELECT entry_id, parent_entry_id, sibling_order
+                 FROM entry_hierarchy ORDER BY sibling_order, entry_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("knowledge-newest".to_string(), None, 0),
+                ("knowledge-tie-a".to_string(), None, 1),
+            ]
+        );
+    }
+
+    #[test]
     fn migration_005_is_idempotent_and_checksum_protects_future() {
         let mut conn = Connection::open_in_memory().unwrap();
         run_migrations(&mut conn).unwrap();
@@ -519,6 +606,6 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 5);
+        assert_eq!(count, 6);
     }
 }

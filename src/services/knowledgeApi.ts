@@ -1,6 +1,8 @@
 import { invokeCommand } from "./invoke";
 import type {
   EntryDetail,
+  EntryBreadcrumb,
+  EntryTreeNode,
   KnowledgeIndexReport,
   KnowledgeRelations,
   KnowledgeSuggestion,
@@ -11,6 +13,16 @@ export function knowledgeSuggest(
   limit = 10,
 ): Promise<KnowledgeSuggestion[]> {
   return invokeCommand("knowledge_suggest", { query, limit });
+}
+
+export function knowledgeTreeGet(): Promise<EntryTreeNode[]> {
+  return invokeCommand("knowledge_tree_get");
+}
+
+export function knowledgeBreadcrumbsGet(
+  id: string,
+): Promise<EntryBreadcrumb[]> {
+  return invokeCommand("knowledge_breadcrumbs_get", { id });
 }
 
 export function knowledgeRelationsGet(id: string): Promise<KnowledgeRelations> {
@@ -26,6 +38,20 @@ export function knowledgePromote(
   expectedRevision: number,
 ): Promise<EntryDetail> {
   return invokeCommand("knowledge_promote", { id, expectedRevision });
+}
+
+export function knowledgeMove(
+  id: string,
+  parentEntryId: string | null,
+  siblingOrder: number,
+  expectedRevision: number,
+): Promise<EntryDetail> {
+  return invokeCommand("knowledge_move", {
+    id,
+    parentEntryId,
+    siblingOrder,
+    expectedRevision,
+  });
 }
 
 export function knowledgeDemote(

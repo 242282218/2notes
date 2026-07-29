@@ -50,9 +50,12 @@ mod tests {
             | "entries_restore_from_trash"
             | "entries_delete_forever"
             | "knowledge_suggest"
+            | "knowledge_tree_get"
+            | "knowledge_breadcrumbs_get"
             | "knowledge_relations_get"
             | "knowledge_rebuild_index"
             | "knowledge_promote"
+            | "knowledge_move"
             | "knowledge_demote"
             | "tags_suggest"
             | "tags_list"
@@ -119,9 +122,12 @@ mod tests {
             "entries_restore_from_trash",
             "entries_delete_forever",
             "knowledge_suggest",
+            "knowledge_tree_get",
+            "knowledge_breadcrumbs_get",
             "knowledge_relations_get",
             "knowledge_rebuild_index",
             "knowledge_promote",
+            "knowledge_move",
             "knowledge_demote",
             "tags_suggest",
             "tags_list",
@@ -208,9 +214,12 @@ mod tests {
             "entries_restore_from_trash",
             "entries_delete_forever",
             "knowledge_suggest",
+            "knowledge_tree_get",
+            "knowledge_breadcrumbs_get",
             "knowledge_relations_get",
             "knowledge_rebuild_index",
             "knowledge_promote",
+            "knowledge_move",
             "knowledge_demote",
             "tags_suggest",
             "tags_list",

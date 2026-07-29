@@ -9,6 +9,7 @@ use crate::{
         migrations::now_string,
         repos::{
             documents_repo::DocumentsRepo,
+            hierarchy_repo::HierarchyRepo,
             knowledge_repo::KnowledgeRepo,
             tags_repo::{normalize_name, TagsRepo},
         },
@@ -268,6 +269,9 @@ impl EntriesRepo {
         if current.revision != expected_revision || current.deleted_at.is_some() {
             return Err(AppError::RevisionConflict);
         }
+        if current.knowledge_state == KnowledgeState::Knowledge {
+            HierarchyRepo::remove_entry_promote_children(tx, id, now)?;
+        }
         tx.execute(
             "UPDATE entries SET deleted_at = ?1, revision = revision + 1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
@@ -286,6 +290,9 @@ impl EntriesRepo {
             Self::find_with_tx(tx, id)?.ok_or_else(|| AppError::not_found("条目不存在"))?;
         if current.revision != expected_revision || current.deleted_at.is_none() {
             return Err(AppError::RevisionConflict);
+        }
+        if current.knowledge_state == KnowledgeState::Knowledge {
+            HierarchyRepo::ensure_root(tx, id, now)?;
         }
         tx.execute(
             "UPDATE entries SET deleted_at = NULL, revision = revision + 1, updated_at = ?1 WHERE id = ?2",
@@ -352,11 +359,17 @@ impl EntriesRepo {
     }
 
     pub fn delete_forever(tx: &Transaction<'_>, id: &str) -> AppResult<()> {
-        let deleted_at: Option<String> = tx
+        let (deleted_at, knowledge_state): (Option<String>, KnowledgeState) = tx
             .query_row(
-                "SELECT deleted_at FROM entries WHERE id = ?1",
+                "SELECT deleted_at, knowledge_state FROM entries WHERE id = ?1",
                 params![id],
-                |row| row.get(0),
+                |row| {
+                    let state: String = row.get(1)?;
+                    Ok((
+                        row.get(0)?,
+                        KnowledgeState::from_db(&state).unwrap_or(KnowledgeState::Capture),
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| AppError::not_found("条目不存在"))?;
@@ -366,6 +379,9 @@ impl EntriesRepo {
                 "ENTRY_NOT_IN_TRASH",
                 "只能永久删除回收站中的条目",
             ));
+        }
+        if knowledge_state == KnowledgeState::Knowledge {
+            HierarchyRepo::remove_entry_promote_children(tx, id, &now_string())?;
         }
 
         tx.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
