@@ -1411,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn v030_upgrade_preserves_legacy_content_and_metadata() {
+    fn v4_pre_block_document_upgrade_preserves_legacy_content_and_metadata() {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("src-tauri parent")
@@ -1486,6 +1486,14 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
+        let applied_versions = before
+            .prepare("SELECT version FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(applied_versions, vec![1, 2, 3, 4]);
         drop(before);
 
         let (write_conn, _read_conn) = open_database(&legacy_db).unwrap();
@@ -1542,6 +1550,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(legacy_documents, expected_legacy_documents);
+        let projected_entry_count: i64 = write_conn
+            .query_row("SELECT COUNT(DISTINCT entry_id) FROM blocks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(projected_entry_count, entries_before.len() as i64);
 
         let tags_after = write_conn
             .prepare(
