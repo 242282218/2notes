@@ -42,15 +42,8 @@ pub fn quick_capture_submit(
     expected_revision: i64,
 ) -> CommandResult<Draft> {
     let now = now_string();
-    let mut conn = state.write_conn().map_err(AppErrorResponse::from)?;
-    let tx = conn
-        .transaction()
-        .map_err(crate::error::AppError::from)
-        .map_err(AppErrorResponse::from)?;
-    let draft = DraftsRepo::submit_quick_capture(&tx, &content, expected_revision, &now)
-        .map_err(AppErrorResponse::from)?;
-    tx.commit()
-        .map_err(crate::error::AppError::from)
+    let draft = state
+        .with_write_tx(|tx| DraftsRepo::submit_quick_capture(tx, &content, expected_revision, &now))
         .map_err(AppErrorResponse::from)?;
     if let Err(err) = app.emit_to(
         "main",

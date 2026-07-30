@@ -24,14 +24,10 @@ pub async fn backups_create(
     kind: String,
 ) -> CommandResult<BackupInfo> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let worker_app = app.clone();
-    run_blocking(move || {
-        let state = worker_app.state::<AppState>();
-        let conn = state.write_conn()?;
-        create_backup(&state.paths, &conn, &kind)
-    })
-    .await
-    .map_err(AppErrorResponse::from)
+    let paths = app.state::<AppState>().paths.clone();
+    run_blocking(move || create_backup(&paths, &kind))
+        .await
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]

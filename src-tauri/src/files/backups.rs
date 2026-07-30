@@ -18,12 +18,18 @@ const BACKUP_PREFIX: &str = "2notes";
 const BACKUP_EXT: &str = "sqlite";
 const ALLOWED_KINDS: &[&str] = &["manual", "daily", "before_restore"];
 
-pub fn create_backup(paths: &AppPaths, conn: &Connection, kind: &str) -> AppResult<BackupInfo> {
+/// Build a VACUUM'd snapshot of the live database into `backup_dir`.
+/// Uses a short-lived standalone connection so the app's shared write/read
+/// connections (and their Mutex guards) are NOT held while VACUUM runs.
+/// VACUUM INTO reads a consistent snapshot and never mutates the source DB,
+/// so it does not need to share a connection with ongoing writes.
+pub fn create_backup(paths: &AppPaths, kind: &str) -> AppResult<BackupInfo> {
     let kind = normalize_kind(kind)?;
     fs::create_dir_all(&paths.backup_dir)?;
     let target = unique_backup_path(&paths.backup_dir, kind);
     let target_raw = target.display().to_string();
-    conn.execute("VACUUM main INTO ?1", params![target_raw])?;
+    let snapshot_conn = Connection::open(&paths.database_path)?;
+    snapshot_conn.execute("VACUUM main INTO ?1", params![target_raw])?;
     backup_info(&target, kind)
 }
 
@@ -47,14 +53,16 @@ pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<Backu
     let restore_temp = paths.database_path.with_extension("restore.tmp");
     remove_database_files(&restore_temp)?;
 
-    // Phase 1: All file I/O happens OUTSIDE the lock to avoid holding MutexGuard
-    // during disk operations and prevent Mutex poisoning from panics.
+    // Phase 1: heavy read-side checks happen OUTSIDE the database lock to keep
+    // save/quick-capture responsive. Phase 2 below holds both MutexGuards while
+    // swapping live connections and reopening the restored DB; that swap window
+    // is short but blocking for the duration, which is why Phase 1 stays outside.
     fs::copy(&source, &restore_temp)?;
     validate_restore_candidate(&restore_temp)?;
 
     let restore_result = {
         let (mut current_write, mut current_read) = state.database_pair()?;
-        let before_restore = create_backup(&paths, &current_write, "before_restore")?;
+        let before_restore = create_backup(&paths, "before_restore")?;
         let snapshot_path: PathBuf = PathBuf::from(&before_restore.path);
         let rollback_path = paths.database_path.with_extension("restore.bak");
         let placeholder_write = Connection::open_in_memory()?;
@@ -455,9 +463,9 @@ mod tests {
     fn creates_and_lists_sqlite_backup() {
         let paths = test_paths();
         fs::create_dir_all(&paths.data_dir).unwrap();
-        let (conn, _) = open_database(&paths.database_path).unwrap();
+        let (_, _) = open_database(&paths.database_path).unwrap();
 
-        let backup = create_backup(&paths, &conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         let backups = list_backups(&paths).unwrap();
 
         assert!(PathBuf::from(&backup.path).exists());
@@ -474,7 +482,7 @@ mod tests {
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "before backup", &now).unwrap();
         tx.commit().unwrap();
-        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "after backup", &now).unwrap();
         tx.commit().unwrap();
@@ -561,7 +569,7 @@ mod tests {
         .unwrap();
         let source = EntriesRepo::create(&tx, "[[旧标题]] 再次 [[旧标题]]", &now).unwrap();
         tx.commit().unwrap();
-        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         let backup_conn = Connection::open(&backup.path).unwrap();
         backup_conn.execute("DELETE FROM entry_links", []).unwrap();
         backup_conn
@@ -626,7 +634,7 @@ mod tests {
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "live entry", &now_string()).unwrap();
         tx.commit().unwrap();
-        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "live only after backup", &now_string()).unwrap();
         tx.commit().unwrap();
@@ -745,7 +753,7 @@ mod tests {
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "still here", &now_string()).unwrap();
         tx.commit().unwrap();
-        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         let rollback_path = paths.database_path.with_extension("restore.bak");
         fs::create_dir_all(&rollback_path).unwrap();
         let state = AppState::new(write_conn, read_conn, paths);
@@ -767,7 +775,7 @@ mod tests {
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "rollback entry", &now_string()).unwrap();
         tx.commit().unwrap();
-        let snapshot = create_backup(&paths, &write_conn, "before_restore").unwrap();
+        let snapshot = create_backup(&paths, "before_restore").unwrap();
         drop(read_conn);
         drop(write_conn);
         let rollback_path = paths.database_path.with_extension("restore.bak");
@@ -797,7 +805,7 @@ mod tests {
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "snapshot entry", &now_string()).unwrap();
         tx.commit().unwrap();
-        let snapshot = create_backup(&paths, &write_conn, "before_restore").unwrap();
+        let snapshot = create_backup(&paths, "before_restore").unwrap();
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "candidate only", &now_string()).unwrap();
         tx.commit().unwrap();
@@ -1250,7 +1258,7 @@ mod tests {
         });
         assert_eq!(metrics, expected);
 
-        let backup = create_backup(&paths, &write_conn, "manual").unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
         // Mutate live DB so restore has something to replace.
         let tx = write_conn.transaction().unwrap();
         EntriesRepo::create(&tx, "post-backup noise that restore must drop", &now).unwrap();

@@ -46,6 +46,10 @@ pub fn settings_update(
     patch: SettingsPatch,
 ) -> CommandResult<AppSettings> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
+    // Autostart is an OS-level side effect outside SQLite; apply it first so a
+    // later DB write failure leaves the OS in the user-requested state. The two
+    // settings rows below are written in ONE transaction so either both land
+    // or neither does (previously each had its own tx → partial-apply bug).
     if let Some(enabled) = patch.autostart_enabled {
         let result = if enabled {
             app.autolaunch().enable()
@@ -55,16 +59,19 @@ pub fn settings_update(
         result
             .map_err(|err| AppError::system("AUTOSTART_UPDATE_FAILED", err.to_string()))
             .map_err(AppErrorResponse::from)?;
-
-        let now = now_string();
-        state
-            .with_write_tx(|tx| SettingsRepo::set_bool(tx, "autostart_enabled", enabled, &now))
-            .map_err(AppErrorResponse::from)?;
     }
-    if let Some(theme_mode) = patch.theme_mode {
+    if patch.autostart_enabled.is_some() || patch.theme_mode.is_some() {
         let now = now_string();
         state
-            .with_write_tx(|tx| SettingsRepo::set_theme_mode(tx, theme_mode, &now))
+            .with_write_tx(|tx| {
+                if let Some(enabled) = patch.autostart_enabled {
+                    SettingsRepo::set_bool(tx, "autostart_enabled", enabled, &now)?;
+                }
+                if let Some(theme_mode) = patch.theme_mode {
+                    SettingsRepo::set_theme_mode(tx, theme_mode, &now)?;
+                }
+                Ok(())
+            })
             .map_err(AppErrorResponse::from)?;
     }
     settings_get(app, window, state)
