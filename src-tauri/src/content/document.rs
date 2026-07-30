@@ -207,7 +207,7 @@ fn validate_inlines(content: &[InlineNode]) -> AppResult<()> {
     Ok(())
 }
 
-fn is_safe_link_href(href: &str) -> bool {
+pub(crate) fn is_safe_link_href(href: &str) -> bool {
     let trimmed = href.trim();
     if trimmed.is_empty() {
         return false;

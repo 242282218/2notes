@@ -276,7 +276,6 @@ impl AppState {
             .lock()
             .map_err(|_| AppError::system("IMPORT_SESSION_FAILED", "导入会话状态不可用"))?;
         let now = std::time::Instant::now();
-        sessions.retain(|_, session| session.expires_at > now);
         sessions.clear();
         sessions.insert(
             id.clone(),

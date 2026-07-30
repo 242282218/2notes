@@ -6,7 +6,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
-    content::document::document_to_plain_text,
+    content::document::{document_to_plain_text, is_safe_link_href},
     db::repos::entries_repo::auto_title,
     error::{AppError, AppResult},
     types::{
@@ -271,7 +271,7 @@ fn collect_inlines<'a>(
             NodeValue::Strikethrough => {
                 with_mark(child, marks, InlineMark::Strike, output, warnings)
             }
-            NodeValue::Link(link) if is_safe_href(&link.url) => with_mark(
+            NodeValue::Link(link) if is_safe_link_href(&link.url) => with_mark(
                 child,
                 marks,
                 InlineMark::Link {
@@ -318,11 +318,6 @@ fn text_node(text: &str, marks: Vec<InlineMark>) -> Vec<InlineNode> {
         })
         .into_iter()
         .collect()
-}
-
-fn is_safe_href(href: &str) -> bool {
-    let href = href.to_ascii_lowercase();
-    href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:")
 }
 
 fn inline_text(nodes: &[InlineNode]) -> String {
