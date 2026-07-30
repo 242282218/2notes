@@ -52,10 +52,9 @@ pnpm run tauri:build
 构建完成后会生成：
 
 - 应用可执行文件：`src-tauri/target/release/two_notes.exe`
-- MSI 安装包：`src-tauri/target/release/bundle/msi/2notes_<version>_x64_en-US.msi`
 - NSIS 安装包：`src-tauri/target/release/bundle/nsis/2notes_<version>_x64-setup.exe`
 
-这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证真实打包链路。
+> 仅生成 NSIS 目标（`tauri.conf.json` 的 `bundle.targets` 已收敛为 `["nsis"]`），不再产出 MSI。这些产物不会提交到仓库；GitHub Actions 会在 `tauri-build` job 中验证 NSIS 打包链路。
 
 ### 已安装 NSIS 冒烟
 

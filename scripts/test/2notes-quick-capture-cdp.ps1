@@ -446,11 +446,23 @@ raise SystemExit(0 if len(rows) == 1 else 1)
 } finally {
   $alive = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
   if ($alive) {
-    Stop-Process -Id $process.Id -Force
+    # Give the process a chance to flush stdout/stderr before forcing it down,
+    # so ReadToEnd below captures the full buffer instead of a partial one.
+    if (-not $process.WaitForExit(3000)) {
+      Stop-Process -Id $process.Id -Force
+      $process.WaitForExit(2000) | Out-Null
+    }
+  } else {
+    # Process already exited on its own; ensure async readers are drained.
+    $process.WaitForExit(2000) | Out-Null
   }
 
-  [System.IO.File]::WriteAllText($stdoutPath, $process.StandardOutput.ReadToEnd())
-  [System.IO.File]::WriteAllText($stderrPath, $process.StandardError.ReadToEnd())
+  # ReadToEnd blocks until the redirected stream closes. Using the async API
+  # keeps the disk write outside any lock and matches installed-nsis-smoke.ps1.
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  [System.IO.File]::WriteAllText($stdoutPath, $stdoutTask.GetAwaiter().GetResult())
+  [System.IO.File]::WriteAllText($stderrPath, $stderrTask.GetAwaiter().GetResult())
 
   Write-Output "STDOUT_LOG $stdoutPath"
   Write-Output "STDERR_LOG $stderrPath"
