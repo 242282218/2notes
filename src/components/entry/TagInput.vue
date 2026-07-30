@@ -55,8 +55,23 @@ function addTag(value = draft.value) {
   if (props.disabled) {
     return;
   }
-  const next = normalizeTagNames([...selected.value, value]);
-  emit("update:modelValue", next);
+  const trimmed = value.trim();
+  if (!trimmed) {
+    draft.value = "";
+    suggestions.value = [];
+    return;
+  }
+  // Compute the dedupe key against the *display* view so case-insensitive
+  // duplicates are still prevented, but emit the parent's original array plus
+  // the new tag — never overwrite the parent's casing/whitespace intent with
+  // the normalized projection we render.
+  const dedupeKey = trimmed.toLocaleLowerCase();
+  const alreadyPresent = props.modelValue.some(
+    (existing) => existing.trim().toLocaleLowerCase() === dedupeKey,
+  );
+  if (!alreadyPresent) {
+    emit("update:modelValue", [...props.modelValue, trimmed]);
+  }
   draft.value = "";
   suggestions.value = [];
 }
@@ -65,10 +80,22 @@ function removeTag(tag: string) {
   if (props.disabled) {
     return;
   }
-  emit(
-    "update:modelValue",
-    selected.value.filter((item) => item !== tag),
-  );
+  // `tag` comes from the normalized display view; match it against the parent's
+  // original array case-insensitively and drop exactly one equivalent entry so
+  // we never silently coerce siblings the parent stored differently.
+  const key = tag.trim().toLocaleLowerCase();
+  let removed = false;
+  const next = props.modelValue.filter((existing) => {
+    if (removed) {
+      return true;
+    }
+    if (existing.trim().toLocaleLowerCase() === key) {
+      removed = true;
+      return false;
+    }
+    return true;
+  });
+  emit("update:modelValue", next);
 }
 
 function onKeydown(event: KeyboardEvent) {

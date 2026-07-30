@@ -106,6 +106,16 @@ struct TrustedMetadata {
     tags: Vec<String>,
 }
 
+/// Extract a JSON/YAML front-matter block from the head of `input`.
+///
+/// Returns `(Some(candidate), body)` only when the leading `---\n ... \n---\n`
+/// block actually parses as a valid `ImportFrontmatter` payload. If the leading
+/// `---` is followed by anything that cannot be parsed as JSON or YAML (for
+/// example a Markdown thematic rule sitting at the top of the document), the
+/// whole input is returned as the body and `None` is returned for the
+/// front-matter. This prevents a stray `---` horizontal rule from swallowing
+/// the first chunk of the document body (round-trip safety: export writes the
+/// same `---` sequence as a divider, so import must not misread it as metadata).
 fn extract_frontmatter(input: &str) -> (Option<&str>, &str) {
     let Some(rest) = input.strip_prefix("---\n") else {
         return (None, input);
@@ -113,7 +123,20 @@ fn extract_frontmatter(input: &str) -> (Option<&str>, &str) {
     let Some(end) = rest.find("\n---\n") else {
         return (None, input);
     };
-    (Some(&rest[..end]), &rest[end + "\n---\n".len()..])
+    let candidate = &rest[..end];
+    if !is_valid_frontmatter(candidate) {
+        return (None, input);
+    }
+    (Some(candidate), &rest[end + "\n---\n".len()..])
+}
+
+/// True when `candidate` parses as JSON or YAML `ImportFrontmatter`. Used to
+/// gate the front-matter boundary so a non-metadata `---` rule is never treated
+/// as metadata (which would silently drop the document body above it).
+fn is_valid_frontmatter(candidate: &str) -> bool {
+    serde_json::from_str::<ImportFrontmatter>(candidate)
+        .or_else(|_| serde_yaml_ng::from_str::<ImportFrontmatter>(candidate))
+        .is_ok()
 }
 
 fn split_provenance(body: &str) -> (&str, Option<String>) {
@@ -384,6 +407,29 @@ mod tests {
             imported.document.blocks[0].content[1],
             InlineNode::HardBreak
         ));
+    }
+
+    #[test]
+    fn markdown_import_does_not_swallow_leading_thematic_rule() {
+        // The leading `---` is a CommonMark thematic rule, not YAML metadata.
+        // It must be preserved as a thematic break block, and the following
+        // paragraph ("foo") must remain in the body instead of being parsed
+        // into a front-matter candidate that silently drops the prose.
+        let markdown = "---\n\nfoo\n---\nbar";
+        let imported = parse_import_bytes(markdown.as_bytes()).unwrap();
+        assert!(
+            imported.source_entry_id.is_none(),
+            "thematic rule must not be interpreted as metadata id carrier"
+        );
+        let rendered = document_to_plain_text(&imported.document);
+        assert!(
+            rendered.contains("foo"),
+            "body must retain 'foo' before the second thematic rule, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("bar"),
+            "body must retain 'bar' after the second thematic rule, got: {rendered}"
+        );
     }
 
     #[test]

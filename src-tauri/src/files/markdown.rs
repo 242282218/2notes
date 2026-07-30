@@ -54,7 +54,7 @@ pub fn export_entries(entries: &[EntryDetail], target_dir: &Path) -> AppResult<V
     let mut paths = Vec::new();
 
     for entry in entries {
-        let file_name = unique_file_name(entry, &mut used, target_dir);
+        let file_name = unique_file_name(entry, &mut used, target_dir)?;
         let path = target_dir.join(file_name);
         write_entry_file(&path, &render_entry(entry)?)?;
         paths.push(path);
@@ -104,7 +104,11 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
     ))
 }
 
-fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir: &Path) -> String {
+fn unique_file_name(
+    entry: &EntryDetail,
+    used: &mut HashSet<String>,
+    _target_dir: &Path,
+) -> AppResult<String> {
     // Use shared timestamp helper for consistent naming across backups and markdown exports.
     let timestamp = super::timestamps::markdown_timestamp(&entry.created_at);
     let summary = entry
@@ -125,6 +129,10 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir
     let base_name = format!("{timestamp}-{slug}");
     let mut candidate = format!("{base_name}.md");
     let mut collision_count = 0;
+    // Upper bound prevents a pathological `used` set from looping forever;
+    // 9999 collisions is far beyond any legitimate export volume and keeps the
+    // operation bounded even when the directory already holds many siblings.
+    const MAX_COLLISIONS: u32 = 9999;
 
     if used.contains(&candidate) {
         loop {
@@ -137,10 +145,19 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir
             if !used.contains(&candidate) {
                 break;
             }
+            if collision_count >= MAX_COLLISIONS {
+                return Err(AppError::validation(
+                    "EXPORT_FILE_NAME_EXHAUSTED",
+                    format!(
+                        "could not allocate unique markdown file name for entry {entry_id}",
+                        entry_id = entry.id
+                    ),
+                ));
+            }
         }
     }
     used.insert(candidate.clone());
-    candidate
+    Ok(candidate)
 }
 
 #[cfg(test)]

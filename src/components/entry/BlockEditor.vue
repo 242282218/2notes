@@ -269,6 +269,6 @@ defineExpose({
 <template>
   <EditorContent
     :editor="editor ?? undefined"
-    class="min-h-36 rounded border border-border bg-surface px-3 py-2 text-ui leading-6 outline-none focus-within:border-primary"
+    class="min-h-36 rounded border border-border bg-bg-elevated px-3 py-2 text-ui leading-6 outline-none focus-within:border-brand"
   />
 </template>

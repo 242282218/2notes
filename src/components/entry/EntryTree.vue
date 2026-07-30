@@ -298,7 +298,7 @@ onBeforeUnmount(() =>
           class="min-w-0 flex-1 truncate rounded-sm px-2 py-2 text-left text-ui outline-none ring-focus hover:bg-bg-secondary"
           :class="
             node.id === selectedId
-              ? 'bg-primary/10 text-text-primary'
+              ? 'bg-brand/10 text-text-primary'
               : 'text-text-secondary'
           "
           type="button"

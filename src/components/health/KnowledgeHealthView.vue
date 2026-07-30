@@ -178,7 +178,7 @@ void loadSummary();
           class="elevation-panel grid gap-1 rounded-lg bg-bg-elevated p-4 text-left outline-none ring-focus hover:bg-selected"
           :class="
             selectedKind === category.kind
-              ? 'border border-primary/40'
+              ? 'border border-brand/40'
               : 'border border-transparent'
           "
           :data-health-kind="category.kind"

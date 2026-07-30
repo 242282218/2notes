@@ -161,10 +161,17 @@ export default defineConfig({
       "btn-primary bg-danger text-on-danger border-danger hover:bg-danger-hover hover:border-danger-hover active:bg-danger-hover shadow-[0_1px_2px_var(--color-danger-shadow)]",
     "btn-secondary":
       "btn-base min-w-[88px] h-[36px] px-3 bg-bg-elevated text-text-primary border border-border-strong hover:bg-bg-hover hover:border-border-hover active:bg-bg-active",
+    // Legacy aliases kept for readability; resolve to the canonical btn-icon shape
+    // so legacy class names that predate this shortcut still generate CSS.
+    "icon-button":
+      "btn-base size-[34px] bg-transparent text-text-secondary border border-transparent hover:bg-bg-hover hover:text-text-primary active:bg-bg-active",
     "btn-icon":
       "btn-base size-[34px] bg-transparent text-text-secondary border border-transparent hover:bg-bg-hover hover:text-text-primary active:bg-bg-active",
     "btn-icon-danger":
       "btn-icon text-danger hover:bg-danger/10 hover:text-danger",
+    // Drop-in menu entry used by the tree move menu and similar inline menus.
+    "menu-item":
+      "flex items-center gap-2 rounded-sm px-3 py-2 text-left text-ui text-text-primary transition-[background-color] duration-fast hover:bg-bg-hover",
 
     // Form Inputs
     "input-base":

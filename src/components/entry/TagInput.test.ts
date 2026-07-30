@@ -31,6 +31,38 @@ describe("TagInput", () => {
     vi.useRealTimers();
   });
 
+  it("preserves parent casing when committing a distinct tag alongside an existing one", async () => {
+    const wrapper = mount(TagInput, {
+      props: {
+        modelValue: ["Work"],
+      },
+    });
+    const input = wrapper.find("input");
+    await input.setValue("rust");
+    await input.trigger("blur");
+
+    // The parent's original "Work" casing must be preserved verbatim; only the
+    // new "rust" tag is appended, no case-folding rewrite is emitted.
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["Work", "rust"]]);
+  });
+
+  it("removes only the case-insensitive match and preserves remaining originals", async () => {
+    const wrapper = mount(TagInput, {
+      props: {
+        modelValue: ["Work", "Rust", "docs"],
+      },
+    });
+    // The display view folds to lower-case; click the remove button for "rust".
+    const removeButtons = wrapper.findAll("button[aria-label^='移除标签']");
+    const rustButton = removeButtons.find((button) =>
+      button.attributes("aria-label")?.toLocaleLowerCase().includes("rust"),
+    );
+    expect(rustButton).toBeDefined();
+    await rustButton!.trigger("click");
+
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["Work", "docs"]]);
+  });
+
   it("does not commit duplicate tags from blur", async () => {
     vi.useFakeTimers();
     const wrapper = mount(TagInput, {
@@ -43,7 +75,9 @@ describe("TagInput", () => {
     await wrapper.find("input").trigger("blur");
     await vi.advanceTimersByTimeAsync(150);
 
-    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["work"]]);
+    // A case-insensitive duplicate must not emit a protective rewrite that
+    // would coerce the parent's original casing back through normalization.
+    expect(wrapper.emitted("update:modelValue")).toBeUndefined();
     vi.useRealTimers();
   });
 
