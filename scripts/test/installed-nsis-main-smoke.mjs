@@ -688,6 +688,11 @@ async function runScenario(options) {
   }
 }
 
+// Helper-only self-test: verifies argument parsing, console-error classification,
+// DOM snapshot expression, click-error classification, keyboard-event helpers,
+// and CDP client timeout/close paths WITHOUT opening a real CDP connection or
+// running the 8-phase main flow. It is NOT a substitute for end-to-end CDP
+// runs in release.yml; add a real CDP smoke step there to cover the main flow.
 async function selfTest() {
   const parsed = parseArgs(["--self-test"]);
   if (parsed.port !== 9222 || !parsed.evidenceDir.endsWith("installed-nsis-main-smoke-self-test")) {
@@ -772,7 +777,7 @@ async function selfTest() {
       if (error.message !== "CDP socket closed") throw error;
     },
   );
-  console.log("PASS installed-nsis-main-smoke self-test");
+  console.log("PASS installed-nsis-main-smoke helper self-test (no real CDP)");
 }
 
 main().catch((error) => {

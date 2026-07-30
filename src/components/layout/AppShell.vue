@@ -118,6 +118,7 @@ onMounted(async () => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
   if (!isTauri()) return;
   const unlisten = await listen("entries-changed", async () => {
+    if (disposed) return;
     if (await flushDetail()) {
       if (entries.view !== "health") {
         await entries.load();
@@ -133,6 +134,7 @@ onMounted(async () => {
   unlistenEntriesChanged = unlisten;
   await entries.load();
   await entries.refreshTags();
+  if (disposed) return;
 });
 
 onUnmounted(() => {

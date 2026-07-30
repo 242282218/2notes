@@ -64,7 +64,7 @@ export default tseslint.config(
       "vue/html-self-closing": "off",
       "vue/max-attributes-per-line": "off",
       "vue/multi-word-component-names": "off",
-      "vue/no-v-html": "off",
+      "vue/no-v-html": "warn",
       "vue/singleline-html-element-content-newline": "off",
     },
   },
