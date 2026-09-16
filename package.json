@@ -23,9 +23,9 @@
     "gen:types": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/generate-types.ps1"
   },
   "dependencies": {
-    "@tanstack/vue-virtual": "^3.13.35",
+    "@tanstack/vue-virtual": "^3.13.38",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2",
     "@tiptap/core": "^3.31.3",
     "@tiptap/extension-unique-id": "^3.31.3",
@@ -33,22 +33,22 @@
     "@tiptap/vue-3": "^3.31.3",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
-    "vue": "^3.5.13"
+    "vue": "^3.5.42"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2",
-    "@types/node": "^26.0.1",
-    "@unocss/reset": "^66.7.3",
+    "@types/node": "^26.5.1",
+    "@unocss/reset": "^66.10.2",
     "@vitejs/plugin-vue": "^5.2.1",
-    "@vue/test-utils": "^2.4.11",
-    "eslint": "^10.6.0",
-    "eslint-plugin-vue": "^10.9.2",
+    "@vue/test-utils": "^2.5.0",
+    "eslint": "^10.10.0",
+    "eslint-plugin-vue": "^10.11.0",
     "jsdom": "^29.1.1",
-    "prettier": "^3.9.1",
+    "prettier": "^3.9.6",
     "typescript": "~5.6.2",
-    "typescript-eslint": "^8.62.0",
-    "unocss": "^66.7.3",
+    "typescript-eslint": "^8.70.0",
+    "unocss": "^66.10.2",
     "vite": "^6.0.3",
     "vitest": "^4.1.11",
     "vue-tsc": "^2.1.10"
