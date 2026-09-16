@@ -4,29 +4,62 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::error::AppResult;
 
+/// Number of read-only connections kept open for concurrent readers.
+/// WAL mode allows multiple readers to execute in parallel, so a single
+/// shared read connection would serialize every read query in the app.
+pub const READ_POOL_SIZE: usize = 4;
+
 /// Open the database and return a (write_connection, read_connection) pair.
 /// WAL mode enables concurrent reads via the separate read connection.
 /// Migrations are applied only on the write connection.
 /// The read connection is opened read-only and also sets `PRAGMA query_only = ON`.
 pub fn open_database(path: &Path) -> AppResult<(Connection, Connection)> {
+    let (write_conn, first_read) = open_database_with_read_pool(path)?;
+    let mut read_conns = first_read.into_iter();
+    let read_conn = read_conns
+        .next()
+        .expect("open_database_with_read_pool always returns at least one read connection");
+    Ok((write_conn, read_conn))
+}
+
+/// Open the database and return the write connection plus a read pool.
+/// Shared by startup and the backup-restore path so both keep the same
+/// connection topology (one writer + a pool of read-only readers).
+pub fn open_database_with_read_pool(path: &Path) -> AppResult<(Connection, Vec<Connection>)> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut write_conn = Connection::open(path)?;
     apply_write_pragmas(&write_conn)?;
     super::migrations::run_migrations(&mut write_conn)?;
-    if let Err(err) = super::repos::EntriesRepo::repair_documents(&mut write_conn) {
-        log::error!("entry_document_repair_failed source={err}");
-    }
-    if let Err(err) = super::repos::KnowledgeRepo::ensure_link_index(&mut write_conn) {
-        log::error!("knowledge_link_index_rebuild_failed source={err}");
-    }
+    super::repos::EntriesRepo::repair_documents(&mut write_conn).map_err(|err| {
+        crate::error::AppError::system(
+            "DB_DOCUMENT_REPAIR_FAILED",
+            format!("启动时修复文档投影失败: {err}"),
+        )
+    })?;
+    super::repos::KnowledgeRepo::ensure_link_index(&mut write_conn).map_err(|err| {
+        crate::error::AppError::system(
+            "DB_LINK_INDEX_FAILED",
+            format!("启动时重建知识索引失败: {err}"),
+        )
+    })?;
 
+    let read_conns = open_read_connections(path, READ_POOL_SIZE)?;
+
+    Ok((write_conn, read_conns))
+}
+
+/// Open `count` read-only connections to the database, each with read pragmas.
+pub fn open_read_connections(path: &Path, count: usize) -> AppResult<Vec<Connection>> {
     let read_flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let read_conn = Connection::open_with_flags(path, read_flags)?;
-    apply_read_pragmas(&read_conn)?;
-
-    Ok((write_conn, read_conn))
+    let mut conns = Vec::with_capacity(count);
+    for _ in 0..count {
+        let conn = Connection::open_with_flags(path, read_flags)?;
+        apply_read_pragmas(&conn)?;
+        conns.push(conn);
+    }
+    Ok(conns)
 }
 
 #[cfg(test)]
@@ -34,6 +67,17 @@ pub fn open_database(path: &Path) -> AppResult<(Connection, Connection)> {
 /// Shared-memory URIs cannot use pure `SQLITE_OPEN_READ_ONLY`, so the read
 /// connection is protected with `PRAGMA query_only = ON` instead.
 pub fn open_in_memory() -> AppResult<(Connection, Connection)> {
+    let (write_conn, mut read_conns) = open_in_memory_pool(1)?;
+    let read_conn = read_conns
+        .pop()
+        .expect("open_in_memory_pool returns exactly one read connection");
+    Ok((write_conn, read_conn))
+}
+
+#[cfg(test)]
+/// Open a write connection plus `count` read connections on a fresh
+/// shared-cache in-memory database, for read-pool concurrency tests.
+pub fn open_in_memory_pool(count: usize) -> AppResult<(Connection, Vec<Connection>)> {
     let uri = format!(
         "file:2notes-test-{}?mode=memory&cache=shared",
         uuid::Uuid::new_v4()
@@ -47,10 +91,14 @@ pub fn open_in_memory() -> AppResult<(Connection, Connection)> {
     super::repos::EntriesRepo::repair_documents(&mut write_conn)?;
     super::repos::KnowledgeRepo::ensure_link_index(&mut write_conn)?;
 
-    let read_conn = Connection::open_with_flags(&uri, flags)?;
-    apply_read_pragmas(&read_conn)?;
+    let mut read_conns = Vec::with_capacity(count);
+    for _ in 0..count {
+        let conn = Connection::open_with_flags(&uri, flags)?;
+        apply_read_pragmas(&conn)?;
+        read_conns.push(conn);
+    }
 
-    Ok((write_conn, read_conn))
+    Ok((write_conn, read_conns))
 }
 
 fn apply_write_pragmas(conn: &Connection) -> AppResult<()> {

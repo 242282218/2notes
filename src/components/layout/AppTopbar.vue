@@ -36,21 +36,10 @@ const emit = defineEmits<{
   moveToTrash: [];
 }>();
 
-const typeOptions: Array<{ value: EntryType | ""; label: string }> = [
-  { value: "", label: "全部类型" },
-  { value: "unclear", label: "未澄清" },
-  { value: "idea", label: "想法" },
-  { value: "task", label: "任务" },
-  { value: "material", label: "素材" },
-  { value: "question", label: "问题" },
-];
+import { STATUS_OPTIONS, TYPE_OPTIONS } from "../../constants/labels";
 
-const statusOptions: Array<{ value: EntryStatus | ""; label: string }> = [
-  { value: "", label: "全部状态" },
-  { value: "pending", label: "待处理" },
-  { value: "done", label: "已完成" },
-  { value: "archived", label: "已归档" },
-];
+const typeOptions = TYPE_OPTIONS;
+const statusOptions = STATUS_OPTIONS;
 
 const searchInputRef = ref<HTMLInputElement | null>(null);
 const filterPanelOpen = ref(false);

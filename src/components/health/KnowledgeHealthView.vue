@@ -12,6 +12,8 @@ import type {
   KnowledgeHealthSummary,
 } from "../../types/generated";
 import EmptyState from "../shared/EmptyState.vue";
+import { PAGE_SIZE } from "../../constants/limits";
+import { toErrorMessage } from "../../utils/errors";
 
 const props = defineProps<{
   invalidatedToken: number;
@@ -85,7 +87,7 @@ async function loadSummary() {
     }
   } catch (cause) {
     if (requestId === summaryRequestId) {
-      error.value = cause instanceof Error ? cause.message : "健康报告加载失败";
+      error.value = toErrorMessage(cause, "健康报告加载失败");
     }
   } finally {
     if (requestId === summaryRequestId) summaryLoading.value = false;
@@ -99,7 +101,10 @@ async function loadIssues(offset = 0, append = false) {
   issuesLoading.value = true;
   error.value = null;
   try {
-    const next = await knowledgeHealthIssuesGet(kind, { limit: 50, offset });
+    const next = await knowledgeHealthIssuesGet(kind, {
+      limit: PAGE_SIZE,
+      offset,
+    });
     if (requestId === issuesRequestId && selectedKind.value === kind) {
       page.value =
         append && page.value
@@ -108,7 +113,7 @@ async function loadIssues(offset = 0, append = false) {
     }
   } catch (cause) {
     if (requestId === issuesRequestId && selectedKind.value === kind) {
-      error.value = cause instanceof Error ? cause.message : "健康问题加载失败";
+      error.value = toErrorMessage(cause, "健康问题加载失败");
     }
   } finally {
     if (requestId === issuesRequestId) issuesLoading.value = false;
@@ -178,7 +183,7 @@ void loadSummary();
           class="elevation-panel grid gap-1 rounded-lg bg-bg-elevated p-4 text-left outline-none ring-focus hover:bg-selected"
           :class="
             selectedKind === category.kind
-              ? 'border border-primary/40'
+              ? 'border border-brand/40'
               : 'border border-transparent'
           "
           :data-health-kind="category.kind"

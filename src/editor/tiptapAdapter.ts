@@ -23,6 +23,7 @@ import type {
 } from "../types/generated";
 
 import {
+  DOCUMENT_SCHEMA_VERSION,
   defaultBlockAttrs,
   isUuidV4,
   newBlockId,
@@ -68,7 +69,7 @@ export function fromTiptapDocument(
     : [];
   const blocks = rawChildren.length > 0 ? rawChildren : [emptyParagraphNode()];
   const document: BlockDocument = {
-    schemaVersion: 1,
+    schemaVersion: DOCUMENT_SCHEMA_VERSION,
     blocks: regenerateUnstableIds(blocks),
   };
   return document;
@@ -84,6 +85,22 @@ function attrsWithId(
 function readId(attrs: Record<string, unknown> | undefined): string {
   const candidate = attrs?.[BLOCK_ID_ATTR];
   return typeof candidate === "string" ? candidate : "";
+}
+
+function emptyParagraphTiptapNode(): TiptapNode {
+  return {
+    type: "paragraph",
+    attrs: attrsWithId(newBlockId(), {}),
+    content: [],
+  };
+}
+
+function emptyListItemTiptapNode(): TiptapNode {
+  return {
+    type: "listItem",
+    attrs: attrsWithId(newBlockId(), {}),
+    content: [emptyParagraphTiptapNode()],
+  };
 }
 
 function blockToTiptap(node: BlockNode): TiptapNode {
@@ -106,14 +123,20 @@ function blockToTiptap(node: BlockNode): TiptapNode {
       return {
         type: "bulletList",
         attrs: attrsWithId(node.id, {}),
-        content: node.children.map(blockToTiptap),
+        content:
+          node.children.length > 0
+            ? node.children.map(blockToTiptap)
+            : [emptyListItemTiptapNode()],
       };
     case "orderedList": {
       const start = node.attrs.start ?? 1;
       return {
         type: "orderedList",
         attrs: attrsWithId(node.id, { start }),
-        content: node.children.map(blockToTiptap),
+        content:
+          node.children.length > 0
+            ? node.children.map(blockToTiptap)
+            : [emptyListItemTiptapNode()],
       };
     }
     case "listItem":
@@ -139,8 +162,12 @@ function blockToTiptap(node: BlockNode): TiptapNode {
       return {
         type: "blockquote",
         attrs: attrsWithId(node.id, {}),
+        // ProseMirror requires a text block inside a blockquote. The persistence
+        // schema allows empty containers, so hydrate one as an empty paragraph.
         content:
-          node.children.length > 0 ? node.children.map(blockToTiptap) : [],
+          node.children.length > 0
+            ? node.children.map(blockToTiptap)
+            : [emptyParagraphTiptapNode()],
       };
     case "codeBlock": {
       const language = node.attrs.language ?? null;
@@ -161,9 +188,6 @@ function inlineToTiptap(content: InlineNode[]): TiptapNode[] {
   for (const node of content) {
     if (node.type === "hardBreak") {
       nodes.push({ type: "hardBreak" });
-      continue;
-    }
-    if (containsExecutableMarker(node.text)) {
       continue;
     }
     nodes.push(inlineNodeToTiptap(node));
@@ -334,10 +358,6 @@ function inlineFromTiptap(content: TiptapNode[] | undefined): InlineNode[] {
       continue;
     }
     const text = child.text;
-    // The persistence contract never carries executable markers from pasted editor content.
-    if (containsExecutableMarker(text)) {
-      continue;
-    }
     const marks = (child.marks ?? [])
       .map(markFromTiptap)
       .filter((mark): mark is InlineMark => mark !== null);
@@ -414,21 +434,6 @@ function hasText(node: TiptapNode): boolean {
       (child) => child.type === "text" && typeof child.text === "string",
     ),
   );
-}
-
-// The editor surface itself never dispatches script execution; these patterns only block
-// the leak of executable strings into our inline text storage shape after a paste.
-const EXECUTABLE_PATTERNS = [
-  /<script\b/i,
-  /javascript:/i,
-  /\son\w+\s*=/i,
-  /<iframe\b/i,
-  /<object\b/i,
-  /<embed\b/i,
-];
-
-function containsExecutableMarker(text: string): boolean {
-  return EXECUTABLE_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export { defaultBlockAttrs };

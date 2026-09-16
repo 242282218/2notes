@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use crate::{
-    app_state::AppState,
+    app_state::{AppState, BackupOperationGuard},
     commands::{require_main_window, run_blocking},
     error::{AppError, AppErrorResponse, CommandResult},
     files::backups::{create_backup, list_backups, restore_backup},
@@ -24,14 +24,17 @@ pub async fn backups_create(
     kind: String,
 ) -> CommandResult<BackupInfo> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let worker_app = app.clone();
-    run_blocking(move || {
-        let state = worker_app.state::<AppState>();
-        let conn = state.write_conn()?;
-        create_backup(&state.paths, &conn, &kind)
-    })
-    .await
-    .map_err(AppErrorResponse::from)
+    let paths = app.state::<AppState>().paths.clone();
+    let state = app.state::<AppState>();
+    let Some(_guard) = BackupOperationGuard::begin(&state).map_err(AppErrorResponse::from)? else {
+        return Err(AppErrorResponse::from(AppError::validation(
+            "BACKUP_IN_PROGRESS",
+            "已有备份或恢复操作正在进行",
+        )));
+    };
+    run_blocking(move || create_backup(&paths, &kind))
+        .await
+        .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
@@ -50,23 +53,41 @@ pub async fn backups_restore(
     path: String,
 ) -> CommandResult<BackupInfo> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    prepare_quick_capture_for_restore(&app).await?;
-    let worker_app = app.clone();
-    let restored = run_blocking(move || {
-        let state = worker_app.state::<AppState>();
-        restore_backup(&state, &path)
-    })
-    .await
-    .map_err(AppErrorResponse::from)?;
-    if let Err(err) = app.emit_to("quick-capture", "database-restored", ()) {
-        log::warn!("database_restored_emit_failed source={err}");
+    let state = app.state::<AppState>();
+    let Some(_guard) = BackupOperationGuard::begin(&state).map_err(AppErrorResponse::from)? else {
+        return Err(AppErrorResponse::from(AppError::validation(
+            "RESTORE_IN_PROGRESS",
+            "已有数据库恢复操作正在进行",
+        )));
+    };
+
+    let result = async {
+        prepare_quick_capture_for_restore(&app).await?;
+        let worker_app = app.clone();
+        let restored = run_blocking(move || {
+            let state = worker_app.state::<AppState>();
+            restore_backup(&state, &path)
+        })
+        .await
+        .map_err(AppErrorResponse::from)?;
+        if let Err(err) = app.emit_to("quick-capture", "database-restored", ()) {
+            log::warn!("database_restored_emit_failed source={err}");
+        }
+        Ok(restored)
     }
-    Ok(restored)
+    .await;
+
+    if result.is_err() {
+        if let Err(err) = app.emit_to("quick-capture", "database-restore-failed", ()) {
+            log::warn!("database_restore_failed_emit_failed source={err}");
+        }
+    }
+    result
 }
 #[tauri::command]
-pub fn database_restore_ready(
+pub async fn database_restore_ready(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     request_id: String,
 ) -> CommandResult<()> {
     if window.label() != "quick-capture" {
@@ -75,7 +96,8 @@ pub fn database_restore_ready(
             "当前窗口无权确认数据库恢复",
         )));
     }
-    if !state
+    if !app
+        .state::<AppState>()
         .mark_restore_ready(&request_id)
         .map_err(AppErrorResponse::from)?
     {

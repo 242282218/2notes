@@ -1,17 +1,21 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, reactive, ref } from "vue";
 
 import { settingsGet, settingsUpdate } from "../services/settingsApi";
 import { useTheme } from "../composables/useTheme";
+import { trackPendingOperation } from "../composables/usePendingOperations";
+import { toErrorMessage } from "../utils/errors";
 import type { AppSettings, SettingsPatch, ThemeMode } from "../types/generated";
 
-type MutableField = "autostartEnabled" | "themeMode";
+type MutableField = "autostartEnabled" | "themeMode" | "backupRetentionCount";
+
+type MutableValue = boolean | ThemeMode | number;
 
 interface QueuedWrite {
   field: MutableField;
-  target: boolean | ThemeMode;
+  target: MutableValue;
   /** Last known persisted value for this field at enqueue time. */
-  lastSuccess: boolean | ThemeMode | null;
+  lastSuccess: MutableValue | null;
   resolve: () => void;
   reject: (error: unknown) => void;
 }
@@ -35,6 +39,9 @@ function pickChangedFields(
   }
   if (patch.themeMode != null) {
     next.themeMode = serverSettings.themeMode;
+  }
+  if (patch.backupRetentionCount != null) {
+    next.backupRetentionCount = serverSettings.backupRetentionCount;
   }
   return next;
 }
@@ -71,9 +78,23 @@ function pickReadonlyPathFields(
 export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<AppSettings | null>(null);
   const loading = ref(false);
-  const error = ref<string | null>(null);
+  const loadError = ref<string | null>(null);
+  const fieldErrors = reactive<Record<MutableField, string | null>>({
+    autostartEnabled: null,
+    themeMode: null,
+    backupRetentionCount: null,
+  });
+  const error = computed(
+    () =>
+      fieldErrors.autostartEnabled ??
+      fieldErrors.themeMode ??
+      fieldErrors.backupRetentionCount ??
+      loadError.value,
+  );
   const autostartSaving = ref(false);
   const themeSaving = ref(false);
+  const backupRetentionSaving = ref(false);
+  const shortcutSaving = ref(false);
 
   let loadPromise: Promise<void> | null = null;
   let mutationGeneration = 0;
@@ -81,6 +102,7 @@ export const useSettingsStore = defineStore("settings", () => {
   /** Last successfully persisted mutable values (not optimistic). */
   let lastPersistedAutostart: boolean | null = null;
   let lastPersistedTheme: ThemeMode | null = null;
+  let lastPersistedBackupRetention: number | null = null;
 
   const writeQueue: QueuedWrite[] = [];
   let draining = false;
@@ -94,43 +116,42 @@ export const useSettingsStore = defineStore("settings", () => {
       (item) => item.field === "autostartEnabled",
     );
     themeSaving.value = writeQueue.some((item) => item.field === "themeMode");
+    backupRetentionSaving.value = writeQueue.some(
+      (item) => item.field === "backupRetentionCount",
+    );
   }
 
   function rememberPersistedFromSettings(next: AppSettings) {
     lastPersistedAutostart = next.autostartEnabled;
     lastPersistedTheme = next.themeMode;
+    lastPersistedBackupRetention = next.backupRetentionCount;
   }
 
-  function captureLastSuccess(field: MutableField): boolean | ThemeMode | null {
-    // Prefer explicitly tracked persisted values.
+  function captureLastSuccess(field: MutableField): MutableValue | null {
     if (field === "autostartEnabled" && lastPersistedAutostart != null) {
       return lastPersistedAutostart;
     }
     if (field === "themeMode" && lastPersistedTheme != null) {
       return lastPersistedTheme;
     }
-
-    // If earlier writes for this field are already queued, reuse the first
-    // item's lastSuccess (the last truly persisted baseline).
+    if (
+      field === "backupRetentionCount" &&
+      lastPersistedBackupRetention != null
+    ) {
+      return lastPersistedBackupRetention;
+    }
     for (const item of writeQueue) {
-      if (item.field === field) {
-        return item.lastSuccess;
-      }
+      if (item.field === field) return item.lastSuccess;
     }
-
-    // No pending writes and no tracked baseline yet: current store value is
-    // the last known persisted snapshot (e.g. tests/direct assignment).
-    if (field === "autostartEnabled") {
+    if (field === "autostartEnabled")
       return settings.value?.autostartEnabled ?? null;
-    }
-    return settings.value?.themeMode ?? null;
+    if (field === "themeMode") return settings.value?.themeMode ?? null;
+    return settings.value?.backupRetentionCount ?? null;
   }
 
-  function applyOptimistic(field: MutableField, target: boolean | ThemeMode) {
+  function applyOptimistic(field: MutableField, target: MutableValue) {
     if (!settings.value) {
-      if (field === "themeMode") {
-        useTheme().setMode(target as ThemeMode);
-      }
+      if (field === "themeMode") useTheme().setMode(target as ThemeMode);
       return;
     }
     if (field === "autostartEnabled") {
@@ -140,36 +161,39 @@ export const useSettingsStore = defineStore("settings", () => {
       };
       return;
     }
+    if (field === "themeMode") {
+      settings.value = { ...settings.value, themeMode: target as ThemeMode };
+      useTheme().setMode(target as ThemeMode);
+      return;
+    }
     settings.value = {
       ...settings.value,
-      themeMode: target as ThemeMode,
+      backupRetentionCount: target as number,
     };
-    useTheme().setMode(target as ThemeMode);
   }
 
   function rollbackField(
     field: MutableField,
-    lastSuccess: boolean | ThemeMode | null,
+    lastSuccess: MutableValue | null,
   ) {
-    if (lastSuccess == null) {
-      return;
-    }
+    if (lastSuccess == null || !settings.value) return;
     if (field === "autostartEnabled") {
-      if (settings.value) {
-        settings.value = {
-          ...settings.value,
-          autostartEnabled: lastSuccess as boolean,
-        };
-      }
-      return;
-    }
-    if (settings.value) {
+      settings.value = {
+        ...settings.value,
+        autostartEnabled: lastSuccess as boolean,
+      };
+    } else if (field === "themeMode") {
       settings.value = {
         ...settings.value,
         themeMode: lastSuccess as ThemeMode,
       };
+      useTheme().setMode(lastSuccess as ThemeMode);
+    } else {
+      settings.value = {
+        ...settings.value,
+        backupRetentionCount: lastSuccess as number,
+      };
     }
-    useTheme().setMode(lastSuccess as ThemeMode);
   }
 
   function mergeServerResponse(
@@ -194,14 +218,27 @@ export const useSettingsStore = defineStore("settings", () => {
             ? {
                 autostartEnabled: item.target as boolean,
                 themeMode: null,
+                backupRetentionCount: null,
+                shortcut: null,
               }
-            : {
-                autostartEnabled: null,
-                themeMode: item.target as ThemeMode,
-              };
+            : item.field === "themeMode"
+              ? {
+                  autostartEnabled: null,
+                  themeMode: item.target as ThemeMode,
+                  backupRetentionCount: null,
+                  shortcut: null,
+                }
+              : {
+                  autostartEnabled: null,
+                  themeMode: null,
+                  backupRetentionCount: item.target as number,
+                  shortcut: null,
+                };
 
         try {
-          const serverSettings = await settingsUpdate(patch);
+          const serverSettings = await trackPendingOperation(
+            settingsUpdate(patch),
+          );
           mergeServerResponse(serverSettings, patch);
 
           // Keep the user intent for the field we just wrote, even if the
@@ -214,7 +251,7 @@ export const useSettingsStore = defineStore("settings", () => {
               };
             }
             lastPersistedAutostart = item.target as boolean;
-          } else {
+          } else if (item.field === "themeMode") {
             if (settings.value) {
               settings.value = {
                 ...settings.value,
@@ -223,6 +260,14 @@ export const useSettingsStore = defineStore("settings", () => {
             }
             lastPersistedTheme = item.target as ThemeMode;
             useTheme().setMode(item.target as ThemeMode);
+          } else {
+            if (settings.value) {
+              settings.value = {
+                ...settings.value,
+                backupRetentionCount: item.target as number,
+              };
+            }
+            lastPersistedBackupRetention = item.target as number;
           }
 
           // Re-apply later queued optimistic values so a completed write cannot
@@ -231,7 +276,7 @@ export const useSettingsStore = defineStore("settings", () => {
             applyOptimistic(pending.field, pending.target);
           }
 
-          error.value = null;
+          fieldErrors[item.field] = null;
           item.resolve();
         } catch (updateError) {
           const laterSameField = writeQueue
@@ -243,12 +288,14 @@ export const useSettingsStore = defineStore("settings", () => {
             const latest = laterSameField[laterSameField.length - 1];
             applyOptimistic(latest.field, latest.target);
           }
-          error.value =
-            updateError instanceof Error
-              ? updateError.message
-              : item.field === "autostartEnabled"
-                ? "开机自启动设置失败"
-                : "主题设置失败";
+          fieldErrors[item.field] = toErrorMessage(
+            updateError,
+            item.field === "autostartEnabled"
+              ? "开机自启动设置失败"
+              : item.field === "themeMode"
+                ? "主题设置失败"
+                : "自动备份保留数量设置失败",
+          );
           item.reject(updateError);
         } finally {
           writeQueue.shift();
@@ -265,7 +312,7 @@ export const useSettingsStore = defineStore("settings", () => {
 
   function enqueueWrite(
     field: MutableField,
-    target: boolean | ThemeMode,
+    target: MutableValue,
   ): Promise<void> {
     bumpMutationGeneration();
     // Capture baseline before optimistic mutation.
@@ -294,7 +341,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const hadPendingWritesAtStart = writeQueue.length > 0;
     loading.value = true;
     if (!hadPendingWritesAtStart) {
-      error.value = null;
+      loadError.value = null;
     }
 
     loadPromise = (async () => {
@@ -315,6 +362,11 @@ export const useSettingsStore = defineStore("settings", () => {
             }
             if (!writeQueue.some((item) => item.field === "themeMode")) {
               lastPersistedTheme = next.themeMode;
+            }
+            if (
+              !writeQueue.some((item) => item.field === "backupRetentionCount")
+            ) {
+              lastPersistedBackupRetention = next.backupRetentionCount;
             }
             const themeWrites = writeQueue.filter(
               (item) => item.field === "themeMode",
@@ -340,6 +392,17 @@ export const useSettingsStore = defineStore("settings", () => {
                 autostartEnabled: latestAutostartWrite.target as boolean,
               };
             }
+            const retentionWrites = writeQueue.filter(
+              (item) => item.field === "backupRetentionCount",
+            );
+            const latestRetentionWrite =
+              retentionWrites[retentionWrites.length - 1];
+            if (latestRetentionWrite) {
+              settings.value = {
+                ...settings.value,
+                backupRetentionCount: latestRetentionWrite.target as number,
+              };
+            }
           } else {
             settings.value = {
               ...settings.value,
@@ -352,14 +415,13 @@ export const useSettingsStore = defineStore("settings", () => {
         settings.value = next;
         rememberPersistedFromSettings(next);
         useTheme().setMode(next.themeMode);
-        error.value = null;
-      } catch (loadError) {
+        loadError.value = null;
+      } catch (cause) {
         if (
           mutationGeneration === generationAtStart &&
           writeQueue.length === 0
         ) {
-          error.value =
-            loadError instanceof Error ? loadError.message : "设置加载失败";
+          loadError.value = toErrorMessage(cause, "设置加载失败");
         }
       } finally {
         loading.value = false;
@@ -385,15 +447,42 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueWrite("themeMode", themeMode);
   }
 
+  async function setBackupRetentionCount(value: number) {
+    return enqueueWrite("backupRetentionCount", value);
+  }
+
+  async function setShortcut(shortcut: string) {
+    const current = settings.value;
+    if (!current || shortcut === current.shortcut) return;
+    shortcutSaving.value = true;
+    try {
+      const updated = await trackPendingOperation(
+        settingsUpdate({
+          autostartEnabled: null,
+          themeMode: null,
+          backupRetentionCount: null,
+          shortcut,
+        }),
+      );
+      settings.value = { ...settings.value, ...updated };
+    } finally {
+      shortcutSaving.value = false;
+    }
+  }
+
   return {
     settings,
     loading,
     error,
     autostartSaving,
     themeSaving,
+    backupRetentionSaving,
+    shortcutSaving,
     load,
     ensureLoaded,
     setAutostart,
     setThemeMode,
+    setBackupRetentionCount,
+    setShortcut,
   };
 });

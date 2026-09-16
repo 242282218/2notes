@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { EntryType } from "../../types/generated";
+import { TYPE_LABELS } from "../../constants/labels";
 import { ref } from "vue";
 
 defineProps<{
@@ -13,13 +14,9 @@ defineEmits<{
 
 const selectRef = ref<HTMLSelectElement | null>(null);
 
-const options: Array<{ value: EntryType; label: string }> = [
-  { value: "unclear", label: "未澄清" },
-  { value: "idea", label: "想法" },
-  { value: "task", label: "任务" },
-  { value: "material", label: "素材" },
-  { value: "question", label: "问题" },
-];
+const options: Array<{ value: EntryType; label: string }> = (
+  Object.keys(TYPE_LABELS) as EntryType[]
+).map((value) => ({ value, label: TYPE_LABELS[value] }));
 </script>
 
 <template>

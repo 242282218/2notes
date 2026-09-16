@@ -12,6 +12,11 @@ use crate::types::documents::{
     MAX_DOCUMENT_JSON_BYTES, MAX_TEXT_NODE_BYTES,
 };
 
+/// Upper bound for an ordered list's `start` attribute. Far above any list a
+/// single document can hold (`MAX_BLOCKS_PER_DOCUMENT`), but low enough that
+/// `start + item index` cannot overflow.
+pub const MAX_LIST_START: u32 = 1_000_000;
+
 pub fn validate_document(document: &BlockDocument) -> AppResult<()> {
     if document.schema_version != DOCUMENT_SCHEMA_VERSION {
         return Err(AppError::validation(
@@ -165,6 +170,16 @@ fn validate_block_shape(block: &BlockNode) -> AppResult<()> {
                     "list blocks must not contain inline content",
                 ));
             }
+            // `start` is rendered as `start + item index`, so an unbounded value would
+            // overflow during markdown rendering.
+            if let Some(start) = block.attrs.start {
+                if !(1..=MAX_LIST_START).contains(&start) {
+                    return Err(AppError::validation(
+                        "LIST_START_INVALID",
+                        format!("ordered list start {start} is outside 1-{MAX_LIST_START}"),
+                    ));
+                }
+            }
         }
         BlockKind::Blockquote => {
             // Tiptap-style tree: blockquote owns child blocks only.
@@ -207,7 +222,7 @@ fn validate_inlines(content: &[InlineNode]) -> AppResult<()> {
     Ok(())
 }
 
-fn is_safe_link_href(href: &str) -> bool {
+pub(crate) fn is_safe_link_href(href: &str) -> bool {
     let trimmed = href.trim();
     if trimmed.is_empty() {
         return false;
@@ -306,7 +321,9 @@ fn render_list_markdown(list: &BlockNode, list_depth: usize, ordered: bool, out:
         let indent = "  ".repeat(list_depth);
         out.push_str(&indent);
         if ordered {
-            out.push_str(&(start + index as u32).to_string());
+            // Documents that predate `LIST_START_INVALID` may still hold an out-of-range
+            // start; saturate rather than panic while rendering them.
+            out.push_str(&start.saturating_add(index as u32).to_string());
             out.push_str(". ");
         } else {
             out.push_str("- ");
@@ -346,10 +363,20 @@ fn render_list_markdown(list: &BlockNode, list_depth: usize, ordered: bool, out:
 }
 
 fn render_inlines_markdown(content: &[InlineNode], out: &mut String, in_code: bool) {
-    for node in content {
+    // A hard break only means something when content follows it; a trailing "\" at the
+    // end of a paragraph would come back as a literal backslash on re-import.
+    let last_content_index = content.iter().rposition(|node| match node {
+        InlineNode::HardBreak => false,
+        InlineNode::Text { text, .. } => !text.is_empty(),
+    });
+    for (index, node) in content.iter().enumerate() {
         match node {
             // CommonMark hard break: backslash + newline.
-            InlineNode::HardBreak => out.push_str("\\\n"),
+            InlineNode::HardBreak => {
+                if last_content_index.is_some_and(|last| index < last) {
+                    out.push_str("\\\n");
+                }
+            }
             InlineNode::Text { text, marks } => {
                 if in_code {
                     out.push_str(text);
@@ -426,8 +453,10 @@ fn escape_markdown_text(input: &str) -> String {
         }
 
         match chars[i] {
+            // `~` is escaped because the importer parses strikethrough (`~~x~~`), so
+            // literal tildes in the text would otherwise come back as a Strike mark.
             '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.'
-            | '!' | '|' | '<' | '>' => {
+            | '!' | '|' | '<' | '>' | '~' => {
                 out.push('\\');
                 out.push(chars[i]);
             }
@@ -764,6 +793,30 @@ mod tests {
         BlockNode::paragraph(id, text)
     }
 
+    fn list_item_block(label: &str, text: &str) -> BlockNode {
+        BlockNode {
+            id: id(label),
+            kind: BlockKind::ListItem,
+            attrs: BlockAttrs::default(),
+            content: vec![text_inline(text)],
+            children: Vec::new(),
+        }
+    }
+
+    fn ordered_list_block(label: &str, start: Option<u32>, items: Vec<BlockNode>) -> BlockNode {
+        BlockNode {
+            id: id(label),
+            kind: BlockKind::OrderedList,
+            attrs: BlockAttrs {
+                level: None,
+                language: None,
+                start,
+            },
+            content: Vec::new(),
+            children: items,
+        }
+    }
+
     #[test]
     fn rejects_non_list_item_inside_list() {
         let document = BlockDocument::from_blocks(vec![BlockNode {
@@ -775,6 +828,66 @@ mod tests {
         }]);
         let err = validate_document(&document).unwrap_err();
         assert!(matches!(err, AppError::Validation { code, .. } if code == "LIST_CHILD_INVALID"));
+    }
+
+    #[test]
+    fn rejects_ordered_list_start_out_of_range() {
+        let document = BlockDocument::from_blocks(vec![ordered_list_block(
+            "ol",
+            Some(u32::MAX),
+            vec![
+                list_item_block("li", "first"),
+                list_item_block("li2", "second"),
+            ],
+        )]);
+        let err = validate_document(&document).unwrap_err();
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "LIST_START_INVALID"));
+
+        let zero = BlockDocument::from_blocks(vec![ordered_list_block(
+            "ol0",
+            Some(0),
+            vec![list_item_block("z", "first")],
+        )]);
+        let err = validate_document(&zero).unwrap_err();
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "LIST_START_INVALID"));
+    }
+
+    #[test]
+    fn markdown_export_rejects_an_out_of_range_list_start() {
+        // The export path validates before rendering, so a malformed document is
+        // reported as a validation error instead of overflowing mid-render (which
+        // would poison the shared write connection).
+        let document = BlockDocument::from_blocks(vec![ordered_list_block(
+            "ol",
+            Some(u32::MAX),
+            vec![
+                list_item_block("li", "first"),
+                list_item_block("li2", "second"),
+            ],
+        )]);
+
+        let err = document_to_markdown(&document).unwrap_err();
+
+        assert!(matches!(err, AppError::Validation { code, .. } if code == "LIST_START_INVALID"));
+    }
+
+    #[test]
+    fn render_list_markdown_saturates_an_out_of_range_start() {
+        // Defence in depth for the renderer itself, matching how heading levels are
+        // clamped rather than trusted to have been validated by the caller.
+        let list = ordered_list_block(
+            "ol",
+            Some(u32::MAX),
+            vec![
+                list_item_block("li", "first"),
+                list_item_block("li2", "second"),
+            ],
+        );
+        let mut out = String::new();
+
+        render_list_markdown(&list, 0, true, &mut out);
+
+        assert_eq!(out.matches(&u32::MAX.to_string()).count(), 2, "got {out}");
     }
 
     #[test]
@@ -888,6 +1001,40 @@ mod tests {
         assert!(markdown.contains(r"a\*b\_c") || markdown.contains("a\\*b\\_c"));
         assert!(markdown.contains("[[知识库]]"));
         assert!(!markdown.contains(r"\[[知识库]]"));
+    }
+
+    #[test]
+    fn markdown_escapes_literal_tildes_so_they_do_not_become_strikethrough() {
+        let document = BlockDocument::from_blocks(vec![paragraph_block("p", "~~not done~~ here")]);
+
+        let markdown = document_to_markdown(&document).expect("markdown");
+
+        assert!(
+            markdown.contains(r"\~\~not done\~\~"),
+            "literal tildes must be escaped, got {markdown}"
+        );
+    }
+
+    #[test]
+    fn markdown_drops_a_trailing_hard_break_instead_of_emitting_a_stray_backslash() {
+        let document = BlockDocument::from_blocks(vec![BlockNode {
+            id: id("p"),
+            kind: BlockKind::Paragraph,
+            attrs: BlockAttrs::default(),
+            content: vec![
+                text_inline("abc"),
+                InlineNode::HardBreak,
+                InlineNode::Text {
+                    text: String::new(),
+                    marks: Vec::new(),
+                },
+            ],
+            children: Vec::new(),
+        }]);
+
+        let markdown = document_to_markdown(&document).expect("markdown");
+
+        assert_eq!(markdown, "abc");
     }
 
     #[test]

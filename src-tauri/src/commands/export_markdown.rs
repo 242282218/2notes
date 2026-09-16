@@ -52,10 +52,7 @@ pub async fn export_markdown(
 fn export_to_selected_dir(app: &AppHandle, target: &Path) -> AppResult<ExportResult> {
     let validated = validate_export_dir(target)?;
     let state = app.state::<AppState>();
-    let entries = {
-        let conn = state.read_conn()?;
-        EntriesRepo::list_exportable(&conn)?
-    };
+    let entries = state.with_read_conn(EntriesRepo::list_exportable)?;
     let paths = export_entries(&entries, &validated)?;
     log::info!(
         "markdown_exported count={} target={}",

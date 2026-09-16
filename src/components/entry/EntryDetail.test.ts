@@ -2,12 +2,7 @@ import { config, flushPromises, mount } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { entriesUpdate } from "../../services/entryApi";
-import {
-  knowledgeDemote,
-  knowledgePromote,
-  knowledgeSuggest,
-} from "../../services/knowledgeApi";
+import { knowledgeSuggest } from "../../services/knowledgeApi";
 import type {
   BlockDocument,
   EntryDetail as EntryDetailType,
@@ -15,13 +10,17 @@ import type {
 } from "../../types/generated";
 import EntryDetail from "./EntryDetail.vue";
 
-vi.mock("../../services/entryApi", () => ({
-  entriesUpdate: vi.fn(),
+const entriesStoreMock = vi.hoisted(() => ({
+  saveSelected: vi.fn(),
+  promoteKnowledge: vi.fn(),
+  demoteKnowledge: vi.fn(),
+}));
+
+vi.mock("../../stores/entries", () => ({
+  useEntriesStore: () => entriesStoreMock,
 }));
 
 vi.mock("../../services/knowledgeApi", () => ({
-  knowledgePromote: vi.fn(),
-  knowledgeDemote: vi.fn(),
   knowledgeRelationsGet: vi.fn(),
   knowledgeSuggest: vi.fn().mockResolvedValue([]),
 }));
@@ -92,15 +91,15 @@ config.global.stubs.BlockEditor = BlockEditorStub;
 describe("EntryDetail", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.mocked(entriesUpdate).mockReset();
-    vi.mocked(knowledgePromote).mockReset();
-    vi.mocked(knowledgeDemote).mockReset();
+    entriesStoreMock.saveSelected.mockReset();
+    entriesStoreMock.promoteKnowledge.mockReset();
+    entriesStoreMock.demoteKnowledge.mockReset();
     vi.mocked(knowledgeSuggest).mockReset().mockResolvedValue([]);
   });
 
   it("does not convert an untouched automatic title into a user title", async () => {
     const detail = entry();
-    vi.mocked(entriesUpdate).mockResolvedValue({
+    entriesStoreMock.saveSelected.mockResolvedValue({
       ...detail,
       currentContent: "updated content",
       revision: 1,
@@ -117,7 +116,7 @@ describe("EntryDetail", () => {
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
-    expect(entriesUpdate).toHaveBeenCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledWith(
       detail.id,
       expect.objectContaining({
         title: null,
@@ -127,9 +126,54 @@ describe("EntryDetail", () => {
     );
   });
 
+  it("archives through the form so the autosave patch carries the status", async () => {
+    const detail = entry();
+    entriesStoreMock.saveSelected.mockResolvedValue({
+      ...detail,
+      status: "archived",
+      revision: 1,
+    });
+    const wrapper = mount(EntryDetail, {
+      props: {
+        detail,
+        loading: false,
+      },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as { archive: () => boolean };
+    expect(exposed.archive()).toBe(true);
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledWith(
+      detail.id,
+      expect.objectContaining({ status: "archived" }),
+      0,
+    );
+  });
+
+  it("does not archive a trashed entry", async () => {
+    const detail = { ...entry(), deletedAt: "2026-07-16T00:00:00Z" };
+    const wrapper = mount(EntryDetail, {
+      props: {
+        detail,
+        loading: false,
+      },
+    });
+    await flushPromises();
+
+    const exposed = wrapper.vm as unknown as { archive: () => boolean };
+    expect(exposed.archive()).toBe(false);
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(entriesStoreMock.saveSelected).not.toHaveBeenCalled();
+  });
+
   it("commits an unfinished tag draft before flushing for quit", async () => {
     const detail = entry();
-    vi.mocked(entriesUpdate).mockResolvedValue({
+    entriesStoreMock.saveSelected.mockResolvedValue({
       ...detail,
       tags: [
         {
@@ -156,7 +200,7 @@ describe("EntryDetail", () => {
     };
     await exposed.flushPendingSave();
 
-    expect(entriesUpdate).toHaveBeenCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledWith(
       detail.id,
       expect.objectContaining({ tags: ["work"] }),
       0,
@@ -187,13 +231,13 @@ describe("EntryDetail", () => {
 
   it("flushes edits before promoting the same entry", async () => {
     const detail = entry();
-    vi.mocked(entriesUpdate).mockResolvedValue({
+    entriesStoreMock.saveSelected.mockResolvedValue({
       ...detail,
       title: "确认后的标题",
       titleSource: "user",
       revision: 1,
     });
-    vi.mocked(knowledgePromote).mockResolvedValue({
+    entriesStoreMock.promoteKnowledge.mockResolvedValue({
       ...detail,
       title: "确认后的标题",
       titleSource: "user",
@@ -209,15 +253,18 @@ describe("EntryDetail", () => {
     };
     await exposed.promoteToKnowledge();
     await flushPromises();
-    expect(entriesUpdate).toHaveBeenCalled();
-    expect(knowledgePromote).toHaveBeenCalledWith(detail.id, 1);
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalled();
+    expect(entriesStoreMock.promoteKnowledge).toHaveBeenCalledWith(
+      detail.id,
+      1,
+    );
   });
 
   it("does not emit a stale promotion after selection changes", async () => {
     const pendingPromotion = deferred<EntryDetailType>();
     const first = entry();
     const second = { ...entry(), id: "entry-2", title: "second" };
-    vi.mocked(knowledgePromote).mockReturnValue(pendingPromotion.promise);
+    entriesStoreMock.promoteKnowledge.mockReturnValue(pendingPromotion.promise);
     const wrapper = mount(EntryDetail, {
       props: { detail: first, loading: false },
     });
@@ -249,7 +296,7 @@ describe("EntryDetail", () => {
     const pendingDemotion = deferred<EntryDetailType>();
     const first = { ...entry(), knowledgeState: "knowledge" as const };
     const second = { ...entry(), id: "entry-2", title: "second" };
-    vi.mocked(knowledgeDemote).mockReturnValue(pendingDemotion.promise);
+    entriesStoreMock.demoteKnowledge.mockReturnValue(pendingDemotion.promise);
     const wrapper = mount(EntryDetail, {
       props: { detail: first, loading: false },
     });
@@ -278,8 +325,18 @@ describe("EntryDetail", () => {
   });
 
   it.each([
-    ["promotion", "capture", knowledgePromote, "promoteToKnowledge"],
-    ["demotion", "knowledge", knowledgeDemote, "demoteFromKnowledge"],
+    [
+      "promotion",
+      "capture",
+      entriesStoreMock.promoteKnowledge,
+      "promoteToKnowledge",
+    ],
+    [
+      "demotion",
+      "knowledge",
+      entriesStoreMock.demoteKnowledge,
+      "demoteFromKnowledge",
+    ],
   ] as const)(
     "discards stale %s when only the selection token changes",
     async (_, knowledgeState, api, action) => {
@@ -319,7 +376,7 @@ describe("EntryDetail", () => {
   it("advances expected revision across continuous edits", async () => {
     const detail = entry();
     const firstSave = deferred<EntryDetailType>();
-    vi.mocked(entriesUpdate)
+    entriesStoreMock.saveSelected
       .mockImplementationOnce(() => firstSave.promise)
       .mockResolvedValueOnce({
         ...detail,
@@ -335,8 +392,8 @@ describe("EntryDetail", () => {
     await setEditor(wrapper, "first draft");
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
-    expect(entriesUpdate).toHaveBeenCalledTimes(1);
-    expect(entriesUpdate).toHaveBeenLastCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledTimes(1);
+    expect(entriesStoreMock.saveSelected).toHaveBeenLastCalledWith(
       detail.id,
       expect.objectContaining({
         document: documentContainingText("first draft"),
@@ -354,8 +411,8 @@ describe("EntryDetail", () => {
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
-    expect(entriesUpdate).toHaveBeenCalledTimes(2);
-    expect(entriesUpdate).toHaveBeenLastCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledTimes(2);
+    expect(entriesStoreMock.saveSelected).toHaveBeenLastCalledWith(
       detail.id,
       expect.objectContaining({
         document: documentContainingText("second draft"),
@@ -365,10 +422,54 @@ describe("EntryDetail", () => {
     expect(editorText(wrapper)).toBe("second draft");
   });
 
+  it("keeps a newer title dirty after an older save response", async () => {
+    const detail = entry();
+    const firstSave = deferred<EntryDetailType>();
+    entriesStoreMock.saveSelected
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockResolvedValueOnce({
+        ...detail,
+        title: "标题 C",
+        titleSource: "user",
+        revision: 2,
+      });
+
+    const wrapper = mount(EntryDetail, {
+      props: { detail, loading: false },
+    });
+    await flushPromises();
+
+    await wrapper.get('input[placeholder="标题"]').setValue("标题 B");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledWith(
+      detail.id,
+      expect.objectContaining({ title: "标题 B" }),
+      0,
+    );
+
+    await wrapper.get('input[placeholder="标题"]').setValue("标题 C");
+    firstSave.resolve({
+      ...detail,
+      title: "标题 B",
+      titleSource: "user",
+      revision: 1,
+    });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(entriesStoreMock.saveSelected).toHaveBeenLastCalledWith(
+      detail.id,
+      expect.objectContaining({ title: "标题 C" }),
+      1,
+    );
+  });
+
   it("keeps local fields when a newer same-id detail arrives while dirty", async () => {
     const detail = entry();
     const pendingSave = deferred<EntryDetailType>();
-    vi.mocked(entriesUpdate).mockReturnValue(pendingSave.promise);
+    entriesStoreMock.saveSelected.mockReturnValue(pendingSave.promise);
     const wrapper = mount(EntryDetail, {
       props: { detail, loading: false },
     });
@@ -498,7 +599,7 @@ describe("EntryDetail", () => {
 
   it("does not reset local fields when save success replaces same-id detail", async () => {
     const detail = entry();
-    vi.mocked(entriesUpdate).mockResolvedValue({
+    entriesStoreMock.saveSelected.mockResolvedValue({
       ...detail,
       currentContent: "saved content",
       revision: 1,
@@ -526,7 +627,7 @@ describe("EntryDetail", () => {
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
 
-    expect(entriesUpdate).toHaveBeenLastCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenLastCalledWith(
       detail.id,
       expect.objectContaining({
         document: documentContainingText("follow-up edit"),
@@ -545,7 +646,7 @@ describe("EntryDetail", () => {
     wrapper.unmount();
     await vi.advanceTimersByTimeAsync(500);
 
-    expect(entriesUpdate).not.toHaveBeenCalled();
+    expect(entriesStoreMock.saveSelected).not.toHaveBeenCalled();
   });
 
   it("disables promotion for an empty title", async () => {
@@ -760,7 +861,7 @@ describe("EntryDetail", () => {
 
   it("inserts the canonical title, restores the caret, and autosaves", async () => {
     const detail = entry();
-    vi.mocked(entriesUpdate).mockResolvedValue({
+    entriesStoreMock.saveSelected.mockResolvedValue({
       ...detail,
       currentContent: "Before [[Canonical]] after",
       revision: 1,
@@ -783,7 +884,7 @@ describe("EntryDetail", () => {
 
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
-    expect(entriesUpdate).toHaveBeenCalledWith(
+    expect(entriesStoreMock.saveSelected).toHaveBeenCalledWith(
       detail.id,
       expect.objectContaining({
         document: documentContainingText("Before [[Canonical]] after"),

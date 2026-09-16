@@ -6,6 +6,8 @@ import {
   markdownImportPreview,
 } from "../../services/importApi";
 import { useEntriesStore } from "../../stores/entries";
+import { toErrorMessage } from "../../utils/errors";
+import { trackPendingOperation } from "../../composables/usePendingOperations";
 import type {
   MarkdownImportPreview,
   MarkdownImportReport,
@@ -40,7 +42,7 @@ async function selectDirectory() {
       confirming.value = true;
     }
   } catch (cause) {
-    error.value = getErrorMessage(cause, "预览导入失败");
+    error.value = toErrorMessage(cause, "预览导入失败");
   } finally {
     previewing.value = false;
   }
@@ -52,13 +54,19 @@ async function commit() {
   committing.value = true;
   error.value = "";
   try {
-    report.value = await markdownImportCommit(preview.value.sessionId);
+    report.value = await trackPendingOperation(
+      markdownImportCommit(preview.value.sessionId),
+    );
     confirming.value = false;
     preview.value = null;
     entriesStore.noteExternalChange();
     await Promise.all([entriesStore.load(), entriesStore.refreshTags()]);
   } catch (cause) {
-    error.value = getErrorMessage(cause, "导入失败");
+    // Commit consumes the server-side session before it starts work. A retry with
+    // this preview would always fail, so reset it and require a fresh preview.
+    confirming.value = false;
+    preview.value = null;
+    error.value = toErrorMessage(cause, "导入失败");
   } finally {
     committing.value = false;
   }
@@ -76,10 +84,6 @@ function formatBytes(bytes: number) {
 
 function formatNumber(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
-}
-
-function getErrorMessage(cause: unknown, fallback: string) {
-  return cause instanceof Error ? cause.message : fallback;
 }
 </script>
 

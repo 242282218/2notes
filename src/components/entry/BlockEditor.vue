@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { createDocument } from "@tiptap/core";
 import { Editor, EditorContent } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
 import UniqueID from "@tiptap/extension-unique-id";
@@ -12,7 +13,10 @@ import {
   toTiptapDocument,
   type TiptapNode,
 } from "../../editor/tiptapAdapter";
-import type { WikiLinkCompletion } from "../../composables/useWikiLinkCompletion";
+import {
+  sanitizeWikiLinkTitle,
+  type WikiLinkCompletion,
+} from "../../composables/useWikiLinkCompletion";
 
 export interface EditorTextContext {
   text: string;
@@ -57,7 +61,12 @@ const emit = defineEmits<{
 }>();
 
 const editor = shallowRef<Editor | null>(null);
-let lastEmittedSnapshot: string | null = null;
+// The document object most recently emitted by the editor. Reference equality
+// short-circuits the echo round-trip (parent v-model returns the same object),
+// so per-keystroke work stays O(1). A full digest is only computed when a
+// DIFFERENT object arrives (entry switch / refresh), where it decides whether
+// the content is semantically identical and the cursor may be kept.
+let lastEmittedSnapshot: BlockDocument | null = null;
 
 function editorAttributes(): Record<string, string> {
   const attributes: Record<string, string> = {
@@ -105,7 +114,7 @@ function createEditor() {
     ],
     onUpdate: ({ editor: activeEditor }) => {
       const document = fromTiptapDocument(activeEditor.getJSON());
-      lastEmittedSnapshot = snapshotKey(document);
+      lastEmittedSnapshot = document;
       emit("update:modelValue", document);
       emit("selectionChange", getTextContext(activeEditor));
     },
@@ -164,7 +173,11 @@ function completeWikiLink(
 
   const from =
     activeEditor.state.selection.from - (context.caret - completion.start + 2);
-  const replacement = `[[${title}]]`;
+  const safeTitle = sanitizeWikiLinkTitle(title);
+  if (safeTitle === null) {
+    return false;
+  }
+  const replacement = `[[${safeTitle}]]`;
   activeEditor
     .chain()
     .focus()
@@ -203,26 +216,39 @@ function focusBlock(blockId: string): boolean {
 function setSnapshot(snapshot: BlockDocument) {
   const activeEditor = editor.value;
   if (!activeEditor) return;
-  const key = snapshotKey(snapshot);
-  if (key === lastEmittedSnapshot) {
-    lastEmittedSnapshot = null;
+  if (snapshot === lastEmittedSnapshot) {
     return;
   }
-  lastEmittedSnapshot = null;
-  activeEditor.commands.setContent(toTiptapDocument(snapshot), {
-    emitUpdate: false,
-    errorOnInvalidContent: true,
-  });
+  if (
+    lastEmittedSnapshot !== null &&
+    snapshotKey(snapshot) === snapshotKey(lastEmittedSnapshot)
+  ) {
+    lastEmittedSnapshot = snapshot;
+    return;
+  }
+  const content = createDocument(
+    toTiptapDocument(snapshot),
+    activeEditor.schema,
+    {},
+    { errorOnInvalidContent: true },
+  );
+  const { tr } = activeEditor.state;
+  tr.replaceWith(0, activeEditor.state.doc.content.size, content)
+    .setMeta("preventUpdate", true)
+    .setMeta("addToHistory", false);
+  activeEditor.view.dispatch(tr);
+  lastEmittedSnapshot = snapshot;
 }
 
 function getEditorJson(): TiptapNode | null {
   return editor.value?.getJSON() as TiptapNode | null;
 }
 
+// Shallow watch is sufficient: the parent replaces the whole document object on
+// every snapshot (EntryDetail swaps document.value / emits a new object).
 watch(
   () => props.modelValue,
   (snapshot) => setSnapshot(snapshot),
-  { deep: true },
 );
 
 watch(
@@ -269,6 +295,6 @@ defineExpose({
 <template>
   <EditorContent
     :editor="editor ?? undefined"
-    class="min-h-36 rounded border border-border bg-surface px-3 py-2 text-ui leading-6 outline-none focus-within:border-primary"
+    class="min-h-36 rounded border border-border bg-bg-elevated px-3 py-2 text-ui leading-6 outline-none focus-within:border-brand"
   />
 </template>

@@ -134,6 +134,39 @@ describe("BlockEditor", () => {
     wrapper.unmount();
   });
 
+  it("hydrates an empty blockquote snapshot into an editable empty paragraph", async () => {
+    const wrapper = mount(BlockEditor, {
+      props: { modelValue: paragraphDocument("previous content") },
+    });
+    await flushPromises();
+
+    const emptyQuote: BlockDocument = {
+      schemaVersion: 1,
+      blocks: [
+        {
+          id: HEADING_ID,
+          kind: "blockquote",
+          attrs: { level: null, language: null, start: null },
+          content: [],
+          children: [],
+        },
+      ],
+    };
+    await wrapper.setProps({ modelValue: emptyQuote });
+    await nextTick();
+
+    const exposed = wrapper.vm as unknown as BlockEditorExposed;
+    const snapshot = fromTiptapDocument(
+      exposed.getEditorJson() as Parameters<typeof fromTiptapDocument>[0],
+    );
+    expect(snapshot.blocks[0].kind).toBe("blockquote");
+    expect(snapshot.blocks[0].children).toHaveLength(1);
+    expect(snapshot.blocks[0].children[0].kind).toBe("paragraph");
+    expect(snapshot.blocks[0].children[0].content).toEqual([]);
+
+    wrapper.unmount();
+  });
+
   it("does not rehydrate after its own model update is echoed back", async () => {
     const wrapper = mount(BlockEditor, {
       props: { modelValue: fixtureDocument() },

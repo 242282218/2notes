@@ -53,6 +53,27 @@ describe("MarkdownImportPanel", () => {
     expect(wrapper.text()).toContain("忽略了 1 个空文件");
   });
 
+  it("clears a consumed preview after commit fails", async () => {
+    vi.mocked(markdownImportPreview).mockResolvedValue(preview());
+    vi.mocked(markdownImportCommit).mockRejectedValue(new Error("会话已失效"));
+    const wrapper = mount(MarkdownImportPanel, { attachTo: document.body });
+
+    await wrapper
+      .get('button[aria-label="选择 Markdown 目录导入"]')
+      .trigger("click");
+    await flushPromises();
+    await wrapper.findComponent(ConfirmDialog).vm.$emit("confirm");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("会话已失效");
+    expect(wrapper.text()).not.toContain("已选择 2 个文件");
+    expect(wrapper.findComponent(ConfirmDialog).props("open")).toBe(false);
+    expect(markdownImportCommit).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+    document.body.replaceChildren();
+  });
+
   it("commits a preview once and refreshes entries after success", async () => {
     vi.mocked(markdownImportPreview).mockResolvedValue(preview());
     vi.mocked(markdownImportCommit).mockResolvedValue({

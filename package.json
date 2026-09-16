@@ -19,15 +19,18 @@
     "format:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{js,ts,json,md}\" \".github/**/*.yml\"",
     "audit:frontend": "node scripts/test/audit-frontend.mjs && node scripts/test/check-minimatch-brace.mjs",
     "check:minimatch": "node scripts/test/check-minimatch-brace.mjs",
-    "audit:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/cargo-audit-if-available.ps1"
+    "audit:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/cargo-audit-if-available.ps1",
+    "gen:types": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/generate-types.ps1"
   },
   "dependencies": {
+    "@tanstack/vue-virtual": "^3.13.35",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
-    "@tiptap/extension-unique-id": "^3.29.1",
-    "@tiptap/starter-kit": "^3.29.1",
-    "@tiptap/vue-3": "^3.29.1",
+    "@tiptap/core": "^3.31.3",
+    "@tiptap/extension-unique-id": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
+    "@tiptap/vue-3": "^3.31.3",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
     "vue": "^3.5.13"
@@ -47,7 +50,7 @@
     "typescript-eslint": "^8.62.0",
     "unocss": "^66.7.3",
     "vite": "^6.0.3",
-    "vitest": "^4.1.9",
+    "vitest": "^4.1.11",
     "vue-tsc": "^2.1.10"
   }
 }

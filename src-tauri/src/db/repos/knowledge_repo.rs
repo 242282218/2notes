@@ -7,7 +7,7 @@ use crate::{
         migrations::now_string,
         repos::{
             documents_repo::DocumentsRepo,
-            entries_repo::{entries_fts_is_trigram, entry_summary},
+            entries_repo::{can_fallback_from_fts, entries_fts_is_trigram, entry_summary},
             EntriesRepo, HierarchyRepo,
         },
     },
@@ -47,45 +47,21 @@ impl KnowledgeRepo {
             return collect_suggestions(stmt.query_map([limit], map_suggestion)?);
         }
 
-        let pattern = format!("%{}%", super::entries_repo::escape_like(&normalized));
-        let mut stmt = conn.prepare(
-            "SELECT e.id, e.title,
-                    CASE
-                        WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN NULL
-                        ELSE (
-                            SELECT ea.alias
-                            FROM entry_aliases ea
-                            WHERE ea.entry_id = e.id
-                              AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
-                            ORDER BY ea.normalized_alias
-                            LIMIT 1
-                        )
-                    END AS matched_alias
-             FROM entries e
-             WHERE e.knowledge_state = 'knowledge'
-               AND e.deleted_at IS NULL
-               AND (
-                   e.knowledge_title_key LIKE ?2 ESCAPE '\\'
-                   OR EXISTS (
-                       SELECT 1
-                       FROM entry_aliases ea
-                       WHERE ea.entry_id = e.id
-                         AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
-                   )
-               )
-             ORDER BY CASE
-                          WHEN e.knowledge_title_key = ?1 THEN 0
-                          WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN 1
-                          ELSE 2
-                      END,
-                      e.title COLLATE NOCASE,
-                      e.id
-             LIMIT ?3",
-        )?;
-        let suggestions = collect_suggestions(
-            stmt.query_map(params![normalized, pattern, limit], map_suggestion)?,
-        );
-        suggestions
+        // The trigram FTS index covers title/aliases and scales far better than a
+        // leading-wildcard LIKE scan once the knowledge base grows. Short or
+        // non-alphanumeric queries (common for 1-2 char CJK prefixes) keep the
+        // LIKE path, mirroring the main search's rule.
+        let use_fts = normalized.chars().count() >= 3
+            && normalized.chars().all(char::is_alphanumeric)
+            && entries_fts_is_trigram(conn)?;
+        if use_fts {
+            match suggest_fts(conn, &normalized, limit) {
+                Ok(suggestions) => return Ok(suggestions),
+                Err(err) if can_fallback_from_fts(&err) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        suggest_like(conn, &normalized, limit)
     }
 
     pub fn relations(conn: &Connection, entry_id: &str) -> AppResult<KnowledgeRelations> {
@@ -323,6 +299,43 @@ impl KnowledgeRepo {
         new_title: &str,
         now: &str,
     ) -> AppResult<()> {
+        Self::apply_title_change(tx, entry_id, old_title, new_title, now, true)
+    }
+
+    /// Restoring a knowledge entry can collide with a live entry that claimed its
+    /// title while it sat in the trash, because trashed entries deliberately do not
+    /// reserve their key. Dropping the key would leave `knowledge_state = 'knowledge'`
+    /// with a NULL key, which the rest of the code treats as impossible, and which
+    /// makes the entry uneditable because every later rename re-checks availability.
+    /// Rename to the first free "<title> (n)" instead.
+    ///
+    /// Returns whether a rename happened.
+    pub(crate) fn resolve_restore_title_conflict(
+        tx: &Transaction<'_>,
+        entry_id: &str,
+        title: &str,
+        key: &str,
+        now: &str,
+    ) -> AppResult<bool> {
+        if title_is_available(tx, key, entry_id)? {
+            return Ok(false);
+        }
+        let renamed = disambiguated_title(tx, title, entry_id)?;
+        // The previous title now belongs to the live entry that claimed it, so it must
+        // not be recorded as an alias of this one.
+        Self::apply_title_change(tx, entry_id, title, &renamed, now, false)?;
+        log::info!("knowledge_title_renamed_on_restore id={entry_id} key={key} title={renamed}");
+        Ok(true)
+    }
+
+    fn apply_title_change(
+        tx: &Transaction<'_>,
+        entry_id: &str,
+        old_title: &str,
+        new_title: &str,
+        now: &str,
+        record_alias: bool,
+    ) -> AppResult<()> {
         let canonical = validate_title(new_title)?;
         let old_key = normalize_knowledge_title(old_title);
         let new_key = normalize_knowledge_title(&canonical);
@@ -331,7 +344,7 @@ impl KnowledgeRepo {
             "DELETE FROM entry_aliases WHERE normalized_alias = ?1 AND entry_id = ?2",
             params![new_key, entry_id],
         )?;
-        if old_key != new_key {
+        if record_alias && old_key != new_key {
             tx.execute(
                 "INSERT OR IGNORE INTO entry_aliases(normalized_alias, entry_id, alias, created_at)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -519,6 +532,114 @@ fn collect_suggestions(
         .map_err(Into::into)
 }
 
+/// Suggest via the trigram FTS index restricted to title/aliases_text columns.
+/// Exact-key matches are pinned first, then bm25 ranking breaks ties.
+fn suggest_fts(
+    conn: &Connection,
+    normalized: &str,
+    limit: i64,
+) -> AppResult<Vec<KnowledgeSuggestion>> {
+    let match_query = format!(
+        "{{title aliases_text}} : {}",
+        super::entries_repo::fts_phrase(normalized)
+    );
+    let pattern = format!("%{}%", super::entries_repo::escape_like(normalized));
+    let mut stmt = conn.prepare(
+        "
+        WITH ranked AS MATERIALIZED (
+          SELECT entries_fts.rowid AS search_rowid, e.id,
+                 entries_fts.rank AS score
+          FROM entries_fts
+          JOIN entries e ON e.id = entries_fts.entry_id
+          WHERE e.knowledge_state = 'knowledge'
+            AND e.deleted_at IS NULL
+            AND entries_fts MATCH ?1
+            AND entries_fts.rank MATCH 'bm25(0.0, 10.0, 1.0, 4.0, 3.0, 6.0)'
+          ORDER BY CASE
+                       WHEN e.knowledge_title_key = ?2 THEN 0
+                       ELSE 1
+                   END,
+                   score ASC,
+                   e.updated_at DESC,
+                   e.id ASC
+          LIMIT ?3
+        )
+        SELECT e.id, e.title,
+               CASE
+                   WHEN e.knowledge_title_key LIKE ?4 ESCAPE '\\' THEN NULL
+                   ELSE (
+                       SELECT ea.alias
+                       FROM entry_aliases ea
+                       WHERE ea.entry_id = e.id
+                         AND ea.normalized_alias LIKE ?4 ESCAPE '\\'
+                       ORDER BY ea.normalized_alias
+                       LIMIT 1
+                   )
+               END AS matched_alias
+        FROM ranked
+        JOIN entries e ON e.id = ranked.id
+        ORDER BY CASE
+                     WHEN e.knowledge_title_key = ?2 THEN 0
+                     ELSE 1
+                 END,
+                 ranked.score ASC,
+                 e.title COLLATE NOCASE,
+                 e.id ASC
+        ",
+    )?;
+    let rows = stmt.query_map(
+        params![match_query, normalized, limit, pattern],
+        map_suggestion,
+    )?;
+    collect_suggestions(rows)
+}
+
+/// Leading-wildcard LIKE fallback used for short/non-alphanumeric queries or
+/// when the FTS index is unavailable.
+fn suggest_like(
+    conn: &Connection,
+    normalized: &str,
+    limit: i64,
+) -> AppResult<Vec<KnowledgeSuggestion>> {
+    let pattern = format!("%{}%", super::entries_repo::escape_like(normalized));
+    let mut stmt = conn.prepare(
+        "SELECT e.id, e.title,
+                CASE
+                    WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN NULL
+                    ELSE (
+                        SELECT ea.alias
+                        FROM entry_aliases ea
+                        WHERE ea.entry_id = e.id
+                          AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
+                        ORDER BY ea.normalized_alias
+                        LIMIT 1
+                    )
+                END AS matched_alias
+         FROM entries e
+         WHERE e.knowledge_state = 'knowledge'
+           AND e.deleted_at IS NULL
+           AND (
+               e.knowledge_title_key LIKE ?2 ESCAPE '\\'
+               OR EXISTS (
+                   SELECT 1
+                   FROM entry_aliases ea
+                   WHERE ea.entry_id = e.id
+                     AND ea.normalized_alias LIKE ?2 ESCAPE '\\'
+               )
+           )
+         ORDER BY CASE
+                      WHEN e.knowledge_title_key = ?1 THEN 0
+                      WHEN e.knowledge_title_key LIKE ?2 ESCAPE '\\' THEN 1
+                      ELSE 2
+                  END,
+                  e.title COLLATE NOCASE,
+                  e.id
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![normalized, pattern, limit], map_suggestion)?;
+    collect_suggestions(rows)
+}
+
 fn map_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeSuggestion> {
     Ok(KnowledgeSuggestion {
         id: row.get(0)?,
@@ -551,35 +672,72 @@ fn validate_title(input: &str) -> AppResult<String> {
 }
 
 fn ensure_title_available(tx: &Transaction<'_>, key: &str, entry_id: &str) -> AppResult<()> {
+    if title_is_available(tx, key, entry_id)? {
+        Ok(())
+    } else {
+        Err(AppError::validation(
+            "KNOWLEDGE_TITLE_CONFLICT",
+            "知识标题已存在",
+        ))
+    }
+}
+
+fn title_is_available(tx: &Transaction<'_>, key: &str, entry_id: &str) -> AppResult<bool> {
+    // Trashed entries must not reserve their title key: soft-deleted knowledge entries
+    // cannot be edited, so the key would be permanently burned until a force delete.
     let current: Option<String> = tx
         .query_row(
             "SELECT id FROM entries WHERE knowledge_state = 'knowledge'
-             AND knowledge_title_key = ?1 AND id <> ?2 LIMIT 1",
+             AND knowledge_title_key = ?1 AND id <> ?2 AND deleted_at IS NULL LIMIT 1",
             params![key, entry_id],
             |row| row.get(0),
         )
         .optional()?;
+    if current.is_some() {
+        return Ok(false);
+    }
     let alias: Option<String> = tx
         .query_row(
-            "SELECT entry_id FROM entry_aliases WHERE normalized_alias = ?1
-             AND entry_id <> ?2 LIMIT 1",
+            "SELECT ea.entry_id FROM entry_aliases ea
+             JOIN entries e ON e.id = ea.entry_id AND e.deleted_at IS NULL
+             WHERE ea.normalized_alias = ?1 AND ea.entry_id <> ?2 LIMIT 1",
             params![key, entry_id],
             |row| row.get(0),
         )
         .optional()?;
-    if current.is_some() || alias.is_some() {
-        return Err(AppError::validation(
-            "KNOWLEDGE_TITLE_CONFLICT",
-            "知识标题已存在",
-        ));
+    Ok(alias.is_none())
+}
+
+/// `validate_title` rejects titles longer than this; disambiguation must stay under it.
+const MAX_KNOWLEDGE_TITLE_CHARS: usize = 200;
+
+/// First free "<title> (n)" for a title that a live entry already holds.
+fn disambiguated_title(tx: &Transaction<'_>, title: &str, entry_id: &str) -> AppResult<String> {
+    for suffix in 2..=99u32 {
+        let tail = format!(" ({suffix})");
+        let budget = MAX_KNOWLEDGE_TITLE_CHARS.saturating_sub(tail.chars().count());
+        let base: String = title.chars().take(budget).collect();
+        let candidate = format!("{}{}", base.trim_end(), tail);
+        // Truncation can expose a delimiter that the original title never had, so the
+        // candidate has to pass the same validation as any other title.
+        let Ok(canonical) = validate_title(&candidate) else {
+            continue;
+        };
+        if title_is_available(tx, &normalize_knowledge_title(&canonical), entry_id)? {
+            return Ok(canonical);
+        }
     }
-    Ok(())
+    Err(AppError::validation(
+        "KNOWLEDGE_TITLE_CONFLICT",
+        "恢复时无法为该条目分配可用的知识标题",
+    ))
 }
 
 fn resolve_target_id(tx: &Transaction<'_>, key: &str) -> AppResult<Option<String>> {
     let current = tx
         .query_row(
-            "SELECT id FROM entries WHERE knowledge_state = 'knowledge' AND knowledge_title_key = ?1 LIMIT 1",
+            "SELECT id FROM entries WHERE knowledge_state = 'knowledge'
+             AND knowledge_title_key = ?1 AND deleted_at IS NULL LIMIT 1",
             [key],
             |row| row.get(0),
         )
@@ -588,7 +746,9 @@ fn resolve_target_id(tx: &Transaction<'_>, key: &str) -> AppResult<Option<String
         return Ok(current);
     }
     tx.query_row(
-        "SELECT entry_id FROM entry_aliases WHERE normalized_alias = ?1 LIMIT 1",
+        "SELECT ea.entry_id FROM entry_aliases ea
+         JOIN entries e ON e.id = ea.entry_id AND e.deleted_at IS NULL
+         WHERE ea.normalized_alias = ?1 LIMIT 1",
         [key],
         |row| row.get(0),
     )
@@ -753,6 +913,26 @@ mod tests {
         assert_eq!(suggestions[2].id, alias.id);
         assert_eq!(suggestions[2].title, "Canonical Page");
         assert_eq!(suggestions[2].matched_alias.as_deref(), Some("Atlas First"));
+    }
+
+    #[test]
+    fn suggest_matches_cjk_substrings_via_fts_and_short_queries_via_like() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let entry = EntriesRepo::create(&tx, "知识库管理实践", &now).unwrap();
+        KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+        tx.commit().unwrap();
+
+        // Long CJK substring takes the trigram FTS path and still matches.
+        let fts = KnowledgeRepo::suggest(&conn, "知识库管", 20).unwrap();
+        assert_eq!(fts.len(), 1);
+        assert_eq!(fts[0].id, entry.id);
+
+        // 2-char CJK prefix falls back to LIKE and still matches.
+        let like = KnowledgeRepo::suggest(&conn, "知识", 20).unwrap();
+        assert_eq!(like.len(), 1);
+        assert_eq!(like[0].id, entry.id);
     }
 
     #[test]

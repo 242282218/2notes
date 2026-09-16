@@ -16,6 +16,7 @@ import {
 } from "vue";
 
 import { knowledgeTreeGet } from "../../services/knowledgeApi";
+import { toErrorMessage } from "../../utils/errors";
 import type { EntryTreeNode } from "../../types/generated";
 import EmptyState from "../shared/EmptyState.vue";
 
@@ -195,7 +196,7 @@ async function loadTree() {
     if (currentRequest === requestId) tree.value = next;
   } catch (cause) {
     if (currentRequest === requestId) {
-      error.value = cause instanceof Error ? cause.message : "知识树加载失败";
+      error.value = toErrorMessage(cause, "知识树加载失败");
     }
   } finally {
     if (currentRequest === requestId) loading.value = false;
@@ -223,6 +224,8 @@ onBeforeUnmount(() =>
 <template>
   <section
     ref="treeRef"
+    data-entry-tree
+    tabindex="-1"
     class="entry-list flex min-h-0 flex-col bg-bg-elevated ring-focus ring-inset"
     aria-label="知识树"
     @keydown="onKeydown"
@@ -298,7 +301,7 @@ onBeforeUnmount(() =>
           class="min-w-0 flex-1 truncate rounded-sm px-2 py-2 text-left text-ui outline-none ring-focus hover:bg-bg-secondary"
           :class="
             node.id === selectedId
-              ? 'bg-primary/10 text-text-primary'
+              ? 'bg-brand/10 text-text-primary'
               : 'text-text-secondary'
           "
           type="button"

@@ -1,7 +1,10 @@
 use std::{
     collections::HashSet,
     path::PathBuf,
-    sync::{Condvar, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    },
 };
 
 use rusqlite::{Connection, Transaction};
@@ -22,15 +25,17 @@ pub struct ShortcutStatus {
 pub struct AppState {
     /// Write connection protected by mutex. SQLite serializes writes regardless of WAL mode.
     write_conn: Mutex<Connection>,
-    /// Read-only connection. Although SQLite WAL mode allows concurrent readers,
-    /// rusqlite::Connection uses RefCell internally so it is not Sync. We use Mutex
-    /// to protect the handle itself; the underlying SQLite connection still benefits
-    /// from WAL-mode concurrency for actual query execution.
-    read_conn: Mutex<Connection>,
+    /// Read-only connection pool. WAL mode allows concurrent readers, so readers
+    /// round-robin across independent connections instead of serializing on one.
+    read_conns: Mutex<Vec<Arc<Mutex<Connection>>>>,
+    /// Next read slot to check out (round-robin).
+    read_pool_next: AtomicUsize,
     pub paths: AppPaths,
     shortcut: Mutex<ShortcutStatus>,
     quit_request: Mutex<Option<QuitRequest>>,
     restore_request: Mutex<Option<RestoreRequest>>,
+    restore_lock: Mutex<bool>,
+    database_gate: RwLock<()>,
     restore_ready: Condvar,
     import_sessions: Mutex<std::collections::HashMap<String, ImportSession>>,
 }
@@ -62,10 +67,28 @@ pub struct ImportSession {
 }
 
 impl AppState {
+    /// Build a state with a single read connection. Only used by tests now;
+    /// production builds the full pool via `with_read_pool`.
+    #[cfg(test)]
     pub fn new(write_conn: Connection, read_conn: Connection, paths: AppPaths) -> Self {
+        Self::with_read_pool(write_conn, vec![read_conn], paths)
+    }
+
+    /// Build a state with the given read connection pool.
+    pub fn with_read_pool(
+        write_conn: Connection,
+        read_conns: Vec<Connection>,
+        paths: AppPaths,
+    ) -> Self {
         Self {
             write_conn: Mutex::new(write_conn),
-            read_conn: Mutex::new(read_conn),
+            read_conns: Mutex::new(
+                read_conns
+                    .into_iter()
+                    .map(|conn| Arc::new(Mutex::new(conn)))
+                    .collect(),
+            ),
+            read_pool_next: AtomicUsize::new(0),
             paths,
             shortcut: Mutex::new(ShortcutStatus {
                 shortcut: "Ctrl+Alt+Space".to_string(),
@@ -74,6 +97,8 @@ impl AppState {
             }),
             quit_request: Mutex::new(None),
             restore_request: Mutex::new(None),
+            restore_lock: Mutex::new(false),
+            database_gate: RwLock::new(()),
             restore_ready: Condvar::new(),
             import_sessions: Mutex::new(std::collections::HashMap::new()),
         }
@@ -86,28 +111,89 @@ impl AppState {
             .map_err(|_| AppError::system("DB_LOCK_POISONED", "数据库写连接状态异常"))
     }
 
-    /// Acquire the read-only connection. In WAL mode concurrent readers execute
-    /// without blocking each other at the SQLite level, but the Mutex protects
-    /// the rusqlite::Connection handle which uses RefCell internally.
-    pub fn read_conn(&self) -> AppResult<MutexGuard<'_, Connection>> {
-        self.read_conn
+    /// Run a closure against a pooled read-only connection. Round-robin checkout
+    /// spreads concurrent readers across independent connections. Taking the
+    /// write permit first ensures a restore's write barrier also excludes new
+    /// readers while it rebuilds the pool.
+    pub fn with_read_conn<F, T>(&self, f: F) -> AppResult<T>
+    where
+        F: FnOnce(&Connection) -> AppResult<T>,
+    {
+        let _permit = self.database_write_permit()?;
+        let slot = {
+            let pool = self
+                .read_conns
+                .lock()
+                .map_err(|_| AppError::system("DB_READ_POOL_FAILED", "数据库读连接池状态异常"))?;
+            if pool.is_empty() {
+                return Err(AppError::system(
+                    "DB_READ_POOL_EMPTY",
+                    "数据库读连接池为空，恢复尚未完成",
+                ));
+            }
+            let index = self.read_pool_next.fetch_add(1, Ordering::Relaxed) % pool.len();
+            Arc::clone(&pool[index])
+        };
+        let conn = slot
             .lock()
-            .map_err(|_| AppError::system("DB_READ_LOCK_POISONED", "数据库读连接状态异常"))
+            .map_err(|_| AppError::system("DB_READ_LOCK_POISONED", "数据库读连接状态异常"))?;
+        f(&conn)
     }
 
-    pub fn database_pair(
+    /// Replace the read pool. The caller must hold `database_operation()` so no
+    /// new reader can check out; the loop below is defense-in-depth that waits
+    /// for any straggling reader to release its slot before the file is swapped.
+    /// Replacing the Vec drops the old slots, which closes their file handles
+    /// (essential on Windows before the database file is renamed).
+    pub fn replace_read_pool(&self, read_conns: Vec<Connection>) -> AppResult<()> {
+        let mut pool = self
+            .read_conns
+            .lock()
+            .map_err(|_| AppError::system("DB_READ_POOL_FAILED", "数据库读连接池状态异常"))?;
+        for slot in pool.iter() {
+            let _guard = slot
+                .lock()
+                .map_err(|_| AppError::system("DB_READ_LOCK_POISONED", "数据库读连接状态异常"))?;
+        }
+        *pool = read_conns
+            .into_iter()
+            .map(|conn| Arc::new(Mutex::new(conn)))
+            .collect();
+        Ok(())
+    }
+
+    pub fn database_write_permit(&self) -> AppResult<RwLockReadGuard<'_, ()>> {
+        self.database_gate
+            .read()
+            .map_err(|_| AppError::system("DB_GATE_FAILED", "数据库写入屏障状态异常"))
+    }
+
+    pub fn database_operation(&self) -> AppResult<RwLockWriteGuard<'_, ()>> {
+        self.database_gate
+            .write()
+            .map_err(|_| AppError::system("DB_GATE_FAILED", "数据库操作屏障状态异常"))
+    }
+
+    pub fn with_write_conn<F, T>(&self, f: F) -> AppResult<T>
+    where
+        F: FnOnce(&mut Connection) -> AppResult<T>,
+    {
+        let _permit = self.database_write_permit()?;
+        let mut conn = self.write_conn()?;
+        f(&mut conn)
+    }
+
+    pub fn set_shortcut(
         &self,
-    ) -> AppResult<(MutexGuard<'_, Connection>, MutexGuard<'_, Connection>)> {
-        let write_conn = self.write_conn()?;
-        let read_conn = self.read_conn()?;
-        Ok((write_conn, read_conn))
-    }
-
-    pub fn set_shortcut_status(&self, registered: bool, error: Option<String>) -> AppResult<()> {
+        shortcut: String,
+        registered: bool,
+        error: Option<String>,
+    ) -> AppResult<()> {
         let mut status = self
             .shortcut
             .lock()
             .map_err(|_| AppError::system("SHORTCUT_STATE_FAILED", "快捷键状态不可用"))?;
+        status.shortcut = shortcut;
         status.registered = registered;
         status.error = error;
         Ok(())
@@ -139,6 +225,7 @@ impl AppState {
     where
         F: FnOnce(&Transaction<'_>) -> crate::error::AppResult<T>,
     {
+        let _permit = self.database_write_permit()?;
         let mut conn = self.write_conn()?;
         let tx = conn.transaction()?;
         let result = f(&tx)?;
@@ -177,6 +264,35 @@ impl AppState {
             *request = None;
         }
         Ok(complete)
+    }
+
+    pub fn begin_restore(&self) -> AppResult<bool> {
+        let mut in_progress = self
+            .restore_lock
+            .lock()
+            .map_err(|_| AppError::system("RESTORE_STATE_FAILED", "恢复状态不可用"))?;
+        if *in_progress {
+            return Ok(false);
+        }
+        *in_progress = true;
+        Ok(true)
+    }
+
+    pub fn end_restore(&self) -> AppResult<()> {
+        let mut in_progress = self
+            .restore_lock
+            .lock()
+            .map_err(|_| AppError::system("RESTORE_STATE_FAILED", "恢复状态不可用"))?;
+        *in_progress = false;
+        Ok(())
+    }
+
+    pub fn begin_backup(&self) -> AppResult<bool> {
+        self.begin_restore()
+    }
+
+    pub fn end_backup(&self) -> AppResult<()> {
+        self.end_restore()
     }
 
     pub fn start_restore_request(&self) -> AppResult<String> {
@@ -276,7 +392,6 @@ impl AppState {
             .lock()
             .map_err(|_| AppError::system("IMPORT_SESSION_FAILED", "导入会话状态不可用"))?;
         let now = std::time::Instant::now();
-        sessions.retain(|_, session| session.expires_at > now);
         sessions.clear();
         sessions.insert(
             id.clone(),
@@ -301,6 +416,32 @@ impl AppState {
         })
     }
 }
+
+/// RAII guard that releases the backup/restore lock on drop, so a panic or a
+/// dropped future can never leave the lock permanently wedged.
+pub struct BackupOperationGuard<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> BackupOperationGuard<'a> {
+    /// Begin a backup/restore operation. Returns `None` when one is already in flight.
+    pub fn begin(state: &'a AppState) -> AppResult<Option<Self>> {
+        if state.begin_backup()? {
+            Ok(Some(Self { state }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl Drop for BackupOperationGuard<'_> {
+    fn drop(&mut self) {
+        if let Err(err) = self.state.end_backup() {
+            log::error!("backup_lock_release_failed source={err}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +461,64 @@ mod tests {
     }
 
     #[test]
+    fn restore_lock_allows_only_one_operation() {
+        let state = test_state();
+
+        assert!(state.begin_restore().unwrap());
+        assert!(!state.begin_restore().unwrap());
+        state.end_restore().unwrap();
+        assert!(state.begin_restore().unwrap());
+        state.end_restore().unwrap();
+    }
+
+    #[test]
+    fn backup_operation_guard_releases_lock_on_drop() {
+        let state = test_state();
+
+        {
+            let guard = BackupOperationGuard::begin(&state).unwrap();
+            assert!(guard.is_some());
+            assert!(
+                !state.begin_restore().unwrap(),
+                "lock must stay held while the guard lives"
+            );
+        }
+        assert!(
+            state.begin_restore().unwrap(),
+            "dropping the guard must release the lock"
+        );
+        state.end_restore().unwrap();
+
+        // A lock already held by a raw begin_restore yields None from the guard.
+        let _held = state.begin_restore().unwrap();
+        assert!(BackupOperationGuard::begin(&state).unwrap().is_none());
+        state.end_restore().unwrap();
+    }
+
+    #[test]
+    fn database_operation_blocks_write_transactions_until_it_ends() {
+        let state = std::sync::Arc::new(test_state());
+        let operation = state.database_operation().unwrap();
+        let worker_state = std::sync::Arc::clone(&state);
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_state
+                .with_write_tx(|_| Ok(()))
+                .expect("write transaction should eventually complete");
+            finished_tx.send(()).unwrap();
+        });
+
+        assert!(finished_rx
+            .recv_timeout(std::time::Duration::from_millis(20))
+            .is_err());
+        drop(operation);
+        assert!(finished_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok());
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn restore_request_waits_for_the_matching_acknowledgement() {
         let state = test_state();
         let request_id = state.start_restore_request().unwrap();
@@ -334,6 +533,7 @@ mod tests {
             .wait_restore_ready(&timed_out, std::time::Duration::from_millis(1))
             .unwrap());
     }
+
     #[test]
     fn import_session_is_consumed_once() {
         let state = test_state();
@@ -404,19 +604,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_pool_serves_parallel_readers() {
+        use crate::db::connection::open_in_memory_pool;
+
+        let (write_conn, read_conns) = open_in_memory_pool(3).unwrap();
+        let state = std::sync::Arc::new(AppState::with_read_pool(
+            write_conn,
+            read_conns,
+            test_paths(),
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let state = std::sync::Arc::clone(&state);
+            let tx = tx.clone();
+            handles.push(std::thread::spawn(move || {
+                state
+                    .with_read_conn(|_conn| {
+                        // Hold the slot briefly; all three must hold their own
+                        // slot concurrently, which fails if the pool serialized
+                        // readers.
+                        tx.send(()).unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        Ok(())
+                    })
+                    .expect("reader should check out a slot");
+            }));
+        }
+        for _ in 0..3 {
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("all readers should acquire their own slot concurrently");
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn replace_read_pool_rebuilds_slots_after_drain() {
+        use crate::db::connection::open_in_memory_pool;
+
+        let (write_conn, read_conns) = open_in_memory_pool(1).unwrap();
+        let state = AppState::with_read_pool(write_conn, read_conns, test_paths());
+        state.with_read_conn(|_| Ok(())).unwrap();
+
+        let (_new_write, new_reads) = open_in_memory_pool(2).unwrap();
+        state.replace_read_pool(new_reads).unwrap();
+        assert_eq!(
+            state.read_conns.lock().unwrap().len(),
+            2,
+            "replace must install the new slot count"
+        );
+        assert!(state.with_read_conn(|_| Ok(())).is_ok());
+        assert!(state.with_read_conn(|_| Ok(())).is_ok());
+    }
+
     fn test_state() -> AppState {
         let (write_conn, read_conn) = open_in_memory().unwrap();
+        AppState::new(write_conn, read_conn, test_paths())
+    }
+
+    fn test_paths() -> AppPaths {
         let root = tempfile::tempdir().unwrap().keep();
-        AppState::new(
-            write_conn,
-            read_conn,
-            AppPaths {
-                data_dir: root.join("data"),
-                log_dir: root.join("logs"),
-                backup_dir: root.join("backups"),
-                database_path: root.join("data").join("2notes.sqlite"),
-                bootstrap_path: root.join("bootstrap.json"),
-            },
-        )
+        AppPaths {
+            data_dir: root.join("data"),
+            log_dir: root.join("logs"),
+            backup_dir: root.join("backups"),
+            database_path: root.join("data").join("2notes.sqlite"),
+            bootstrap_path: root.join("bootstrap.json"),
+        }
     }
 }

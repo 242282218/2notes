@@ -51,8 +51,10 @@ if (-not (Test-Path -LiteralPath $resolvedExe)) {
 }
 New-Item -ItemType Directory -Force -Path $resolvedAppData | Out-Null
 
-$stdoutPath = Join-Path (Get-Location) "tmp-2notes-cdp-stdout.log"
-$stderrPath = Join-Path (Get-Location) "tmp-2notes-cdp-stderr.log"
+$logDirectory = Join-Path (Get-Location) ".tmp"
+New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+$stdoutPath = Join-Path $logDirectory "2notes-cdp-stdout.log"
+$stderrPath = Join-Path $logDirectory "2notes-cdp-stderr.log"
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -62,6 +64,7 @@ $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.Environment["TWONOTES_TEST_ROOT"] = $resolvedAppData
+$psi.Environment["WEBVIEW2_USER_DATA_FOLDER"] = Join-Path $resolvedAppData "webview2-profile"
 $psi.Environment["RUST_LOG"] = "trace"
 $psi.Environment["RUST_BACKTRACE"] = "1"
 $psi.Environment["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] =
@@ -380,24 +383,7 @@ console.log("EVENTS", JSON.stringify(events.slice(0, 10)));
 main.ws.close();
 quick.ws.close();
 
-const knownWebView2CspEvent = (event) => {
-  const entry = event.params?.entry;
-  const frame = entry?.stackTrace?.callFrames?.[0];
-  return (
-    event.method === "Log.entryAdded" &&
-    entry?.source === "security" &&
-    entry?.level === "error" &&
-    entry?.text?.startsWith(
-      "Applying inline style violates the following Content Security Policy directive 'style-src 'self''.",
-    ) &&
-    entry?.text?.includes("The action has been blocked.") &&
-    frame?.functionName === "eT" &&
-    /^http:\/\/tauri\.localhost\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(frame?.url ?? "") &&
-    frame?.lineNumber === 241
-  );
-};
-
-const unexpectedEvents = events.filter((event) => !knownWebView2CspEvent(event));
+const unexpectedEvents = events;
 console.log("UNEXPECTED_EVENT_COUNT", unexpectedEvents.length);
 console.log("UNEXPECTED_EVENTS", JSON.stringify(unexpectedEvents.slice(0, 10)));
 
@@ -446,11 +432,23 @@ raise SystemExit(0 if len(rows) == 1 else 1)
 } finally {
   $alive = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
   if ($alive) {
-    Stop-Process -Id $process.Id -Force
+    # Give the process a chance to flush stdout/stderr before forcing it down,
+    # so ReadToEnd below captures the full buffer instead of a partial one.
+    if (-not $process.WaitForExit(3000)) {
+      Stop-Process -Id $process.Id -Force
+      $process.WaitForExit(2000) | Out-Null
+    }
+  } else {
+    # Process already exited on its own; ensure async readers are drained.
+    $process.WaitForExit(2000) | Out-Null
   }
 
-  [System.IO.File]::WriteAllText($stdoutPath, $process.StandardOutput.ReadToEnd())
-  [System.IO.File]::WriteAllText($stderrPath, $process.StandardError.ReadToEnd())
+  # ReadToEnd blocks until the redirected stream closes. Using the async API
+  # keeps the disk write outside any lock and matches installed-nsis-smoke.ps1.
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  [System.IO.File]::WriteAllText($stdoutPath, $stdoutTask.GetAwaiter().GetResult())
+  [System.IO.File]::WriteAllText($stderrPath, $stderrTask.GetAwaiter().GetResult())
 
   Write-Output "STDOUT_LOG $stdoutPath"
   Write-Output "STDERR_LOG $stderrPath"

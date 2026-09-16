@@ -1,10 +1,23 @@
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import EntryList from "./EntryList.vue";
 import type { EntryListItem } from "../../types/generated";
 
 describe("EntryList", () => {
+  beforeEach(() => {
+    // jsdom reports zero layout, and the virtualizer renders nothing for a
+    // zero-height viewport. Fake a usable viewport so rows exist in the DOM.
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      value: 800,
+    });
+  });
+
   it("renders six stable skeleton items during the initial load", () => {
     const wrapper = mount(EntryList, {
       props: {
@@ -34,7 +47,7 @@ describe("EntryList", () => {
     expect(wrapper.get("[data-empty-state]").classes()).toContain("h-full");
   });
 
-  it("uses a gap-based item flow without panel or item divider borders", () => {
+  it("uses a padding-based item flow without panel or item divider borders", () => {
     const wrapper = mount(EntryList, {
       props: {
         items: [item("a"), item("b")],
@@ -45,13 +58,53 @@ describe("EntryList", () => {
     });
 
     expect(wrapper.get(".entry-list").classes()).not.toContain("border-r");
-    expect(wrapper.get("[data-testid='entry-items']").classes()).toContain(
+    expect(wrapper.get("[data-testid='entry-items']").classes()).not.toContain(
       "gap-1",
     );
     for (const button of wrapper.findAll(".entry-list-item")) {
       expect(button.classes()).not.toContain("border-b");
       expect(button.classes()).toContain("rounded-md");
     }
+  });
+
+  it("renders rows that arrive after mount", async () => {
+    const wrapper = mount(EntryList, {
+      props: {
+        items: [],
+        selectedId: null,
+        loading: true,
+        hasMore: false,
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    expect(wrapper.findAll(".entry-list-item")).toHaveLength(0);
+
+    await wrapper.setProps({ items: [item("a"), item("b")], loading: false });
+    await flushPromises();
+
+    expect(wrapper.findAll(".entry-list-item")).toHaveLength(2);
+    wrapper.unmount();
+  });
+
+  it("renders rows appended by load more", async () => {
+    const wrapper = mount(EntryList, {
+      props: {
+        items: [item("a")],
+        selectedId: null,
+        loading: false,
+        hasMore: true,
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    expect(wrapper.findAll(".entry-list-item")).toHaveLength(1);
+
+    await wrapper.setProps({ items: [item("a"), item("b"), item("c")] });
+    await flushPromises();
+
+    expect(wrapper.findAll(".entry-list-item")).toHaveLength(3);
+    wrapper.unmount();
   });
 
   it("navigates items with arrow keys", async () => {
@@ -64,6 +117,7 @@ describe("EntryList", () => {
       },
       attachTo: document.body,
     });
+    await flushPromises();
 
     const buttons = wrapper.findAll(".entry-list-item");
     expect(buttons.length).toBe(3);
@@ -91,6 +145,7 @@ describe("EntryList", () => {
       },
       attachTo: document.body,
     });
+    await flushPromises();
 
     const buttons = wrapper.findAll(".entry-list-item");
     (buttons[1].element as HTMLButtonElement).focus();

@@ -201,18 +201,3 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.filter-panel-enter-active,
-.filter-panel-leave-active {
-  transition:
-    opacity var(--duration-base) var(--ease-out),
-    transform var(--duration-base) var(--ease-out);
-}
-
-.filter-panel-enter-from,
-.filter-panel-leave-to {
-  opacity: 0;
-  transform: translateY(-4px);
-}
-</style>

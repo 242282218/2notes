@@ -4,22 +4,25 @@ import {
   nextTick,
   onBeforeUnmount,
   ref,
+  shallowRef,
   watch,
   watchEffect,
 } from "vue";
 import { ChevronRight, FileText } from "lucide-vue-next";
 
 import { useAutosave } from "../../composables/useAutosave";
+import { emptyParagraphDocument } from "../../editor/blockDocument";
+import {
+  AUTOSAVE_DEBOUNCE_MS,
+  WIKI_LINK_SUGGEST_DEBOUNCE_MS,
+} from "../../constants/limits";
+import { toErrorMessage } from "../../utils/errors";
 import {
   findWikiLinkCompletion,
   type WikiLinkCompletion,
 } from "../../composables/useWikiLinkCompletion";
-import { entriesUpdate } from "../../services/entryApi";
-import {
-  knowledgeDemote,
-  knowledgePromote,
-  knowledgeSuggest,
-} from "../../services/knowledgeApi";
+import { knowledgeSuggest } from "../../services/knowledgeApi";
+import { useEntriesStore } from "../../stores/entries";
 import type {
   BlockDocument,
   EntryDetail,
@@ -60,9 +63,14 @@ const emit = defineEmits<{
   toolbarChange: [state: EntryDetailToolbarState];
 }>();
 
+const entriesStore = useEntriesStore();
+
 const title = ref("");
 const titleInputRef = ref<HTMLInputElement | null>(null);
-const document = ref<BlockDocument>({ schemaVersion: 1, blocks: [] });
+// The document is always replaced wholesale (never mutated in place), so a
+// shallow ref tracks changes via reference identity and skips deep-proxy
+// traversal on every keystroke.
+const document = shallowRef<BlockDocument>(emptyParagraphDocument());
 const entryType = ref<EntryType>("unclear");
 const status = ref<EntryStatus>("pending");
 const tagInputRef = ref<{ commitDraft: () => void } | null>(null);
@@ -102,7 +110,7 @@ const autosave = useAutosave<{
   selectionGeneration: number;
   operationGeneration: number;
 }>({
-  delay: 500,
+  delay: AUTOSAVE_DEBOUNCE_MS,
   save: async () => {
     const requestSelectionGeneration = props.selectionGeneration;
     const requestOperationGeneration = operationGeneration;
@@ -116,7 +124,7 @@ const autosave = useAutosave<{
     if (!editingEntryId.value) {
       throw new Error("未选择条目");
     }
-    const entry = await entriesUpdate(
+    const entry = await entriesStore.saveSelected(
       editingEntryId.value,
       patch,
       baseRevision.value,
@@ -136,7 +144,7 @@ const autosave = useAutosave<{
       editingEntryId.value === entry.id &&
       operationGeneration === requestGeneration
     ) {
-      applySavedRevision(entry);
+      applySavedRevision(entry, true);
       emit("saved", entry, selectionGeneration);
     } else {
       emit("entryUpdated", entry);
@@ -147,17 +155,19 @@ const autosave = useAutosave<{
       editingEntryId.value === entry.id &&
       operationGeneration === requestGeneration
     ) {
-      applySavedRevision(entry);
+      applySavedRevision(entry, false);
     }
     emit("entryUpdated", entry);
   },
 });
 
-function applySavedRevision(entry: EntryDetail) {
+function applySavedRevision(entry: EntryDetail, clearTitleDirty: boolean) {
   if (entry.revision > baseRevision.value) {
     baseRevision.value = entry.revision;
   }
-  titleDirty = false;
+  if (clearTitleDirty) {
+    titleDirty = false;
+  }
   knowledgeState.value = entry.knowledgeState;
   deletedAt.value = entry.deletedAt;
 }
@@ -170,7 +180,7 @@ function isAutosaveBusy() {
 function applyEntrySnapshot(entry: EntryDetail | null) {
   editingEntryId.value = entry?.id || null;
   title.value = entry?.title || "";
-  document.value = entry?.document || { schemaVersion: 1, blocks: [] };
+  document.value = entry?.document || emptyParagraphDocument();
   entryType.value = entry?.entryType || "unclear";
   status.value = entry?.status || "pending";
   tags.value = entry?.tags.map((tag) => tag.name) || [];
@@ -253,6 +263,9 @@ watch(
   { immediate: true },
 );
 
+// Deliberately does NOT flush. Callers that must persist first (view/entry
+// switch, quit, trash) flush through AppShell before unmount; delete-forever
+// intentionally discards, so flushing here would write to a removed entry.
 onBeforeUnmount(() => {
   resetWikiLinkCompletion();
   autosave.dispose();
@@ -288,6 +301,17 @@ function requestMoveToTrash() {
   confirmTrash.value = true;
 }
 
+/** Archive through the form state so pending edits and the status travel in the
+ * same autosave patch; writing the status straight to the store would leave the
+ * local `status` ref stale and the next autosave would undo the archive. */
+function archive() {
+  if (deletedAt.value) {
+    return false;
+  }
+  status.value = "archived";
+  return true;
+}
+
 function restore() {
   emit("restore");
 }
@@ -319,7 +343,10 @@ async function promoteToKnowledge() {
   const requestGeneration = operationGeneration;
   const requestSelectionGeneration = props.selectionGeneration;
   try {
-    const updated = await knowledgePromote(requestEntryId, requestRevision);
+    const updated = await entriesStore.promoteKnowledge(
+      requestEntryId,
+      requestRevision,
+    );
     if (
       editingEntryId.value !== requestEntryId ||
       operationGeneration !== requestGeneration ||
@@ -328,7 +355,7 @@ async function promoteToKnowledge() {
       emit("entryUpdated", updated);
       return;
     }
-    applySavedRevision(updated);
+    applySavedRevision(updated, true);
     emit("saved", updated, requestSelectionGeneration);
   } catch (error) {
     if (
@@ -337,7 +364,7 @@ async function promoteToKnowledge() {
       props.selectionGeneration !== requestSelectionGeneration
     )
       return;
-    knowledgeError.value = error instanceof Error ? error.message : "沉淀失败";
+    knowledgeError.value = toErrorMessage(error, "沉淀失败");
   }
 }
 
@@ -349,7 +376,10 @@ async function demoteFromKnowledge() {
   const requestGeneration = operationGeneration;
   const requestSelectionGeneration = props.selectionGeneration;
   try {
-    const updated = await knowledgeDemote(requestEntryId, requestRevision);
+    const updated = await entriesStore.demoteKnowledge(
+      requestEntryId,
+      requestRevision,
+    );
     if (
       editingEntryId.value !== requestEntryId ||
       operationGeneration !== requestGeneration ||
@@ -358,7 +388,7 @@ async function demoteFromKnowledge() {
       emit("entryUpdated", updated);
       return;
     }
-    applySavedRevision(updated);
+    applySavedRevision(updated, true);
     emit("saved", updated, requestSelectionGeneration);
   } catch (error) {
     if (
@@ -367,7 +397,7 @@ async function demoteFromKnowledge() {
       props.selectionGeneration !== requestSelectionGeneration
     )
       return;
-    knowledgeError.value = error instanceof Error ? error.message : "移出失败";
+    knowledgeError.value = toErrorMessage(error, "移出失败");
   }
 }
 
@@ -402,7 +432,7 @@ function refreshWikiLinkCompletion(context: EditorTextContext | null) {
         wikiLinkSuggestions.value = [];
       }
     }
-  }, 120);
+  }, WIKI_LINK_SUGGEST_DEBOUNCE_MS);
 }
 
 function handleEditorSelectionChange(context: EditorTextContext | null) {
@@ -465,6 +495,7 @@ defineExpose({
   flushPendingSave,
   promoteToKnowledge,
   demoteFromKnowledge,
+  archive,
   requestMoveToTrash,
   restore,
   requestDeleteForever,
@@ -529,6 +560,7 @@ defineExpose({
           <div class="grid min-h-[260px] lg:grid-cols-[minmax(0,1fr)_208px]">
             <div class="relative min-w-0">
               <BlockEditor
+                :key="editingEntryId ?? undefined"
                 ref="blockEditorRef"
                 v-model="document"
                 :disabled="editorDisabled"

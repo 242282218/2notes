@@ -149,6 +149,54 @@ describe("useAppShellShortcuts", () => {
     editable.remove();
   });
 
+  it("leaves keys to an open modal dialog", async () => {
+    const clarify = vi.fn(() => true);
+    const requestDelete = vi.fn();
+    mountShortcuts({
+      focusSearch: vi.fn(),
+      closeTopmostOverlay: vi.fn(),
+      canDelete: () => true,
+      requestDelete,
+      clarify,
+    });
+    await nextTick();
+
+    const dialog = document.createElement("section");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+
+    expect(dispatchKey("j").defaultPrevented).toBe(false);
+    expect(dispatchKey("d").defaultPrevented).toBe(false);
+    expect(dispatchKey("Delete").defaultPrevented).toBe(false);
+    expect(clarify).not.toHaveBeenCalled();
+    expect(requestDelete).not.toHaveBeenCalled();
+
+    dialog.remove();
+  });
+
+  it("leaves Escape to an open modal dialog", async () => {
+    const closeTopmostOverlay = vi.fn();
+    mountShortcuts({
+      focusSearch: vi.fn(),
+      closeTopmostOverlay,
+      canDelete: () => false,
+      requestDelete: vi.fn(),
+    });
+    await nextTick();
+
+    const dialog = document.createElement("section");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+
+    const event = dispatchKey("Escape");
+    expect(event.defaultPrevented).toBe(false);
+    expect(closeTopmostOverlay).not.toHaveBeenCalled();
+
+    dialog.remove();
+  });
+
   it("removes the window listener on unmount", async () => {
     const focusSearch = vi.fn();
     const wrapper = mountShortcuts({

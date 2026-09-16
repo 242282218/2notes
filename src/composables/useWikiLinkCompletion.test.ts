@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyWikiLinkCompletion,
   findWikiLinkCompletion,
+  sanitizeWikiLinkTitle,
 } from "./useWikiLinkCompletion";
 
 describe("findWikiLinkCompletion", () => {
@@ -52,5 +53,36 @@ describe("applyWikiLinkCompletion", () => {
       value: "before [[Page Title]] suffix",
       caret: 21,
     });
+  });
+
+  it("refuses titles that would break the wiki link grammar", () => {
+    const value = "[[t";
+    const completion = findWikiLinkCompletion(value, 3);
+
+    expect(completion).not.toBeNull();
+    expect(applyWikiLinkCompletion(value, completion!, "目标|显示")).toBeNull();
+    expect(applyWikiLinkCompletion(value, completion!, "行\n断开")).toBeNull();
+    expect(applyWikiLinkCompletion(value, completion!, "含]]闭合")).toBeNull();
+    expect(
+      applyWikiLinkCompletion(value, completion!, "长".repeat(201)),
+    ).toBeNull();
+  });
+});
+
+describe("sanitizeWikiLinkTitle", () => {
+  it("trims whitespace but keeps a safe title", () => {
+    expect(sanitizeWikiLinkTitle("  知识库  ")).toBe("知识库");
+  });
+
+  it.each(["|", "目标|显示", "行\n断开", "含]]闭合", "长".repeat(201)])(
+    "rejects unsafe title %s",
+    (title) => {
+      expect(sanitizeWikiLinkTitle(title)).toBeNull();
+    },
+  );
+
+  it("rejects empty titles", () => {
+    expect(sanitizeWikiLinkTitle("")).toBeNull();
+    expect(sanitizeWikiLinkTitle("   ")).toBeNull();
   });
 });

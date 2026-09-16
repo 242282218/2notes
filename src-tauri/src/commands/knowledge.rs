@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::{
     app_state::AppState,
@@ -18,71 +18,97 @@ use crate::{
 };
 
 #[tauri::command]
-pub fn knowledge_suggest(
+pub async fn knowledge_suggest(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     query: String,
     limit: Option<u32>,
 ) -> CommandResult<Vec<KnowledgeSuggestion>> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    KnowledgeRepo::suggest(&conn, &query, limit.unwrap_or(10).clamp(1, 20))
-        .map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(|conn| {
+            KnowledgeRepo::suggest(conn, &query, limit.unwrap_or(10).clamp(1, 20))
+        })
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_tree_get(
+pub async fn knowledge_tree_get(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
 ) -> CommandResult<Vec<EntryTreeNode>> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    HierarchyRepo::tree(&conn).map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(HierarchyRepo::tree)
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_breadcrumbs_get(
+pub async fn knowledge_breadcrumbs_get(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     id: String,
 ) -> CommandResult<Vec<EntryBreadcrumb>> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    HierarchyRepo::breadcrumbs(&conn, &id).map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(|conn| HierarchyRepo::breadcrumbs(conn, &id))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_health_summary_get(
+pub async fn knowledge_health_summary_get(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
 ) -> CommandResult<KnowledgeHealthSummary> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    HealthRepo::summary(&conn, time::OffsetDateTime::now_utc()).map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(|conn| HealthRepo::summary(conn, time::OffsetDateTime::now_utc()))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_health_issues_get(
+pub async fn knowledge_health_issues_get(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     kind: HealthIssueKind,
     page: PageRequest,
 ) -> CommandResult<HealthIssuePage> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    HealthRepo::issues(&conn, kind, &page, time::OffsetDateTime::now_utc())
-        .map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(|conn| {
+            HealthRepo::issues(conn, kind, &page, time::OffsetDateTime::now_utc())
+        })
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_relations_get(
+pub async fn knowledge_relations_get(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     id: String,
 ) -> CommandResult<KnowledgeRelations> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    KnowledgeRepo::relations(&conn, &id).map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(|conn| KnowledgeRepo::relations(conn, &id))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
@@ -93,31 +119,33 @@ pub async fn knowledge_rebuild_index(
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     run_blocking(move || {
         let state = app.state::<AppState>();
-        let mut conn = state.write_conn()?;
-        KnowledgeRepo::rebuild_all_indexes(&mut conn)
+        state.with_write_conn(KnowledgeRepo::rebuild_all_indexes)
     })
     .await
     .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_promote(
+pub async fn knowledge_promote(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     id: String,
     expected_revision: i64,
 ) -> CommandResult<EntryDetail> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     let now = now_string();
-    state
-        .with_write_tx(|tx| KnowledgeRepo::promote(tx, &id, expected_revision, &now))
-        .map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_write_tx(|tx| KnowledgeRepo::promote(tx, &id, expected_revision, &now))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_move(
+pub async fn knowledge_move(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     id: String,
     parent_entry_id: Option<String>,
     sibling_order: u32,
@@ -125,8 +153,9 @@ pub fn knowledge_move(
 ) -> CommandResult<EntryDetail> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     let now = now_string();
-    state
-        .with_write_tx(|tx| {
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_write_tx(|tx| {
             HierarchyRepo::move_entry(
                 tx,
                 &id,
@@ -136,19 +165,24 @@ pub fn knowledge_move(
                 &now,
             )
         })
-        .map_err(AppErrorResponse::from)
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn knowledge_demote(
+pub async fn knowledge_demote(
+    app: AppHandle,
     window: WebviewWindow,
-    state: State<'_, AppState>,
     id: String,
     expected_revision: i64,
 ) -> CommandResult<EntryDetail> {
     require_main_window(window.label()).map_err(AppErrorResponse::from)?;
     let now = now_string();
-    state
-        .with_write_tx(|tx| KnowledgeRepo::demote(tx, &id, expected_revision, &now))
-        .map_err(AppErrorResponse::from)
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_write_tx(|tx| KnowledgeRepo::demote(tx, &id, expected_revision, &now))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }

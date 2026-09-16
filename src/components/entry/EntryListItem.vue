@@ -19,16 +19,22 @@ function allTagsTitle(tags: EntryListItem["tags"]) {
   return tags.map((tag) => `#${tag.name}`).join(", ");
 }
 
+// Formatters are locale-independent of the value; build once instead of per render.
+const sameDayFormatter = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const otherDayFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "numeric",
+  day: "numeric",
+});
+
 function formatUpdatedAt(value: string) {
   const date = new Date(value);
   const today = new Date();
   const sameDay = date.toDateString() === today.toDateString();
 
-  return new Intl.DateTimeFormat("zh-CN", {
-    ...(sameDay
-      ? { hour: "2-digit", minute: "2-digit" }
-      : { month: "numeric", day: "numeric" }),
-  }).format(date);
+  return (sameDay ? sameDayFormatter : otherDayFormatter).format(date);
 }
 </script>
 

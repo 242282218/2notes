@@ -83,6 +83,7 @@ export function entryMatchesCurrentFilter(
     entry.title || "",
     entry.currentContent,
     entry.originalContent,
+    entry.knowledgeAliases.join(" "),
     entry.tags.map((tag) => tag.name).join(" "),
   ].some((value) => value.toLocaleLowerCase().includes(query));
 }

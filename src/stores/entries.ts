@@ -11,7 +11,14 @@ import {
   entriesRestoreFromTrash,
   entriesUpdate,
 } from "../services/entryApi";
+import {
+  knowledgeDemote,
+  knowledgeMove,
+  knowledgePromote,
+} from "../services/knowledgeApi";
 import { tagsList } from "../services/tagApi";
+import { toErrorMessage, isKnownNonRecoverable } from "../utils/errors";
+import { PAGE_SIZE, SUMMARY_MAX_CHARS } from "../constants/limits";
 import type {
   EntryDetail,
   EntryListItem,
@@ -25,6 +32,7 @@ import {
   entryMatchesCurrentFilter,
   type UiFilters,
 } from "../composables/useEntryFilters";
+import { trackPendingOperation } from "../composables/usePendingOperations";
 
 const SEARCH_DEBOUNCE_MS = 150;
 
@@ -46,14 +54,30 @@ export const useEntriesStore = defineStore("entries", () => {
     selectionGeneration.value += 1;
     return selectionGeneration.value;
   }
+
+  function clearError() {
+    error.value = null;
+    errorRecoverable.value = true;
+  }
+
+  function reportError(cause: unknown, fallback: string) {
+    error.value = toErrorMessage(cause, fallback);
+    errorRecoverable.value = !isKnownNonRecoverable(cause);
+  }
   const loading = ref(false);
   const detailLoading = ref(false);
   const error = ref<string | null>(null);
+  /** True while `error` holds a failure that retrying cannot fix. */
+  const errorRecoverable = ref(true);
   const tagsError = ref<string | null>(null);
   const externalChangeToken = ref(0);
+  /** Bumped when the knowledge tree structure may have changed. */
+  const knowledgeTreeToken = ref(0);
+  /** Bumped when the knowledge health report may be stale. */
+  const healthToken = ref(0);
   const hasMore = ref(false);
   const offset = ref(0);
-  const limit = 50;
+  const limit = PAGE_SIZE;
   let loadRequestId = 0;
   let selectRequestId = 0;
   let openRequestId = 0;
@@ -76,14 +100,15 @@ export const useEntriesStore = defineStore("entries", () => {
   ) {
     const requestId = ++loadRequestId;
     loading.value = true;
-    error.value = null;
+    clearError();
+    const requestOffset = resetPage ? 0 : offset.value;
     if (resetPage) {
-      offset.value = 0;
       if (clearExisting) {
         items.value = [];
+        offset.value = 0;
+        hasMore.value = false;
       }
     }
-    const requestOffset = offset.value;
     const filter = buildEntryFilter(view.value, filters);
     try {
       const page = await entriesList(filter, {
@@ -94,10 +119,14 @@ export const useEntriesStore = defineStore("entries", () => {
         return;
       }
       items.value = resetPage ? page.items : [...items.value, ...page.items];
+      offset.value = page.offset + page.items.length;
       hasMore.value = page.hasMore;
       if (!preserveSelection) {
         if (!selectedId.value && page.items[0]) {
           await select(page.items[0].id);
+        }
+        if (requestId !== loadRequestId || !isCurrent()) {
+          return;
         }
         if (
           selectedId.value &&
@@ -110,8 +139,7 @@ export const useEntriesStore = defineStore("entries", () => {
       }
     } catch (loadError) {
       if (requestId === loadRequestId && isCurrent()) {
-        error.value =
-          loadError instanceof Error ? loadError.message : "加载失败";
+        reportError(loadError, "加载失败");
       }
     } finally {
       if (requestId === loadRequestId) {
@@ -128,12 +156,7 @@ export const useEntriesStore = defineStore("entries", () => {
     if (!hasMore.value || loading.value) {
       return;
     }
-    const previousOffset = offset.value;
-    offset.value = previousOffset + limit;
     await load(false);
-    if (error.value) {
-      offset.value = previousOffset;
-    }
   }
 
   async function refreshTags() {
@@ -147,7 +170,7 @@ export const useEntriesStore = defineStore("entries", () => {
       }
     } catch (cause) {
       if (requestId === tagsRequestId) {
-        tagsError.value = getErrorMessage(cause, "标签加载失败");
+        tagsError.value = toErrorMessage(cause, "标签加载失败");
       }
     }
   }
@@ -159,7 +182,7 @@ export const useEntriesStore = defineStore("entries", () => {
     selectedId.value = id;
     detail.value = null;
     detailLoading.value = true;
-    error.value = null;
+    clearError();
     try {
       const entry = await entriesGet(id);
       if (requestId === selectRequestId && selectedId.value === id) {
@@ -167,8 +190,7 @@ export const useEntriesStore = defineStore("entries", () => {
       }
     } catch (selectError) {
       if (requestId === selectRequestId) {
-        error.value =
-          selectError instanceof Error ? selectError.message : "加载失败";
+        reportError(selectError, "加载失败");
         selectedId.value = null;
         detail.value = null;
       }
@@ -184,10 +206,11 @@ export const useEntriesStore = defineStore("entries", () => {
   }
 
   async function openEntry(id: string) {
+    cancelPendingSearch();
     beginSelection();
     const requestId = ++openRequestId;
     const selectionRequestId = ++selectRequestId;
-    error.value = null;
+    clearError();
     detailLoading.value = true;
     try {
       const entry = await entriesGet(id);
@@ -213,12 +236,15 @@ export const useEntriesStore = defineStore("entries", () => {
       }
       selectedId.value = id;
       detail.value = entry;
+      // A linked entry outside the first page is pinned locally. The offset was
+      // already advanced by the reset-page load, so do not bump it again here:
+      // the entry is not the server-side first item (it would already be listed).
       if (!items.value.some((item) => item.id === id)) {
         items.value = [toListItem(entry), ...items.value];
       }
     } catch (openError) {
       if (requestId === openRequestId) {
-        error.value = getErrorMessage(openError, "打开关联条目失败");
+        reportError(openError, "打开关联条目失败");
       }
     } finally {
       if (requestId === openRequestId) {
@@ -229,11 +255,12 @@ export const useEntriesStore = defineStore("entries", () => {
 
   async function createAndSelect(): Promise<EntryDetail | null> {
     const requestGeneration = selectionGeneration.value;
-    error.value = null;
+    clearError();
     try {
-      const entry = await entriesCreate();
+      const entry = await trackPendingOperation(entriesCreate());
       if (matchesCurrentFilter(entry) && !upsertListItem(entry)) {
         items.value = [toListItem(entry), ...items.value];
+        offset.value += 1;
       }
       if (selectionGeneration.value !== requestGeneration) return null;
 
@@ -246,28 +273,61 @@ export const useEntriesStore = defineStore("entries", () => {
       return entry;
     } catch (createError) {
       if (selectionGeneration.value === requestGeneration) {
-        error.value = getErrorMessage(createError, "新建条目失败");
+        reportError(createError, "新建条目失败");
       }
       throw createError;
     }
   }
 
-  async function updateSelected(
+  async function saveSelected(
+    id: string,
     patch: EntryPatch,
     expectedRevision: number,
   ): Promise<EntryDetail> {
-    if (!detail.value) {
-      throw new Error("未选择条目");
-    }
-    const updated = await entriesUpdate(
-      detail.value.id,
-      patch,
-      expectedRevision,
+    const updated = await trackPendingOperation(
+      entriesUpdate(id, patch, expectedRevision),
     );
-    detail.value = updated;
-    upsertListItem(updated);
-    await refreshTags();
+    healthToken.value += 1;
     return updated;
+  }
+
+  async function promoteKnowledge(
+    id: string,
+    expectedRevision: number,
+  ): Promise<EntryDetail> {
+    const updated = await trackPendingOperation(
+      knowledgePromote(id, expectedRevision),
+    );
+    bumpKnowledgeTokens();
+    return updated;
+  }
+
+  async function demoteKnowledge(
+    id: string,
+    expectedRevision: number,
+  ): Promise<EntryDetail> {
+    const updated = await trackPendingOperation(
+      knowledgeDemote(id, expectedRevision),
+    );
+    bumpKnowledgeTokens();
+    return updated;
+  }
+
+  async function moveKnowledge(
+    id: string,
+    parentId: string | null,
+    expectedRevision: number,
+  ): Promise<EntryDetail> {
+    const updated = await trackPendingOperation(
+      knowledgeMove(id, parentId, 0, expectedRevision),
+    );
+    bumpKnowledgeTokens();
+    return updated;
+  }
+
+  function bumpKnowledgeTokens() {
+    knowledgeTreeToken.value += 1;
+    healthToken.value += 1;
   }
 
   function applySavedEntry(
@@ -294,12 +354,12 @@ export const useEntriesStore = defineStore("entries", () => {
     if (!detail.value) return;
     const requestEntry = detail.value;
     const requestGeneration = selectionGeneration.value;
-    error.value = null;
+    clearError();
     try {
-      const updated = await entriesMoveToTrash(
-        requestEntry.id,
-        requestEntry.revision,
+      const updated = await trackPendingOperation(
+        entriesMoveToTrash(requestEntry.id, requestEntry.revision),
       );
+      bumpKnowledgeTokens();
       if (
         selectedId.value !== requestEntry.id ||
         selectionGeneration.value !== requestGeneration
@@ -316,7 +376,7 @@ export const useEntriesStore = defineStore("entries", () => {
         selectedId.value === requestEntry.id &&
         selectionGeneration.value === requestGeneration
       ) {
-        error.value = getErrorMessage(operationError, "移到回收站失败");
+        reportError(operationError, "移到回收站失败");
       }
     }
   }
@@ -325,12 +385,12 @@ export const useEntriesStore = defineStore("entries", () => {
     if (!detail.value) return;
     const requestEntry = detail.value;
     const requestGeneration = selectionGeneration.value;
-    error.value = null;
+    clearError();
     try {
-      const updated = await entriesRestoreFromTrash(
-        requestEntry.id,
-        requestEntry.revision,
+      const updated = await trackPendingOperation(
+        entriesRestoreFromTrash(requestEntry.id, requestEntry.revision),
       );
+      bumpKnowledgeTokens();
       if (
         selectedId.value !== requestEntry.id ||
         selectionGeneration.value !== requestGeneration
@@ -347,7 +407,7 @@ export const useEntriesStore = defineStore("entries", () => {
         selectedId.value === requestEntry.id &&
         selectionGeneration.value === requestGeneration
       ) {
-        error.value = getErrorMessage(operationError, "恢复失败");
+        reportError(operationError, "恢复失败");
       }
     }
   }
@@ -356,9 +416,10 @@ export const useEntriesStore = defineStore("entries", () => {
     if (!detail.value) return;
     const requestEntryId = detail.value.id;
     const requestGeneration = selectionGeneration.value;
-    error.value = null;
+    clearError();
     try {
-      await entriesDeleteForever(requestEntryId);
+      await trackPendingOperation(entriesDeleteForever(requestEntryId));
+      bumpKnowledgeTokens();
       if (
         selectedId.value !== requestEntryId ||
         selectionGeneration.value !== requestGeneration
@@ -376,7 +437,7 @@ export const useEntriesStore = defineStore("entries", () => {
         selectedId.value === requestEntryId &&
         selectionGeneration.value === requestGeneration
       ) {
-        error.value = getErrorMessage(operationError, "永久删除失败");
+        reportError(operationError, "永久删除失败");
       }
     }
   }
@@ -384,6 +445,7 @@ export const useEntriesStore = defineStore("entries", () => {
   async function setView(nextView: AppView) {
     const nextTag = nextView === "tags" ? filters.tag : "";
     const queryChanged = view.value !== nextView || filters.tag !== nextTag;
+    cancelPendingSearch();
     beginSelection();
     view.value = nextView;
     filters.tag = nextTag;
@@ -398,6 +460,7 @@ export const useEntriesStore = defineStore("entries", () => {
 
   async function setTagFilter(tag: string) {
     const queryChanged = view.value !== "tags" || filters.tag !== tag;
+    cancelPendingSearch();
     beginSelection();
     filters.tag = tag;
     view.value = "tags";
@@ -408,17 +471,27 @@ export const useEntriesStore = defineStore("entries", () => {
 
   async function setTypeFilter(value: EntryType | "") {
     const queryChanged = filters.entryType !== value;
+    cancelPendingSearch();
     filters.entryType = value;
     await loadEntries(true, () => true, false, queryChanged);
   }
 
   async function setStatusFilter(value: EntryStatus | "") {
     const queryChanged = filters.status !== value;
+    cancelPendingSearch();
     filters.status = value;
     await loadEntries(true, () => true, false, queryChanged);
   }
 
   let pendingSearchQueryChange = false;
+
+  function cancelPendingSearch() {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+    }
+    pendingSearchQueryChange = false;
+  }
 
   function setQuery(value: string, switchView = true) {
     const nextView = switchView && value.trim() ? "search" : view.value;
@@ -437,15 +510,12 @@ export const useEntriesStore = defineStore("entries", () => {
     }, SEARCH_DEBOUNCE_MS);
   }
 
-  function getErrorMessage(operationError: unknown, fallback: string) {
-    return operationError instanceof Error ? operationError.message : fallback;
-  }
-
   function upsertListItem(updated: EntryDetail) {
     const index = items.value.findIndex((item) => item.id === updated.id);
     if (index < 0) return false;
     if (!matchesCurrentFilter(updated)) {
       items.value.splice(index, 1);
+      offset.value = Math.max(0, offset.value - 1);
       // Clear selected detail if the entry no longer matches the current filter.
       if (selectedId.value === updated.id) {
         beginSelection();
@@ -462,7 +532,10 @@ export const useEntriesStore = defineStore("entries", () => {
     return {
       id: updated.id,
       title: updated.title,
-      summary: updated.currentContent.split(/\s+/).join(" ").slice(0, 120),
+      summary: updated.currentContent
+        .split(/\s+/)
+        .join(" ")
+        .slice(0, SUMMARY_MAX_CHARS),
       entryType: updated.entryType,
       status: updated.status,
       knowledgeState: updated.knowledgeState,
@@ -492,19 +565,26 @@ export const useEntriesStore = defineStore("entries", () => {
     loading,
     detailLoading,
     error,
+    errorRecoverable,
     tagsError,
     externalChangeToken,
+    knowledgeTreeToken,
+    healthToken,
     hasMore,
     load,
     loadMore,
     refreshTags,
+    reconcileCurrentList,
     select,
     openEntry,
     createAndSelect,
     noteExternalChange,
-    updateSelected,
+    saveSelected,
     applySavedEntry,
     applyEntryListUpdate,
+    promoteKnowledge,
+    demoteKnowledge,
+    moveKnowledge,
     moveSelectedToTrash,
     restoreSelected,
     deleteSelectedForever,

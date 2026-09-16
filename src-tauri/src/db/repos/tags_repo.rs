@@ -11,11 +11,11 @@ impl TagsRepo {
     pub fn list(conn: &Connection) -> AppResult<Vec<Tag>> {
         let mut stmt = conn.prepare(
             "
-            SELECT t.id, t.name, t.normalized_name, t.created_at, COUNT(e.id) AS entry_count
+            SELECT t.id, t.name, t.normalized_name, t.created_at,
+                   (SELECT COUNT(*) FROM entry_tags et
+                    JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
+                    WHERE et.tag_id = t.id) AS entry_count
             FROM tags t
-            LEFT JOIN entry_tags et ON et.tag_id = t.id
-            LEFT JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
-            GROUP BY t.id
             ORDER BY t.name COLLATE NOCASE
             ",
         )?;
@@ -27,12 +27,12 @@ impl TagsRepo {
         let pattern = format!("%{}%", super::entries_repo::escape_like(query.trim()));
         let mut stmt = conn.prepare(
             "
-            SELECT t.id, t.name, t.normalized_name, t.created_at, COUNT(e.id) AS entry_count
+            SELECT t.id, t.name, t.normalized_name, t.created_at,
+                   (SELECT COUNT(*) FROM entry_tags et
+                    JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
+                    WHERE et.tag_id = t.id) AS entry_count
             FROM tags t
-            LEFT JOIN entry_tags et ON et.tag_id = t.id
-            LEFT JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
             WHERE t.name LIKE ?1 ESCAPE '\\'
-            GROUP BY t.id
             ORDER BY t.name COLLATE NOCASE
             LIMIT 20
             ",
@@ -93,13 +93,13 @@ impl TagsRepo {
     pub fn tags_for_entry(conn: &Connection, entry_id: &str) -> AppResult<Vec<Tag>> {
         let mut stmt = conn.prepare(
             "
-            SELECT t.id, t.name, t.normalized_name, t.created_at, COUNT(e2.id) AS entry_count
+            SELECT t.id, t.name, t.normalized_name, t.created_at,
+                   (SELECT COUNT(*) FROM entry_tags et2
+                    JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
+                    WHERE et2.tag_id = t.id) AS entry_count
             FROM tags t
             JOIN entry_tags et ON et.tag_id = t.id
-            LEFT JOIN entry_tags et2 ON et2.tag_id = t.id
-            LEFT JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
             WHERE et.entry_id = ?1
-            GROUP BY t.id
             ORDER BY t.name COLLATE NOCASE
             ",
         )?;
@@ -110,12 +110,12 @@ impl TagsRepo {
     fn get_by_normalized(tx: &Transaction<'_>, normalized: &str) -> AppResult<Tag> {
         Ok(tx.query_row(
             "
-            SELECT t.id, t.name, t.normalized_name, t.created_at, COUNT(e.id) AS entry_count
+            SELECT t.id, t.name, t.normalized_name, t.created_at,
+                   (SELECT COUNT(*) FROM entry_tags et
+                    JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
+                    WHERE et.tag_id = t.id) AS entry_count
             FROM tags t
-            LEFT JOIN entry_tags et ON et.tag_id = t.id
-            LEFT JOIN entries e ON e.id = et.entry_id AND e.deleted_at IS NULL
             WHERE t.normalized_name = ?1
-            GROUP BY t.id
             ",
             params![normalized],
             map_tag,

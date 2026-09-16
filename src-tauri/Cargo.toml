@@ -4,6 +4,7 @@ version = "0.3.0"
 description = "Personal quick capture notes"
 authors = ["2notes"]
 edition = "2021"
+rust-version = "1.93"
 
 [lib]
 name = "two_notes_lib"

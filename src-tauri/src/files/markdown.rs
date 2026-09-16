@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
@@ -28,6 +29,25 @@ struct Frontmatter {
     created_at: String,
     updated_at: String,
     deleted_at: Option<String>,
+    original_content: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportManifest {
+    format: &'static str,
+    app_version: &'static str,
+    schema_version: i64,
+    entry_count: usize,
+    files: Vec<ExportManifestFile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportManifestFile {
+    path: String,
+    bytes: u64,
+    blake3: String,
 }
 
 #[cfg(test)]
@@ -44,9 +64,7 @@ pub fn export_entries(entries: &[EntryDetail], target_dir: &Path) -> AppResult<V
     if let Ok(dir_entries) = fs::read_dir(target_dir) {
         for entry in dir_entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".md") {
-                    used.insert(name.to_string());
-                }
+                used.insert(name.to_string());
             }
         }
     }
@@ -54,12 +72,14 @@ pub fn export_entries(entries: &[EntryDetail], target_dir: &Path) -> AppResult<V
     let mut paths = Vec::new();
 
     for entry in entries {
-        let file_name = unique_file_name(entry, &mut used, target_dir);
+        let file_name = unique_file_name(entry, &mut used, target_dir)?;
         let path = target_dir.join(file_name);
         write_entry_file(&path, &render_entry(entry)?)?;
         paths.push(path);
     }
 
+    write_full_json_export(entries, target_dir, &mut used)?;
+    write_export_manifest(entries.len(), &paths, target_dir, &mut used)?;
     Ok(paths)
 }
 
@@ -70,6 +90,71 @@ fn write_entry_file(path: &Path, content: &str) -> AppResult<()> {
     file.flush()?;
     file.persist_noclobber(path).map_err(std::io::Error::from)?;
     Ok(())
+}
+
+fn write_full_json_export(
+    entries: &[EntryDetail],
+    target_dir: &Path,
+    used: &mut HashSet<String>,
+) -> AppResult<()> {
+    let file_name = unique_metadata_name("2notes-entries", used);
+    let path = target_dir.join(file_name);
+    let content = serde_json::to_string_pretty(entries)
+        .map_err(|err| AppError::validation("EXPORT_JSON_ENCODE", err.to_string()))?;
+    write_entry_file(&path, &content)
+}
+
+fn write_export_manifest(
+    entry_count: usize,
+    markdown_paths: &[PathBuf],
+    target_dir: &Path,
+    used: &mut HashSet<String>,
+) -> AppResult<()> {
+    let files = markdown_paths
+        .iter()
+        .map(|path| -> AppResult<ExportManifestFile> {
+            let content = fs::read(path)?;
+            let mut hasher = Hasher::new();
+            hasher.update(&content);
+            let bytes = (content.len() as u64, hasher.finalize().to_hex().to_string());
+            Ok(ExportManifestFile {
+                path: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                bytes: bytes.0,
+                blake3: bytes.1,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let manifest = ExportManifest {
+        format: "2notes-markdown-export-v1",
+        app_version: env!("CARGO_PKG_VERSION"),
+        schema_version: crate::db::migrations::current_schema_version(),
+        entry_count,
+        files,
+    };
+    let content = serde_json::to_string_pretty(&manifest)
+        .map_err(|err| AppError::validation("EXPORT_MANIFEST_ENCODE", err.to_string()))?;
+    let path = target_dir.join(unique_metadata_name("2notes-manifest", used));
+    write_entry_file(&path, &content)
+}
+
+fn unique_metadata_name(prefix: &str, used: &mut HashSet<String>) -> String {
+    let mut index = 0;
+    loop {
+        let suffix = if index == 0 {
+            String::new()
+        } else {
+            format!("-{index}")
+        };
+        let candidate = format!("{prefix}{suffix}.json");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
 }
 
 fn render_entry(entry: &EntryDetail) -> AppResult<String> {
@@ -84,6 +169,7 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         created_at: entry.created_at.clone(),
         updated_at: entry.updated_at.clone(),
         deleted_at: entry.deleted_at.clone(),
+        original_content: entry.original_content.clone(),
     };
     let yaml = serde_json::to_string_pretty(&frontmatter)
         .map_err(|err| AppError::Yaml(err.to_string()))?;
@@ -99,12 +185,16 @@ fn render_entry(entry: &EntryDetail) -> AppResult<String> {
         document_to_markdown(&entry.document).unwrap_or_else(|_| entry.current_content.clone());
 
     Ok(format!(
-        "---\n{}\n---\n\n# {}\n\n{}\n\n---\n\n## 原始内容\n\n{}\n",
-        yaml, title, body_markdown, entry.original_content
+        "---\n{}\n---\n\n# {}\n\n{}\n",
+        yaml, title, body_markdown
     ))
 }
 
-fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir: &Path) -> String {
+fn unique_file_name(
+    entry: &EntryDetail,
+    used: &mut HashSet<String>,
+    _target_dir: &Path,
+) -> AppResult<String> {
     // Use shared timestamp helper for consistent naming across backups and markdown exports.
     let timestamp = super::timestamps::markdown_timestamp(&entry.created_at);
     let summary = entry
@@ -125,6 +215,10 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir
     let base_name = format!("{timestamp}-{slug}");
     let mut candidate = format!("{base_name}.md");
     let mut collision_count = 0;
+    // Upper bound prevents a pathological `used` set from looping forever;
+    // 9999 collisions is far beyond any legitimate export volume and keeps the
+    // operation bounded even when the directory already holds many siblings.
+    const MAX_COLLISIONS: u32 = 9999;
 
     if used.contains(&candidate) {
         loop {
@@ -137,10 +231,19 @@ fn unique_file_name(entry: &EntryDetail, used: &mut HashSet<String>, _target_dir
             if !used.contains(&candidate) {
                 break;
             }
+            if collision_count >= MAX_COLLISIONS {
+                return Err(AppError::validation(
+                    "EXPORT_FILE_NAME_EXHAUSTED",
+                    format!(
+                        "could not allocate unique markdown file name for entry {entry_id}",
+                        entry_id = entry.id
+                    ),
+                ));
+            }
         }
     }
     used.insert(candidate.clone());
-    candidate
+    Ok(candidate)
 }
 
 #[cfg(test)]
@@ -197,12 +300,61 @@ mod tests {
 
         assert_eq!(paths.len(), 1);
         assert_eq!(parsed.tags.len(), 2);
-        assert!(content.contains("## 原始内容"));
+        assert_eq!(parsed.original_content, "hello <>:\"/\\|?* world");
         assert!(!paths[0]
             .file_name()
             .unwrap()
             .to_string_lossy()
             .contains('<'));
+    }
+
+    #[test]
+    fn export_writes_full_json_and_manifest_with_hashes() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "manifest entry", &now_string()).unwrap();
+        tx.commit().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = export_all(&conn, dir.path()).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(dir.path().join("2notes-entries.json").is_file());
+        let manifest = fs::read_to_string(dir.path().join("2notes-manifest.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(parsed["format"], "2notes-markdown-export-v1");
+        assert_eq!(parsed["entryCount"], 1);
+        assert_eq!(
+            parsed["schemaVersion"],
+            crate::db::migrations::current_schema_version()
+        );
+        assert_eq!(
+            parsed["files"][0]["path"],
+            paths[0].file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(parsed["files"][0]["blake3"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn exports_original_content_as_structured_frontmatter() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let raw = "raw capture\n\n---\n\n## 原始内容\n\nmarker\n";
+        let tx = conn.transaction().unwrap();
+        EntriesRepo::create(&tx, raw, &now).unwrap();
+        tx.commit().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = export_all(&conn, dir.path()).unwrap();
+        let content = fs::read_to_string(&paths[0]).unwrap();
+        let frontmatter = content
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n\n"))
+            .map(|(frontmatter, _)| frontmatter)
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(frontmatter).unwrap();
+
+        assert_eq!(metadata["original_content"], raw.trim_end_matches('\n'));
+        assert!(!content.contains("\n\n---\n\n## 原始内容\n"));
     }
 
     #[test]
@@ -245,15 +397,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = export_all(&conn, dir.path()).unwrap();
         let content = fs::read_to_string(&paths[0]).unwrap();
-        let parsed: Frontmatter =
-            serde_json::from_str(content.split("---").nth(1).unwrap()).unwrap();
+        let frontmatter = content
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split_once("\n---\n\n"))
+            .map(|(frontmatter, _)| frontmatter)
+            .unwrap();
+        let parsed: Frontmatter = serde_json::from_str(frontmatter).unwrap();
 
         assert_eq!(parsed.knowledge_state, "knowledge");
         assert_eq!(parsed.knowledge_promoted_at.as_deref(), Some(now.as_str()));
         assert_eq!(parsed.aliases, vec!["旧标题"]);
         assert!(content.contains("\"aliases\""));
         assert!(!content.contains("\"knowledge_aliases\""));
-        assert!(content.contains("\n\n[[关联标题]] 正文\n\n---"));
+        assert!(content.contains("\n\n[[关联标题]] 正文\n"));
+        assert_eq!(parsed.original_content, "[[关联标题]] 正文");
     }
 
     #[test]

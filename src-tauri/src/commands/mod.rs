@@ -20,6 +20,18 @@ pub fn require_main_window(label: &str) -> AppResult<()> {
     ))
 }
 
+/// Guard for commands shared between the main window and the quick-capture
+/// window. Unlike `require_main_window`, any unknown future window is rejected.
+pub fn require_known_window(label: &str) -> AppResult<()> {
+    if label == "main" || label == "quick-capture" {
+        return Ok(());
+    }
+    Err(AppError::validation(
+        "COMMAND_FORBIDDEN",
+        "当前窗口无权执行此操作",
+    ))
+}
+
 pub async fn run_blocking<F, T>(task: F) -> AppResult<T>
 where
     F: FnOnce() -> AppResult<T> + Send + 'static,
@@ -32,7 +44,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::require_main_window;
+    use super::{require_known_window, require_main_window};
     use crate::error::AppError;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +97,7 @@ mod tests {
         match classify_command(command) {
             Some(CommandClass::MainOnly) => require_main_window(window_label).is_ok(),
             Some(CommandClass::SharedWithQuickCapture) => {
-                window_label == "main" || window_label == "quick-capture"
+                require_known_window(window_label).is_ok()
             }
             None => false,
         }
@@ -114,6 +126,15 @@ mod tests {
         assert_forbidden(require_main_window("settings"));
         assert_forbidden(require_main_window(""));
         assert_forbidden(require_main_window("MAIN"));
+    }
+
+    #[test]
+    fn known_window_guard_accepts_both_app_windows_and_rejects_others() {
+        assert!(require_known_window("main").is_ok());
+        assert!(require_known_window("quick-capture").is_ok());
+        assert_forbidden(require_known_window("settings"));
+        assert_forbidden(require_known_window(""));
+        assert_forbidden(require_known_window("popup"));
     }
 
     #[test]

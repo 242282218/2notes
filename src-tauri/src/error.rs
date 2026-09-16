@@ -115,8 +115,23 @@ impl AppError {
 
 impl From<AppError> for AppErrorResponse {
     fn from(value: AppError) -> Self {
-        log::error!("app_error code={} source={}", value.response().code, value);
-        value.response()
+        let response = value.response();
+        match &value {
+            // Expected, user-correctable outcomes: no error-level noise.
+            AppError::Validation { .. }
+            | AppError::NotFound { .. }
+            | AppError::RevisionConflict => {
+                log::info!("app_error code={} source={}", response.code, value);
+            }
+            // Real failures worth surfacing in logs.
+            AppError::Migration { .. } | AppError::System { .. } | AppError::Yaml(_) => {
+                log::error!("app_error code={} source={}", response.code, value);
+            }
+            AppError::Db(_) | AppError::Io(_) | AppError::Json(_) => {
+                log::error!("app_error code={} source={}", response.code, value);
+            }
+        }
+        response
     }
 }
 

@@ -30,6 +30,7 @@ const baseSettings: AppSettings = {
   shortcutError: null,
   autostartEnabled: false,
   themeMode: "system",
+  backupRetentionCount: 10,
 };
 
 function relativeLuminance(hex: string): number {

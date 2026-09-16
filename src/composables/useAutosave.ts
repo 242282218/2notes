@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { toErrorMessage } from "../utils/errors";
 
 export type SaveState = "idle" | "dirty" | "saving" | "saved" | "failed";
 
@@ -104,8 +105,7 @@ export function useAutosave<T>(options: AutosaveOptions<T>) {
 
         if (requestVersion === version) {
           state.value = "failed";
-          error.value =
-            saveError instanceof Error ? saveError.message : "保存失败";
+          error.value = toErrorMessage(saveError, "保存失败");
           options.onFailed?.(saveError);
           throw saveError;
         }

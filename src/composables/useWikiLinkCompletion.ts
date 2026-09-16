@@ -1,3 +1,5 @@
+import { WIKI_LINK_SUGGEST_MAX } from "../constants/limits";
+
 export interface WikiLinkCompletion {
   start: number;
   query: string;
@@ -23,7 +25,7 @@ export function findWikiLinkCompletion(
 
   const query = value.slice(open + 2, safeCaret);
   if (
-    Array.from(query).length > 200 ||
+    Array.from(query).length > WIKI_LINK_SUGGEST_MAX ||
     query.includes("|") ||
     /[\r\n]/.test(query)
   ) {
@@ -32,13 +34,32 @@ export function findWikiLinkCompletion(
   return { start: open + 2, query };
 }
 
+// Mirrors the backend wiki-link parser's rejection rules: a title containing
+// `|`, newlines, closing brackets, or exceeding the suggestion window can never
+// form a resolvable link, so it must not be inserted as one.
+export function sanitizeWikiLinkTitle(title: string): string | null {
+  const trimmed = title.trim();
+  if (
+    !trimmed ||
+    Array.from(trimmed).length > WIKI_LINK_SUGGEST_MAX ||
+    trimmed.includes("|") ||
+    trimmed.includes("]]") ||
+    /[\r\n]/.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
 export function applyWikiLinkCompletion(
   value: string,
   completion: WikiLinkCompletion,
   title: string,
-): AppliedWikiLinkCompletion {
+): AppliedWikiLinkCompletion | null {
+  const safeTitle = sanitizeWikiLinkTitle(title);
+  if (safeTitle === null) return null;
   const caret = completion.start + completion.query.length;
-  const replacement = `${title}]]`;
+  const replacement = `${safeTitle}]]`;
   return {
     value: `${value.slice(0, completion.start)}${replacement}${value.slice(caret)}`,
     caret: completion.start + replacement.length,

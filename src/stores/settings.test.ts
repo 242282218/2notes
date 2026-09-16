@@ -20,6 +20,7 @@ const baseSettings: AppSettings = {
   shortcutError: null,
   autostartEnabled: false,
   themeMode: "system",
+  backupRetentionCount: 10,
 };
 
 function deferred<T>() {
@@ -48,6 +49,17 @@ describe("settings store", () => {
     await expect(store.setAutostart(true)).rejects.toThrow("denied");
 
     expect(store.settings?.autostartEnabled).toBe(false);
+    expect(store.error).toBe("denied");
+  });
+
+  it("updates backup retention and rolls it back on failure", async () => {
+    const store = useSettingsStore();
+    store.settings = { ...baseSettings };
+    vi.mocked(settingsUpdate).mockRejectedValue(new Error("denied"));
+
+    await expect(store.setBackupRetentionCount(20)).rejects.toThrow("denied");
+
+    expect(store.settings?.backupRetentionCount).toBe(10);
     expect(store.error).toBe("denied");
   });
 
@@ -220,5 +232,18 @@ describe("settings store", () => {
     expect(store.settings?.autostartEnabled).toBe(true);
     expect(store.settings?.themeMode).toBe("dark");
     expect(useTheme().mode.value).toBe("dark");
+  });
+
+  it("keeps a failed field error when another field succeeds", async () => {
+    const store = useSettingsStore();
+    store.settings = { ...baseSettings };
+    vi.mocked(settingsUpdate)
+      .mockRejectedValueOnce(new Error("autostart denied"))
+      .mockResolvedValueOnce({ ...baseSettings, themeMode: "dark" });
+
+    await expect(store.setAutostart(true)).rejects.toThrow("autostart denied");
+    await store.setThemeMode("dark");
+
+    expect(store.error).toBe("autostart denied");
   });
 });

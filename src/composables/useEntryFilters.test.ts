@@ -117,6 +117,28 @@ describe("entryMatchesCurrentFilter", () => {
     });
     expect(entryMatchesCurrentFilter(trashed, filter)).toBe(false);
   });
+
+  it("matches search queries against knowledge aliases", () => {
+    const filter = buildEntryFilter("search", {
+      query: "旧标题",
+      entryType: "",
+      status: "",
+      tag: "",
+    });
+
+    expect(
+      entryMatchesCurrentFilter(
+        {
+          ...base,
+          title: "新标题",
+          currentContent: "当前内容",
+          originalContent: "原始内容",
+          knowledgeAliases: ["旧标题"],
+        },
+        filter,
+      ),
+    ).toBe(true);
+  });
 });
 
 function emptyFilters() {

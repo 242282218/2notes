@@ -221,6 +221,137 @@ describe("entries store", () => {
     expect(store.items).toEqual([]);
   });
 
+  it("advances the next page offset after a local insertion", async () => {
+    const store = useEntriesStore();
+    const initialEntries = Array.from({ length: 50 }, (_, index) =>
+      entry(`entry-${index}`),
+    );
+    store.selectedId = initialEntries[0].id;
+    store.detail = initialEntries[0];
+    vi.mocked(entriesList)
+      .mockResolvedValueOnce(pageWithOptions(initialEntries, { hasMore: true }))
+      .mockResolvedValueOnce(pageWithOptions([], { offset: 51 }));
+    vi.mocked(entriesCreate).mockResolvedValue(entry("created"));
+
+    await store.load();
+    await store.createAndSelect();
+    await store.loadMore();
+
+    expect(entriesList).toHaveBeenNthCalledWith(2, expect.anything(), {
+      limit: 50,
+      offset: 51,
+    });
+  });
+
+  it("rewinds the next page offset after a local removal", async () => {
+    const store = useEntriesStore();
+    const initialEntries = Array.from({ length: 50 }, (_, index) =>
+      entry(`entry-${index}`),
+    );
+    store.selectedId = initialEntries[0].id;
+    store.detail = initialEntries[0];
+    vi.mocked(entriesList)
+      .mockResolvedValueOnce(pageWithOptions(initialEntries, { hasMore: true }))
+      .mockResolvedValueOnce(pageWithOptions([], { offset: 49 }));
+    vi.mocked(tagsList).mockResolvedValue([]);
+
+    await store.load();
+    store.applyEntryListUpdate({
+      ...initialEntries[0],
+      status: "done",
+    });
+    await store.loadMore();
+
+    expect(entriesList).toHaveBeenNthCalledWith(2, expect.anything(), {
+      limit: 50,
+      offset: 49,
+    });
+  });
+
+  it("preserves pagination metadata when a visible-list reload fails", async () => {
+    const store = useEntriesStore();
+    const initialEntries = Array.from({ length: 50 }, (_, index) =>
+      entry(`entry-${index}`),
+    );
+    const nextEntries = Array.from({ length: 10 }, (_, index) =>
+      entry(`next-${index}`),
+    );
+    store.selectedId = initialEntries[0].id;
+    store.detail = initialEntries[0];
+    vi.mocked(entriesList)
+      .mockResolvedValueOnce(pageWithOptions(initialEntries, { hasMore: true }))
+      .mockResolvedValueOnce(
+        pageWithOptions(nextEntries, { offset: 50, hasMore: true }),
+      )
+      .mockRejectedValueOnce(new Error("reload failed"))
+      .mockResolvedValueOnce(pageWithOptions([], { offset: 60 }));
+
+    await store.load();
+    await store.loadMore();
+    await store.load();
+    await store.loadMore();
+
+    expect(entriesList).toHaveBeenNthCalledWith(4, expect.anything(), {
+      limit: 50,
+      offset: 60,
+    });
+    expect(store.items).toHaveLength(60);
+    expect(store.hasMore).toBe(false);
+  });
+
+  it("does not expose more pages after a clearing reload fails", async () => {
+    const store = useEntriesStore();
+    const initialEntries = Array.from({ length: 50 }, (_, index) =>
+      entry(`entry-${index}`),
+    );
+    store.selectedId = initialEntries[0].id;
+    store.detail = initialEntries[0];
+    vi.mocked(entriesList)
+      .mockResolvedValueOnce(pageWithOptions(initialEntries, { hasMore: true }))
+      .mockRejectedValueOnce(new Error("filter failed"));
+
+    await store.load();
+    await store.setTypeFilter("idea");
+    const callsAfterFailure = vi.mocked(entriesList).mock.calls.length;
+
+    expect(store.items).toEqual([]);
+    expect(store.hasMore).toBe(false);
+
+    await store.loadMore();
+
+    expect(entriesList).toHaveBeenCalledTimes(callsAfterFailure);
+  });
+
+  it("does not let a stale loadMore response restore newer cleared state", async () => {
+    const store = useEntriesStore();
+    const initialEntries = Array.from({ length: 50 }, (_, index) =>
+      entry(`entry-${index}`),
+    );
+    store.selectedId = initialEntries[0].id;
+    store.detail = initialEntries[0];
+    vi.mocked(entriesList).mockResolvedValueOnce(
+      pageWithOptions(initialEntries, { hasMore: true }),
+    );
+
+    await store.load();
+
+    const staleMore = deferred<ReturnType<typeof pageWith>>();
+    vi.mocked(entriesList)
+      .mockReturnValueOnce(staleMore.promise)
+      .mockRejectedValueOnce(new Error("filter failed"));
+    const loadingMore = store.loadMore();
+    const changingFilter = store.setTypeFilter("idea");
+
+    await changingFilter;
+    staleMore.resolve(pageWithOptions([], { offset: 50, hasMore: true }));
+    await loadingMore;
+
+    expect(store.items).toEqual([]);
+    expect(store.hasMore).toBe(false);
+    await store.loadMore();
+    expect(entriesList).toHaveBeenCalledTimes(3);
+  });
+
   it("does not replace the current detail with a stale saved entry", () => {
     const store = selectedStore();
     const requestGeneration = store.selectionGeneration;
@@ -701,6 +832,13 @@ function entry(id: string): EntryDetail {
 }
 
 function pageWith(...entries: EntryDetail[]) {
+  return pageWithOptions(entries);
+}
+
+function pageWithOptions(
+  entries: EntryDetail[],
+  options: { offset?: number; hasMore?: boolean } = {},
+) {
   return {
     items: entries.map((value) => ({
       id: value.id,
@@ -717,8 +855,8 @@ function pageWith(...entries: EntryDetail[]) {
       deletedAt: value.deletedAt,
     })),
     limit: 50,
-    offset: 0,
-    hasMore: false,
+    offset: options.offset ?? 0,
+    hasMore: options.hasMore ?? false,
   };
 }
 
