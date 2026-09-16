@@ -46,10 +46,13 @@ export function newBlockId(): string {
 
 const EMPTY_ATTRS = { level: null, language: null, start: null };
 
+/** Single source of truth for the persisted block-document schema version. */
+export const DOCUMENT_SCHEMA_VERSION = 1;
+
 /** Default shape for a fenced empty-paragraph document the backend accepts. */
 export function emptyParagraphDocument(): BlockDocument {
   return {
-    schemaVersion: 1,
+    schemaVersion: DOCUMENT_SCHEMA_VERSION,
     blocks: [emptyParagraphNode()],
   };
 }

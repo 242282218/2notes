@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { Inbox, Loader2 } from "lucide-vue-next";
-
-import { ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  ref,
+  type ComponentPublicInstance,
+} from "vue";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 
 import type { EntryListItem as EntryListItemType } from "../../types/generated";
 import EmptyState from "../shared/EmptyState.vue";
 import SkeletonText from "../shared/SkeletonText.vue";
 import EntryListItem from "./EntryListItem.vue";
 
-defineProps<{
+const props = defineProps<{
   items: EntryListItemType[];
   selectedId: string | null;
   loading: boolean;
@@ -21,43 +27,118 @@ const emit = defineEmits<{
 }>();
 
 const listRef = ref<HTMLElement | null>(null);
+const scrollRef = ref<HTMLElement | null>(null);
 
-function itemButtons() {
-  return Array.from(
-    listRef.value?.querySelectorAll<HTMLButtonElement>(".entry-list-item") ??
-      [],
+// Virtualize the row list so thousands of "load more" results stay cheap to
+// render. Row heights vary (1-2 line summaries, search snippets), so each row
+// is measured after mount and the load-more button is the final virtual row.
+// The options must stay reactive: vue-virtual only forwards them to the
+// instance when its own computed re-evaluates, so a plain object would freeze
+// `count` at its setup-time value and rows would never appear.
+const virtualizer = useVirtualizer(
+  computed(() => ({
+    count: props.items.length + (props.hasMore ? 1 : 0),
+    getScrollElement: () => scrollRef.value,
+    estimateSize: () => 96,
+    overscan: 8,
+    getItemKey: (index: number) =>
+      index < props.items.length ? props.items[index].id : "__more__",
+  })),
+);
+
+/** Inside a double-quoted attribute selector only the quote and backslash are
+ * special. Hand-rolled because jsdom provides no CSS.escape. */
+function quoteAttrValue(value: string) {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+/** Targeted lookup by id. Avoids materialising every rendered row, which made
+ * each arrow keypress cost O(list length) DOM work. */
+function entryButton(id: string) {
+  return (
+    listRef.value?.querySelector<HTMLButtonElement>(
+      `.entry-list-item[data-entry-id="${quoteAttrValue(id)}"]`,
+    ) ?? null
   );
 }
 
 function focusItemAt(index: number) {
-  const target = itemButtons()[index];
+  const item = props.items[index];
+  if (!item) {
+    return;
+  }
+  const target = entryButton(item.id);
   if (target) {
     target.focus();
-    emit("select", target.dataset.entryId!);
+    emit("select", item.id);
+    return;
   }
+  // Not yet rendered (scrolled out of the virtual window): scroll it into view,
+  // then focus once the newly visible rows have been mounted.
+  void scrollAndFocus(item.id, index);
 }
 
+async function scrollAndFocus(id: string, index: number) {
+  virtualizer.value.scrollToIndex(index, { align: "auto" });
+  await nextTick();
+  const target = entryButton(id);
+  if (target) {
+    target.focus();
+  }
+  emit("select", id);
+}
+
+function measureRow(node: Element | ComponentPublicInstance | null) {
+  virtualizer.value.measureElement(node as Element | null);
+}
+
+onMounted(() => {
+  // Some environments (jsdom) have no ResizeObserver, so the virtualizer never
+  // learns the scroll container size on its own; measure once explicitly.
+  virtualizer.value.measure();
+});
+
+/** Resolve the focused row from the active element's own id rather than by
+ * comparing against every row. */
+function activeIndex() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) {
+    return -1;
+  }
+  const id = active.dataset.entryId;
+  if (!id || !active.classList.contains("entry-list-item")) {
+    return -1;
+  }
+  return props.items.findIndex((item) => item.id === id);
+}
+
+function focusRelative(offset: number) {
+  const current = props.items.findIndex((item) => item.id === props.selectedId);
+  const next = Math.max(0, Math.min(props.items.length - 1, current + offset));
+  focusItemAt(current < 0 ? 0 : next);
+}
+
+defineExpose({ focusRelative });
+
 function onKeydown(event: KeyboardEvent) {
-  const buttons = itemButtons();
-  if (buttons.length === 0) {
+  const total = props.items.length;
+  if (total === 0) {
     return;
   }
 
-  const currentIndex = buttons.findIndex(
-    (button) => button === document.activeElement,
-  );
+  const currentIndex = activeIndex();
 
   if (event.key === "ArrowDown") {
     event.preventDefault();
     if (currentIndex === -1) {
       focusItemAt(0);
     } else {
-      focusItemAt(Math.min(currentIndex + 1, buttons.length - 1));
+      focusItemAt(Math.min(currentIndex + 1, total - 1));
     }
   } else if (event.key === "ArrowUp") {
     event.preventDefault();
     if (currentIndex === -1) {
-      focusItemAt(buttons.length - 1);
+      focusItemAt(total - 1);
     } else {
       focusItemAt(Math.max(currentIndex - 1, 0));
     }
@@ -66,7 +147,7 @@ function onKeydown(event: KeyboardEvent) {
     focusItemAt(0);
   } else if (event.key === "End") {
     event.preventDefault();
-    focusItemAt(buttons.length - 1);
+    focusItemAt(total - 1);
   }
 }
 </script>
@@ -88,8 +169,9 @@ function onKeydown(event: KeyboardEvent) {
       }}</span>
     </header>
     <div
+      ref="scrollRef"
       data-testid="entry-items"
-      class="flex min-h-0 flex-1 flex-col gap-1 overflow-auto px-2 pb-2"
+      class="min-h-0 flex-1 overflow-auto px-2 pb-2"
     >
       <div
         v-if="loading && !items.length"
@@ -114,23 +196,42 @@ function onKeydown(event: KeyboardEvent) {
         description="这里会显示符合条件的记录"
         size="fill"
       />
-      <EntryListItem
-        v-for="item in items"
-        :key="item.id"
-        :item="item"
-        :active="item.id === selectedId"
-        @select="$emit('select', $event)"
-      />
-      <button
-        v-if="hasMore"
-        type="button"
-        class="btn-secondary m-3 w-[calc(100%_-_24px)] text-ui"
-        :disabled="loading"
-        @click="$emit('more')"
+      <div
+        v-else
+        class="relative w-full"
+        :style="{ height: `${virtualizer.getTotalSize()}px` }"
       >
-        <Loader2 v-if="loading" :size="14" aria-hidden="true" />
-        {{ loading ? "加载中" : "加载更多" }}
-      </button>
+        <div
+          v-for="virtualRow in virtualizer.getVirtualItems()"
+          :ref="measureRow"
+          :key="
+            virtualRow.index < items.length
+              ? items[virtualRow.index].id
+              : '__more__'
+          "
+          :data-index="virtualRow.index"
+          class="absolute left-0 top-0 w-full pb-1"
+          :style="{ transform: `translateY(${virtualRow.start}px)` }"
+        >
+          <EntryListItem
+            v-if="virtualRow.index < items.length"
+            :item="items[virtualRow.index]"
+            :active="items[virtualRow.index].id === selectedId"
+            @select="$emit('select', $event)"
+          />
+          <div v-else class="p-3">
+            <button
+              type="button"
+              class="btn-secondary w-full text-ui"
+              :disabled="loading"
+              @click="$emit('more')"
+            >
+              <Loader2 v-if="loading" :size="14" aria-hidden="true" />
+              {{ loading ? "加载中" : "加载更多" }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 </template>

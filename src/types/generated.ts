@@ -177,11 +177,14 @@ export type AppSettings = {
   shortcutError: string | null;
   autostartEnabled: boolean;
   themeMode: ThemeMode;
+  backupRetentionCount: number;
 };
 
 export type SettingsPatch = {
   autostartEnabled: boolean | null;
   themeMode: ThemeMode | null;
+  backupRetentionCount: number | null;
+  shortcut: string | null;
 };
 
 export type ExportResult = { exportedCount: number; targetDir: string };

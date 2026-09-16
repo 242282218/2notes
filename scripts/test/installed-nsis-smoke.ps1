@@ -118,11 +118,32 @@ function Start-RedirectedChildProcess {
     }
 }
 
+function Read-RedirectedOutput {
+    param(
+        [Parameter(Mandatory = $true)][System.Threading.Tasks.Task]$Task,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $Task.IsCompleted) {
+        if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            # WebView2 child processes can inherit the redirected pipe write ends and
+            # keep the read task open after the main process exited. Record a marker
+            # and fail instead of blocking the smoke run forever.
+            [System.IO.File]::WriteAllText($Path, "<read timed out after $TimeoutSeconds seconds>")
+            throw "Timed out reading redirected output after $TimeoutSeconds seconds: $Path"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    [System.IO.File]::WriteAllText($Path, $Task.GetAwaiter().GetResult())
+}
+
 function Complete-RedirectedChildProcess {
     param([Parameter(Mandatory = $true)][object]$ChildProcess)
 
-    [System.IO.File]::WriteAllText($ChildProcess.StdoutPath, $ChildProcess.StdoutTask.GetAwaiter().GetResult())
-    [System.IO.File]::WriteAllText($ChildProcess.StderrPath, $ChildProcess.StderrTask.GetAwaiter().GetResult())
+    Read-RedirectedOutput -Task $ChildProcess.StdoutTask -Path $ChildProcess.StdoutPath
+    Read-RedirectedOutput -Task $ChildProcess.StderrTask -Path $ChildProcess.StderrPath
 }
 
 function Stop-ProcessTree {
@@ -234,10 +255,18 @@ function Invoke-NodeRunner {
         [Parameter(Mandatory = $true)][string]$Description
     )
 
-    $process = Start-Process -FilePath node -ArgumentList $Arguments -PassThru
-    $exitCode = Wait-ForChildProcess -Process $process -Description $Description
+    # Start-Process -ArgumentList does not quote array elements in Windows
+    # PowerShell 5.1, which breaks node script paths containing spaces. Route
+    # through Start-RedirectedChildProcess (Join-NativeArguments) instead and keep
+    # the runner's output as test evidence.
+    $sanitized = ($Description -replace '[^\w\-]+', '_')
+    $stdoutPath = Join-Path $evidenceDirectory "$sanitized.out.log"
+    $stderrPath = Join-Path $evidenceDirectory "$sanitized.err.log"
+    $nodePath = (Get-Command node -CommandType Application).Source
+    $child = Start-RedirectedChildProcess -FilePath $nodePath -Arguments $Arguments -StdoutPath $stdoutPath -StderrPath $stderrPath
+    $exitCode = Wait-ForChildProcess -Process $child -Description $Description
     if ($exitCode -ne 0) {
-        throw "$Description failed with exit code $exitCode."
+        throw "$Description failed with exit code $exitCode. See $stderrPath"
     }
 }
 
@@ -311,8 +340,11 @@ function Stop-InstalledApplication {
             $Application.Process.WaitForExit()
         }
     }
-    [System.IO.File]::WriteAllText($Application.StdoutPath, $Application.StdoutTask.GetAwaiter().GetResult())
-    [System.IO.File]::WriteAllText($Application.StderrPath, $Application.StderrTask.GetAwaiter().GetResult())
+    # Read the redirected output with a timeout: a lingering WebView2 child can
+    # still hold the pipe write ends after the main process exited, which would
+    # otherwise block GetAwaiter().GetResult() forever.
+    Read-RedirectedOutput -Task $Application.StdoutTask -Path $Application.StdoutPath
+    Read-RedirectedOutput -Task $Application.StderrTask -Path $Application.StderrPath
 }
 
 if ($ChildProcessSelfTest) {
@@ -374,13 +406,16 @@ $summary = [ordered]@{
 }
 
 try {
-    $installerProcess = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installDirectory") -PassThru
+    # Route through Start-RedirectedChildProcess (Join-NativeArguments) so a
+    # repository path containing spaces cannot silently break /D= (Start-Process
+    # does not quote argument array elements on Windows PowerShell 5.1).
+    $installerChild = Start-RedirectedChildProcess -FilePath $installer -Arguments @("/S", "/D=$installDirectory") -StdoutPath (Join-Path $evidenceDirectory "installer.out.log") -StderrPath (Join-Path $evidenceDirectory "installer.err.log")
     $installedExe = Join-Path $installDirectory "two_notes.exe"
-    $summary.installer["exitCode"] = Wait-ForChildProcess -Process $installerProcess -Description "NSIS installer"
+    $summary.installer["exitCode"] = Wait-ForChildProcess -Process $installerChild -Description "NSIS installer"
     $summary.installer["installedExe"] = $installedExe
     $summary.installer["installedExeSha256"] = Get-FileHashOrNull $installedExe
-    if ($installerProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
-        throw "NSIS installation failed: exit=$($installerProcess.ExitCode), exe=$installedExe"
+    if ($installerChild.Process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+        throw "NSIS installation failed: exit=$($installerChild.Process.ExitCode), exe=$installedExe"
     }
     $fileInfo = Get-Item -LiteralPath $installedExe
     $summary.installer["fileVersion"] = $fileInfo.VersionInfo.FileVersion

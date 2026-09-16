@@ -51,8 +51,10 @@ if (-not (Test-Path -LiteralPath $resolvedExe)) {
 }
 New-Item -ItemType Directory -Force -Path $resolvedAppData | Out-Null
 
-$stdoutPath = Join-Path (Get-Location) "tmp-2notes-cdp-stdout.log"
-$stderrPath = Join-Path (Get-Location) "tmp-2notes-cdp-stderr.log"
+$logDirectory = Join-Path (Get-Location) ".tmp"
+New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+$stdoutPath = Join-Path $logDirectory "2notes-cdp-stdout.log"
+$stderrPath = Join-Path $logDirectory "2notes-cdp-stderr.log"
 Remove-Item -LiteralPath $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
 
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
@@ -380,24 +382,7 @@ console.log("EVENTS", JSON.stringify(events.slice(0, 10)));
 main.ws.close();
 quick.ws.close();
 
-const knownWebView2CspEvent = (event) => {
-  const entry = event.params?.entry;
-  const frame = entry?.stackTrace?.callFrames?.[0];
-  return (
-    event.method === "Log.entryAdded" &&
-    entry?.source === "security" &&
-    entry?.level === "error" &&
-    entry?.text?.startsWith(
-      "Applying inline style violates the following Content Security Policy directive 'style-src 'self''.",
-    ) &&
-    entry?.text?.includes("The action has been blocked.") &&
-    frame?.functionName === "eT" &&
-    /^http:\/\/tauri\.localhost\/assets\/index-[A-Za-z0-9_-]+\.js$/.test(frame?.url ?? "") &&
-    frame?.lineNumber === 241
-  );
-};
-
-const unexpectedEvents = events.filter((event) => !knownWebView2CspEvent(event));
+const unexpectedEvents = events;
 console.log("UNEXPECTED_EVENT_COUNT", unexpectedEvents.length);
 console.log("UNEXPECTED_EVENTS", JSON.stringify(unexpectedEvents.slice(0, 10)));
 

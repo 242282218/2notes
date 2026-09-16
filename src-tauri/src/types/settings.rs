@@ -39,6 +39,8 @@ pub struct AppSettings {
     pub shortcut_error: Option<String>,
     pub autostart_enabled: bool,
     pub theme_mode: ThemeMode,
+    #[ts(type = "number")]
+    pub backup_retention_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -46,6 +48,10 @@ pub struct AppSettings {
 pub struct SettingsPatch {
     pub autostart_enabled: Option<bool>,
     pub theme_mode: Option<ThemeMode>,
+    #[ts(type = "number | null")]
+    pub backup_retention_count: Option<i64>,
+    #[serde(default)]
+    pub shortcut: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

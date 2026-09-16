@@ -1,5 +1,5 @@
-import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import TagInput from "./TagInput.vue";
 
@@ -9,10 +9,18 @@ vi.mock("../../services/tagApi", () => ({
   tagsSuggest: (...args: unknown[]) => tagsSuggest(...args),
 }));
 
+const SUGGEST_DEBOUNCE_MS = 150;
+
 describe("TagInput", () => {
   beforeEach(() => {
     tagsSuggest.mockReset();
     tagsSuggest.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    // The suggestion debounce schedules timers; always restore real timers so
+    // pending fake-timer state cannot leak into unrelated tests.
+    vi.useRealTimers();
   });
 
   it("commits draft tag on blur", async () => {
@@ -25,10 +33,9 @@ describe("TagInput", () => {
 
     await wrapper.find("input").setValue(" work ");
     await wrapper.find("input").trigger("blur");
-    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
 
     expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["work"]]);
-    vi.useRealTimers();
   });
 
   it("preserves parent casing when committing a distinct tag alongside an existing one", async () => {
@@ -43,7 +50,9 @@ describe("TagInput", () => {
 
     // The parent's original "Work" casing must be preserved verbatim; only the
     // new "rust" tag is appended, no case-folding rewrite is emitted.
-    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["Work", "rust"]]);
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([
+      ["Work", "rust"],
+    ]);
   });
 
   it("removes only the case-insensitive match and preserves remaining originals", async () => {
@@ -60,7 +69,9 @@ describe("TagInput", () => {
     expect(rustButton).toBeDefined();
     await rustButton!.trigger("click");
 
-    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([["Work", "docs"]]);
+    expect(wrapper.emitted("update:modelValue")?.[0]).toEqual([
+      ["Work", "docs"],
+    ]);
   });
 
   it("does not commit duplicate tags from blur", async () => {
@@ -73,12 +84,11 @@ describe("TagInput", () => {
 
     await wrapper.find("input").setValue("Work");
     await wrapper.find("input").trigger("blur");
-    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
 
     // A case-insensitive duplicate must not emit a protective rewrite that
     // would coerce the parent's original casing back through normalization.
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
-    vi.useRealTimers();
   });
 
   it("commits the draft before blur navigation unmounts the component", async () => {
@@ -115,6 +125,7 @@ describe("TagInput", () => {
   });
 
   it("selects a suggested tag through the button click action", async () => {
+    vi.useFakeTimers();
     tagsSuggest.mockResolvedValue([
       {
         id: "tag-1",
@@ -131,7 +142,7 @@ describe("TagInput", () => {
     });
     const input = wrapper.get("input");
     await input.setValue("wo");
-    await flushPromises();
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
     const option = wrapper.get("[role='listbox'] button");
     const mouseDown = new MouseEvent("mousedown", {
       bubbles: true,
@@ -148,6 +159,7 @@ describe("TagInput", () => {
   });
 
   it("navigates and selects suggestions with the keyboard", async () => {
+    vi.useFakeTimers();
     tagsSuggest.mockResolvedValue([
       {
         id: "tag-1",
@@ -171,7 +183,7 @@ describe("TagInput", () => {
     });
     const input = wrapper.get("input");
     await input.setValue("wo");
-    await flushPromises();
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
 
     const listbox = wrapper.get("[role='listbox']");
     const options = wrapper.findAll("[role='option']");
@@ -195,6 +207,7 @@ describe("TagInput", () => {
   });
 
   it("closes suggestions with Escape", async () => {
+    vi.useFakeTimers();
     tagsSuggest.mockResolvedValue([
       {
         id: "tag-1",
@@ -210,12 +223,12 @@ describe("TagInput", () => {
       },
     });
     await wrapper.get("input").setValue("wo");
-    await flushPromises();
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
 
     expect(wrapper.find("[role='listbox']").exists()).toBe(true);
 
     await wrapper.get("input").trigger("keydown", { key: "Escape" });
-    await flushPromises();
+    await vi.advanceTimersByTimeAsync(SUGGEST_DEBOUNCE_MS);
 
     expect(wrapper.find("[role='listbox']").exists()).toBe(false);
     expect(wrapper.get("input").attributes("aria-expanded")).toBe("false");

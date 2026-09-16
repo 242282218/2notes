@@ -8,9 +8,9 @@ pub mod knowledge;
 mod system;
 mod types;
 
-use app_state::AppState;
-use db::connection::open_database;
-use files::paths::prepare_app_paths;
+use app_state::{AppState, BackupOperationGuard};
+use db::connection::open_database_with_read_pool;
+use files::{backups::ensure_daily_backup, paths::prepare_app_paths};
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -31,8 +31,33 @@ pub fn run() {
         ))
         .setup(|app| {
             let paths = prepare_app_paths(app.handle())?;
-            let (write_conn, read_conn) = open_database(&paths.database_path)?;
-            app.manage(AppState::new(write_conn, read_conn, paths));
+            let (write_conn, read_conns) = open_database_with_read_pool(&paths.database_path)?;
+            app.manage(AppState::with_read_pool(write_conn, read_conns, paths));
+            let backup_paths = app.state::<AppState>().paths.clone();
+            let retention_count = app
+                .state::<AppState>()
+                .with_read_conn(|conn| {
+                    crate::db::repos::SettingsRepo::get_backup_retention_count(conn)
+                })
+                .ok()
+                .unwrap_or(crate::files::backups::DEFAULT_DAILY_RETENTION as i64)
+                as usize;
+            let backup_app = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = backup_app.state::<AppState>();
+                let Some(_guard) = BackupOperationGuard::begin(&state).unwrap_or(None) else {
+                    log::info!("daily_backup_skipped reason=backup_or_restore_in_progress");
+                    return;
+                };
+                let result = ensure_daily_backup(
+                    &backup_paths,
+                    retention_count,
+                    &crate::files::timestamps::now_string(),
+                );
+                if let Err(err) = result {
+                    log::warn!("daily_backup_check_failed source={err}");
+                }
+            });
             system::tray::create_tray(app.handle())?;
             system::shortcuts::register_default_shortcut(app.handle());
             Ok(())

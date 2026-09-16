@@ -12,6 +12,7 @@ import {
 import type { Component } from "vue";
 
 import type { AppView } from "../../app/routes";
+import { VIEW_LABELS } from "../../constants/labels";
 
 defineProps<{
   view: AppView;
@@ -22,17 +23,17 @@ defineEmits<{
 }>();
 
 const primaryItems: Array<{ view: AppView; label: string; icon: Component }> = [
-  { view: "inbox", label: "收集箱", icon: Inbox },
-  { view: "knowledge", label: "知识库", icon: BookOpen },
-  { view: "health", label: "知识健康", icon: HeartPulse },
-  { view: "search", label: "搜索", icon: Search },
-  { view: "tags", label: "标签", icon: Tags },
-  { view: "trash", label: "回收站", icon: Trash2 },
+  { view: "inbox", label: VIEW_LABELS.inbox, icon: Inbox },
+  { view: "knowledge", label: VIEW_LABELS.knowledge, icon: BookOpen },
+  { view: "health", label: VIEW_LABELS.health, icon: HeartPulse },
+  { view: "search", label: VIEW_LABELS.search, icon: Search },
+  { view: "tags", label: VIEW_LABELS.tags, icon: Tags },
+  { view: "trash", label: VIEW_LABELS.trash, icon: Trash2 },
 ];
 
 const settingsItem = {
   view: "settings" as const,
-  label: "设置",
+  label: VIEW_LABELS.settings,
   icon: Settings,
 };
 </script>

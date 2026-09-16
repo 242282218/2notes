@@ -39,6 +39,7 @@ const baseSettings: AppSettings = {
   shortcutError: null,
   autostartEnabled: false,
   themeMode: "system",
+  backupRetentionCount: 10,
 };
 
 describe("App.vue settings bootstrap", () => {

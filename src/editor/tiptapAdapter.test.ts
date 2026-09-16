@@ -212,7 +212,7 @@ describe("tiptapAdapter", () => {
     );
   });
 
-  it("drops script/style/event-handler inline elements that do not belong to the domain", () => {
+  it("preserves dangerous-looking literals while dropping unsupported marks", () => {
     const tiptap: TiptapNode = {
       type: "doc",
       content: [
@@ -243,13 +243,13 @@ describe("tiptapAdapter", () => {
     expect(
       para0.content.some((node) => "text" in node && node.text === "ignored"),
     ).toBe(true);
-    // Script payload must not enter the domain document, even as an inert string.
+    // Literal text is inert at this boundary and must remain editable/searchable.
     const para1 = document.blocks[1];
     expect(
       para1.content.some(
         (node) => "text" in node && node.text.includes("script"),
       ),
-    ).toBe(false);
+    ).toBe(true);
     // Unknown top-level node becomes nothing harmful (either a vanilla paragraph or skipped).
     for (const node of document.blocks) {
       expect([
@@ -263,6 +263,20 @@ describe("tiptapAdapter", () => {
         "horizontalRule",
       ]).toContain(node.kind);
     }
+  });
+
+  it("preserves dangerous-looking literals in both adapter directions", () => {
+    const document: BlockDocument = {
+      schemaVersion: 1,
+      blocks: [
+        paragraph(
+          "550e8400-e29b-41d4-a716-446655440000",
+          '<script>alert(1)</script> javascript:alert(1) onerror="x"',
+        ),
+      ],
+    };
+
+    expect(fromTiptapDocument(toTiptapDocument(document))).toEqual(document);
   });
 
   it("yields a legal empty-paragraph document when given an empty tiptap doc", () => {

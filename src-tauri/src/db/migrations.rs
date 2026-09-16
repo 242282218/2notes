@@ -50,7 +50,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("schema/007_entry_imports.sql"),
         data: None,
     },
+    Migration {
+        version: 8,
+        sql: include_str!("schema/008_knowledge_title_trash.sql"),
+        data: None,
+    },
+    Migration {
+        version: 9,
+        sql: include_str!("schema/009_entry_tombstones.sql"),
+        data: None,
+    },
 ];
+
+pub fn current_schema_version() -> i64 {
+    MIGRATIONS
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or(0)
+}
 
 pub fn run_migrations(conn: &mut Connection) -> AppResult<()> {
     let fts5_available = fts5_available(conn)?;
@@ -364,7 +381,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, 9);
     }
 
     #[test]
@@ -564,7 +581,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, 9);
 
         let current: String = conn
             .query_row(
@@ -701,6 +718,6 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, 9);
     }
 }

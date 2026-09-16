@@ -5,6 +5,7 @@ export interface AppShellShortcutHandlers {
   closeTopmostOverlay: () => void;
   canDelete: () => boolean;
   requestDelete: () => void;
+  clarify?: (key: string) => boolean;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
@@ -17,8 +18,20 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return editable instanceof HTMLElement;
 }
 
+/** True while a modal dialog owns the screen. Its trap only holds if focus stays
+ * inside, so shell shortcuts must not move focus or open a second dialog. */
+function isModalOpen(): boolean {
+  return document.querySelector('[role="dialog"][aria-modal="true"]') !== null;
+}
+
 export function useAppShellShortcuts(handlers: AppShellShortcutHandlers) {
   function onKeydown(event: KeyboardEvent) {
+    // ConfirmDialog consumes Escape itself; never let the window listener act on an
+    // event a focused child control has already handled.
+    if (event.defaultPrevented || isModalOpen()) {
+      return;
+    }
+
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
       event.preventDefault();
       handlers.focusSearch();
@@ -27,6 +40,23 @@ export function useAppShellShortcuts(handlers: AppShellShortcutHandlers) {
 
     if (event.key === "Escape") {
       handlers.closeTopmostOverlay();
+      return;
+    }
+
+    const key = event.key.toLowerCase();
+    if (
+      handlers.clarify &&
+      ["j", "k", "t", "l", "m", "a", "d", "e"].includes(key)
+    ) {
+      if (
+        isEditableTarget(event.target) ||
+        isEditableTarget(document.activeElement)
+      ) {
+        return;
+      }
+      if (handlers.clarify(key)) {
+        event.preventDefault();
+      }
       return;
     }
 

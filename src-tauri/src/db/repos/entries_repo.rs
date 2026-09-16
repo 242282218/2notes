@@ -294,6 +294,18 @@ impl EntriesRepo {
         if current.knowledge_state == KnowledgeState::Knowledge {
             HierarchyRepo::ensure_root(tx, id, now)?;
         }
+        // A live knowledge entry may have claimed this title key while the entry sat in
+        // the trash; resolving that here keeps `knowledge_state = 'knowledge'` paired
+        // with a title key, which the rest of the code assumes.
+        if let Some(key) = current.knowledge_title_key.as_deref() {
+            KnowledgeRepo::resolve_restore_title_conflict(
+                tx,
+                id,
+                current.title.as_deref().unwrap_or_default(),
+                key,
+                now,
+            )?;
+        }
         tx.execute(
             "UPDATE entries SET deleted_at = NULL, revision = revision + 1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
@@ -374,16 +386,24 @@ impl EntriesRepo {
             .optional()?
             .ok_or_else(|| AppError::not_found("条目不存在"))?;
 
-        if deleted_at.is_none() {
+        let Some(deleted_at) = deleted_at else {
             return Err(AppError::validation(
                 "ENTRY_NOT_IN_TRASH",
                 "只能永久删除回收站中的条目",
             ));
-        }
+        };
         if knowledge_state == KnowledgeState::Knowledge {
             HierarchyRepo::remove_entry_promote_children(tx, id, &now_string())?;
         }
 
+        tx.execute(
+            "INSERT INTO entry_tombstones(entry_id, deleted_at, recorded_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(entry_id) DO UPDATE SET
+               deleted_at = excluded.deleted_at,
+               recorded_at = excluded.recorded_at",
+            params![id, deleted_at, now_string()],
+        )?;
         tx.execute("DELETE FROM entries WHERE id = ?1", params![id])?;
         log::info!("entry_deleted_forever id={id}");
         Ok(())
@@ -624,7 +644,7 @@ fn search_terms(filter: &EntryListFilter) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-fn fts_phrase(query: &str) -> String {
+pub(crate) fn fts_phrase(query: &str) -> String {
     query
         .split_whitespace()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
@@ -653,7 +673,7 @@ pub(crate) fn entries_fts_is_trigram(conn: &Connection) -> AppResult<bool> {
             || normalized.contains("tokenize=\"trigram\"")))
 }
 
-fn can_fallback_from_fts(err: &AppError) -> bool {
+pub(crate) fn can_fallback_from_fts(err: &AppError) -> bool {
     let AppError::Db(db_error) = err else {
         return false;
     };
@@ -837,6 +857,9 @@ fn records_to_details(conn: &Connection, records: Vec<EntryRecord>) -> AppResult
         .map(|record| record.id.clone())
         .collect::<Vec<_>>();
     let aliases_by_entry = KnowledgeRepo::aliases_for_entries(conn, &ids)?;
+    // Batch-loaded rather than one query + one JSON parse per row: a full export
+    // (`list_exportable`) passes every entry through here.
+    let mut documents_by_entry = DocumentsRepo::get_many(conn, &ids)?;
     Ok(records
         .into_iter()
         .map(|record| {
@@ -845,8 +868,12 @@ fn records_to_details(conn: &Connection, records: Vec<EntryRecord>) -> AppResult
                 .get(&record.id)
                 .cloned()
                 .unwrap_or_default();
-            let document = DocumentsRepo::get(conn, &record.id)
-                .unwrap_or_else(|_| legacy_text_document(&record.current_content));
+            // Absent document row (pre-004 legacy) falls back to current_content;
+            // malformed stored JSON already failed hard inside get_many.
+            let document = match documents_by_entry.remove(&record.id) {
+                Some(doc) => doc,
+                None => legacy_text_document(&record.current_content),
+            };
             detail(record, tags, aliases, document)
         })
         .collect())
@@ -865,13 +892,13 @@ fn tags_for_entries(
         .join(", ");
     let sql = format!(
         "
-        SELECT et.entry_id, t.id, t.name, t.normalized_name, t.created_at, COUNT(e2.id) AS entry_count
+        SELECT et.entry_id, t.id, t.name, t.normalized_name, t.created_at,
+               (SELECT COUNT(*) FROM entry_tags et2
+                JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
+                WHERE et2.tag_id = t.id) AS entry_count
         FROM entry_tags et
         JOIN tags t ON t.id = et.tag_id
-        LEFT JOIN entry_tags et2 ON et2.tag_id = t.id
-        LEFT JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
         WHERE et.entry_id IN ({placeholders})
-        GROUP BY et.entry_id, t.id
         ORDER BY et.entry_id, t.name COLLATE NOCASE
         "
     );
@@ -911,13 +938,13 @@ fn record_to_detail_tx(tx: &Transaction<'_>, record: EntryRecord) -> AppResult<E
 fn tags_for_entry_tx(tx: &Transaction<'_>, entry_id: &str) -> AppResult<Vec<Tag>> {
     let mut stmt = tx.prepare(
         "
-        SELECT t.id, t.name, t.normalized_name, t.created_at, COUNT(e2.id) AS entry_count
+        SELECT t.id, t.name, t.normalized_name, t.created_at,
+               (SELECT COUNT(*) FROM entry_tags et2
+                JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
+                WHERE et2.tag_id = t.id) AS entry_count
         FROM tags t
         JOIN entry_tags et ON et.tag_id = t.id
-        LEFT JOIN entry_tags et2 ON et2.tag_id = t.id
-        LEFT JOIN entries e2 ON e2.id = et2.entry_id AND e2.deleted_at IS NULL
         WHERE et.entry_id = ?1
-        GROUP BY t.id
         ORDER BY t.name COLLATE NOCASE
         ",
     )?;
@@ -1464,6 +1491,44 @@ mod tests {
     }
 
     #[test]
+    fn cjk_search_matches_short_and_trigram_queries() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        let samples = [
+            "中文检索性能基准",
+            "中文笔记与知识库",
+            "快速捕获想法",
+            "数据库事务安全",
+        ];
+        for content in samples {
+            EntriesRepo::create(&tx, content, &now).unwrap();
+        }
+        tx.commit().unwrap();
+
+        for query in ["中", "中文", "知识库", "事务"] {
+            let page = EntriesRepo::list(
+                &conn,
+                &EntryListFilter {
+                    query: Some(query.to_string()),
+                    entry_type: None,
+                    status: None,
+                    knowledge_state: None,
+                    tag: None,
+                    include_deleted: false,
+                    trash_only: false,
+                },
+                &PageRequest {
+                    limit: Some(20),
+                    offset: Some(0),
+                },
+            )
+            .unwrap();
+            assert!(!page.items.is_empty(), "query={query}");
+        }
+    }
+
+    #[test]
     fn fts_search_orders_equal_ranks_by_updated_at_then_id() {
         let (mut conn, _) = open_in_memory().unwrap();
         let created_at = "2026-07-16T00:00:00Z";
@@ -1687,9 +1752,24 @@ mod tests {
         let entry = EntriesRepo::create(&tx, "hello", &now_string()).unwrap();
         let err = EntriesRepo::delete_forever(&tx, &entry.id).unwrap_err();
         EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision, &now_string()).unwrap();
+        let deleted_at: String = tx
+            .query_row(
+                "SELECT deleted_at FROM entries WHERE id = ?1",
+                params![entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
         EntriesRepo::delete_forever(&tx, &entry.id).unwrap();
         tx.commit().unwrap();
 
+        let tombstone: String = conn
+            .query_row(
+                "SELECT deleted_at FROM entry_tombstones WHERE entry_id = ?1",
+                params![entry.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstone, deleted_at);
         assert!(matches!(err, AppError::Validation { code, .. } if code == "ENTRY_NOT_IN_TRASH"));
     }
 
@@ -1735,6 +1815,83 @@ mod tests {
         assert!(matches!(repeat_trash_err, AppError::RevisionConflict));
         assert!(matches!(restore_stale_err, AppError::RevisionConflict));
         assert!(matches!(repeat_restore_err, AppError::RevisionConflict));
+    }
+
+    #[test]
+    fn restoring_a_knowledge_entry_whose_title_was_claimed_elsewhere_keeps_title_key() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+
+        // A live knowledge entry moves to the trash, which releases its title.
+        let first = EntriesRepo::create(&tx, "共享标题", &now).unwrap();
+        let first = KnowledgeRepo::promote(&tx, &first.id, first.revision, &now).unwrap();
+        let trashed = EntriesRepo::move_to_trash(&tx, &first.id, first.revision, &now).unwrap();
+
+        // Another entry may then claim that title while the first sits in the trash.
+        let second = EntriesRepo::create(&tx, "共享标题", &now).unwrap();
+        let second = KnowledgeRepo::promote(&tx, &second.id, second.revision, &now).unwrap();
+
+        let restored =
+            EntriesRepo::restore_from_trash(&tx, &first.id, trashed.revision, &now).unwrap();
+
+        // The restore must resolve the collision without leaving a knowledge entry
+        // without a title key: that state is unrepresentable everywhere else.
+        assert_eq!(restored.knowledge_state, KnowledgeState::Knowledge);
+        let key_of = |entry_id: &str| -> Option<String> {
+            tx.query_row(
+                "SELECT knowledge_title_key FROM entries WHERE id = ?1",
+                [entry_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let restored_key = key_of(&first.id);
+        assert!(
+            restored_key.is_some(),
+            "restored knowledge entry lost its title key"
+        );
+        assert_ne!(
+            restored_key,
+            key_of(&second.id),
+            "two live knowledge entries must not share a title key"
+        );
+        assert_ne!(restored.title, second.title);
+        assert_eq!(restored.title.as_deref(), Some("共享标题 (2)"));
+        assert_eq!(restored.knowledge_aliases, Vec::<String>::new());
+
+        // The entry must stay editable, which a released-but-not-cleared key breaks.
+        EntriesRepo::update(
+            &tx,
+            &first.id,
+            EntryPatch {
+                document: None,
+                title: None,
+                entry_type: None,
+                status: Some(EntryStatus::Done),
+                tags: None,
+            },
+            restored.revision,
+            &now,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn restoring_a_knowledge_entry_keeps_its_title_when_nothing_claimed_it() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+
+        let entry = EntriesRepo::create(&tx, "独占标题", &now).unwrap();
+        let entry = KnowledgeRepo::promote(&tx, &entry.id, entry.revision, &now).unwrap();
+        let trashed = EntriesRepo::move_to_trash(&tx, &entry.id, entry.revision, &now).unwrap();
+        let restored =
+            EntriesRepo::restore_from_trash(&tx, &entry.id, trashed.revision, &now).unwrap();
+
+        assert_eq!(restored.title, entry.title);
+        assert_eq!(restored.knowledge_state, KnowledgeState::Knowledge);
+        assert_eq!(restored.knowledge_aliases, Vec::<String>::new());
     }
 
     #[test]

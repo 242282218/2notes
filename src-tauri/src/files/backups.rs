@@ -5,10 +5,15 @@ use std::{
 };
 
 use rusqlite::{params, Connection};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
-    db::{connection::open_database, repos::KnowledgeRepo},
+    db::{
+        connection::{open_database, open_database_with_read_pool},
+        repos::KnowledgeRepo,
+    },
     error::{AppError, AppResult},
     files::{paths::AppPaths, timestamps::now_string},
     types::{backups::BackupInfo, knowledge::KnowledgeIndexReport},
@@ -17,6 +22,10 @@ use crate::{
 const BACKUP_PREFIX: &str = "2notes";
 const BACKUP_EXT: &str = "sqlite";
 const ALLOWED_KINDS: &[&str] = &["manual", "daily", "before_restore"];
+pub const DEFAULT_DAILY_RETENTION: usize = 10;
+pub const MIN_DAILY_RETENTION: usize = 1;
+pub const MAX_DAILY_RETENTION: usize = 100;
+const DAILY_BACKUP_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 
 /// Build a VACUUM'd snapshot of the live database into `backup_dir`.
 /// Uses a short-lived standalone connection so the app's shared write/read
@@ -29,7 +38,13 @@ pub fn create_backup(paths: &AppPaths, kind: &str) -> AppResult<BackupInfo> {
     let target = unique_backup_path(&paths.backup_dir, kind);
     let target_raw = target.display().to_string();
     let snapshot_conn = Connection::open(&paths.database_path)?;
-    snapshot_conn.execute("VACUUM main INTO ?1", params![target_raw])?;
+    // VACUUM INTO takes a shared read snapshot; wait out any in-flight writer
+    // instead of failing immediately with SQLITE_BUSY.
+    snapshot_conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    if let Err(err) = snapshot_conn.execute("VACUUM main INTO ?1", params![target_raw]) {
+        let _ = remove_if_exists(&target);
+        return Err(err.into());
+    }
     backup_info(&target, kind)
 }
 
@@ -48,37 +63,35 @@ pub fn list_backups(paths: &AppPaths) -> AppResult<Vec<BackupInfo>> {
 }
 
 pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<BackupInfo> {
+    let _operation = state.database_operation()?;
     let paths = state.paths.clone();
     let source = validate_backup_path(&paths, requested_path)?;
-    let restore_temp = paths.database_path.with_extension("restore.tmp");
-    remove_database_files(&restore_temp)?;
+    let restore_temp = unique_restore_temp_path(&paths);
 
-    // Phase 1: heavy read-side checks happen OUTSIDE the database lock to keep
-    // save/quick-capture responsive. Phase 2 below holds both MutexGuards while
-    // swapping live connections and reopening the restored DB; that swap window
-    // is short but blocking for the duration, which is why Phase 1 stays outside.
-    fs::copy(&source, &restore_temp)?;
-    validate_restore_candidate(&restore_temp)?;
-
-    let restore_result = {
-        let (mut current_write, mut current_read) = state.database_pair()?;
+    let restore_result = (|| {
+        fs::copy(&source, &restore_temp)?;
+        validate_restore_candidate(&restore_temp)?;
         let before_restore = create_backup(&paths, "before_restore")?;
-        let snapshot_path: PathBuf = PathBuf::from(&before_restore.path);
+        let snapshot_path = PathBuf::from(&before_restore.path);
+
+        // Take the write connection, checkpoint, and swap in an in-memory
+        // placeholder so no live handle keeps the old file open while it is
+        // renamed away (Windows cannot rename a file with open handles). The
+        // operation gate already excludes new readers and writers; the read
+        // pool is drained next so no straggler can touch the old file either.
+        {
+            let mut current_write = state.write_conn()?;
+            current_write.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            let placeholder_write = Connection::open_in_memory()?;
+            let old_write = std::mem::replace(&mut *current_write, placeholder_write);
+            drop(old_write);
+        }
+        state.replace_read_pool(Vec::new())?;
         let rollback_path = paths.database_path.with_extension("restore.bak");
-        let placeholder_write = Connection::open_in_memory()?;
-        let placeholder_read = Connection::open_in_memory()?;
-        let (old_write, old_read) = swap_live_connections(
-            &mut current_write,
-            &mut current_read,
-            placeholder_write,
-            placeholder_read,
-        );
-        drop(old_read);
-        drop(old_write);
 
         match replace_database_file(&paths.database_path, &restore_temp) {
             Ok(_) => match reopen_restored_database(&paths.database_path) {
-                Ok((write_conn, read_conn, report)) => {
+                Ok((write_conn, read_conns, report)) => {
                     log::info!(
                         "backup_restore_indexes_rebuilt indexed_sources={} links={} unresolved={} search={}",
                         report.indexed_sources,
@@ -86,41 +99,25 @@ pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<Backu
                         report.unresolved_occurrences,
                         report.search_index_available,
                     );
-                    *current_write = write_conn;
-                    *current_read = read_conn;
+                    install_live_connections(state, write_conn, read_conns)?;
                     if let Err(err) = cleanup_rollback(&rollback_path) {
                         log::warn!("backup_restore_cleanup_failed source={err}");
                     }
                     Ok(())
                 }
-                Err(err) => {
-                    log::error!("backup_restore_reopen_failed source={err}");
-                    match recover_live_connections(
-                        &paths,
-                        &rollback_path,
-                        &snapshot_path,
-                        &mut current_write,
-                        &mut current_read,
-                    ) {
-                        Ok(()) => Err(err),
-                        Err(recovery_err) => Err(recovery_err),
-                    }
-                }
-            },
-            Err(err) => {
-                match recover_live_connections(
+                Err(err) => recover_after_restore_failure(
+                    state,
                     &paths,
                     &rollback_path,
                     &snapshot_path,
-                    &mut current_write,
-                    &mut current_read,
-                ) {
-                    Ok(()) => Err(err),
-                    Err(recovery_err) => Err(recovery_err),
-                }
+                    err,
+                ),
+            },
+            Err(err) => {
+                recover_after_restore_failure(state, &paths, &rollback_path, &snapshot_path, err)
             }
         }
-    };
+    })();
 
     if let Err(err) = remove_if_exists(&restore_temp) {
         log::warn!("backup_restore_temp_cleanup_failed source={err}");
@@ -130,34 +127,115 @@ pub fn restore_backup(state: &AppState, requested_path: &str) -> AppResult<Backu
     backup_info(&source, infer_kind(&source).unwrap_or("manual"))
 }
 
-fn swap_live_connections(
-    current_write: &mut Connection,
-    current_read: &mut Connection,
-    placeholder_write: Connection,
-    placeholder_read: Connection,
-) -> (Connection, Connection) {
-    (
-        std::mem::replace(current_write, placeholder_write),
-        std::mem::replace(current_read, placeholder_read),
-    )
+pub fn ensure_daily_backup(
+    paths: &AppPaths,
+    retention_count: usize,
+    now: &str,
+) -> AppResult<Option<BackupInfo>> {
+    let retention_count = retention_count.clamp(MIN_DAILY_RETENTION, MAX_DAILY_RETENTION);
+    let daily = list_daily_backups(paths)?;
+    let due = daily
+        .first()
+        .and_then(|backup| parse_timestamp(&backup.created_at))
+        .map(|created| {
+            parse_timestamp(now)
+                .map(|current| {
+                    current - created > time::Duration::seconds(DAILY_BACKUP_INTERVAL_SECONDS)
+                })
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
+    let created = if due {
+        Some(create_backup(paths, "daily")?)
+    } else {
+        None
+    };
+    prune_daily_backups(paths, retention_count)?;
+    Ok(created)
 }
 
-fn recover_live_connections(
+pub fn list_daily_backups(paths: &AppPaths) -> AppResult<Vec<BackupInfo>> {
+    let mut backups = list_backups(paths)?
+        .into_iter()
+        .filter(|backup| backup.kind == "daily")
+        .collect::<Vec<_>>();
+    backups.sort_by(|left, right| {
+        parse_timestamp(&right.created_at)
+            .cmp(&parse_timestamp(&left.created_at))
+            .then_with(|| right.file_name.cmp(&left.file_name))
+    });
+    Ok(backups)
+}
+
+pub fn prune_daily_backups(paths: &AppPaths, retention_count: usize) -> AppResult<usize> {
+    let retention_count = retention_count.clamp(MIN_DAILY_RETENTION, MAX_DAILY_RETENTION);
+    let daily = list_daily_backups(paths)?;
+    let mut removed = 0;
+    for backup in daily.into_iter().skip(retention_count) {
+        match fs::remove_file(&backup.path) {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(AppError::system(
+                    "BACKUP_RETENTION_FAILED",
+                    format!("无法清理旧自动备份 {}: {err}", backup.file_name),
+                ));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn unique_restore_temp_path(paths: &AppPaths) -> PathBuf {
+    paths
+        .data_dir
+        .join(format!(".2notes-restore-{}.tmp", Uuid::new_v4()))
+}
+
+fn recover_after_restore_failure(
+    state: &AppState,
     paths: &AppPaths,
     rollback_path: &Path,
     snapshot_path: &Path,
-    current_write: &mut Connection,
-    current_read: &mut Connection,
+    restore_error: AppError,
+) -> AppResult<()> {
+    match recover_live_connections(state, paths, rollback_path, snapshot_path) {
+        Ok(()) => Err(restore_error),
+        Err(recovery_error) => Err(recovery_error),
+    }
+}
+
+/// Install the write connection and a fresh read pool back into the state.
+/// The caller must hold `database_operation()` so no reader/writer races the swap.
+fn install_live_connections(
+    state: &AppState,
+    write_conn: Connection,
+    read_conns: Vec<Connection>,
+) -> AppResult<()> {
+    let mut current_write = state.write_conn()?;
+    *current_write = write_conn;
+    drop(current_write);
+    state.replace_read_pool(read_conns)
+}
+
+fn recover_live_connections(
+    state: &AppState,
+    paths: &AppPaths,
+    rollback_path: &Path,
+    snapshot_path: &Path,
 ) -> AppResult<()> {
     let mut recovery_error = None;
     if rollback_path.is_file() {
         match rollback_database_file(&paths.database_path, rollback_path)
-            .and_then(|_| open_database(&paths.database_path))
+            .and_then(|_| open_database_with_read_pool(&paths.database_path))
         {
-            Ok((write_conn, read_conn)) => {
-                *current_write = write_conn;
-                *current_read = read_conn;
-                return Ok(());
+            Ok((write_conn, read_conns)) => {
+                return install_live_connections(state, write_conn, read_conns);
             }
             Err(err) => {
                 log::error!("backup_restore_rollback_recovery_failed source={err}");
@@ -167,12 +245,10 @@ fn recover_live_connections(
     }
     if snapshot_path.is_file() {
         match restore_from_snapshot(&paths.database_path, snapshot_path)
-            .and_then(|_| open_database(&paths.database_path))
+            .and_then(|_| open_database_with_read_pool(&paths.database_path))
         {
-            Ok((write_conn, read_conn)) => {
-                *current_write = write_conn;
-                *current_read = read_conn;
-                return Ok(());
+            Ok((write_conn, read_conns)) => {
+                return install_live_connections(state, write_conn, read_conns);
             }
             Err(err) => {
                 log::error!("backup_restore_snapshot_recovery_failed source={err}");
@@ -181,11 +257,9 @@ fn recover_live_connections(
         }
     }
     if paths.database_path.is_file() {
-        match open_database(&paths.database_path) {
-            Ok((write_conn, read_conn)) => {
-                *current_write = write_conn;
-                *current_read = read_conn;
-                return Ok(());
+        match open_database_with_read_pool(&paths.database_path) {
+            Ok((write_conn, read_conns)) => {
+                return install_live_connections(state, write_conn, read_conns);
             }
             Err(err) => {
                 log::error!("backup_restore_current_recovery_failed source={err}");
@@ -199,10 +273,10 @@ fn recover_live_connections(
 
 fn reopen_restored_database(
     database_path: &Path,
-) -> AppResult<(Connection, Connection, KnowledgeIndexReport)> {
-    let (mut write_conn, read_conn) = open_database(database_path)?;
+) -> AppResult<(Connection, Vec<Connection>, KnowledgeIndexReport)> {
+    let (mut write_conn, read_conns) = open_database_with_read_pool(database_path)?;
     let report = KnowledgeRepo::rebuild_all_indexes(&mut write_conn)?;
-    Ok((write_conn, read_conn, report))
+    Ok((write_conn, read_conns, report))
 }
 
 fn normalize_kind(kind: &str) -> AppResult<&'static str> {
@@ -214,16 +288,11 @@ fn normalize_kind(kind: &str) -> AppResult<&'static str> {
 }
 
 fn unique_backup_path(backup_dir: &Path, kind: &str) -> PathBuf {
-    // Use shared timestamp helper for consistent naming across backups and exports.
     let timestamp = crate::files::timestamps::backup_timestamp(&now_string());
-    let base_name = format!("{BACKUP_PREFIX}-{timestamp}-{kind}");
-    let mut candidate = backup_dir.join(format!("{base_name}.{BACKUP_EXT}"));
-    let mut count = 1;
-    while candidate.exists() {
-        count += 1;
-        candidate = backup_dir.join(format!("{base_name}-{count}.{BACKUP_EXT}"));
-    }
-    candidate
+    let suffix = Uuid::new_v4().simple().to_string();
+    backup_dir.join(format!(
+        "{BACKUP_PREFIX}-{timestamp}-{kind}-{suffix}.{BACKUP_EXT}"
+    ))
 }
 
 fn validate_backup_path(paths: &AppPaths, requested_path: &str) -> AppResult<PathBuf> {
@@ -407,6 +476,7 @@ fn infer_kind(path: &Path) -> Option<&'static str> {
     ALLOWED_KINDS.iter().copied().find(|kind| {
         let marker = format!("-{kind}");
         name.ends_with(&marker)
+            || name.contains(&format!("{marker}-"))
             || name.rsplit_once('-').is_some_and(|(prefix, suffix)| {
                 prefix.ends_with(&marker) && suffix.parse::<u32>().is_ok()
             })
@@ -441,7 +511,7 @@ mod tests {
     use crate::{
         app_state::AppState,
         db::{
-            connection::{open_database, open_in_memory},
+            connection::open_database,
             migrations::{checksum, now_string},
             repos::{EntriesRepo, KnowledgeRepo},
         },
@@ -490,8 +560,9 @@ mod tests {
 
         restore_backup(&state, &backup.path).unwrap();
 
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "before backup");
     }
@@ -508,30 +579,29 @@ mod tests {
 
         restore_backup(&state, &legacy.display().to_string()).unwrap();
 
-        let conn = state.read_conn().unwrap();
-        let version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
+        let (version, row, knowledge_tables) = state
+            .with_read_conn(|conn| {
+                let version: i64 =
+                    conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                        row.get(0)
+                    })?;
+                let row: (String, String, i64, String) = conn.query_row(
+                    "SELECT current_content, original_content, revision, knowledge_state
+                         FROM entries WHERE id = 'legacy-entry'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let knowledge_tables: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'table' AND name IN ('entry_aliases', 'entry_links')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((version, row, knowledge_tables))
             })
             .unwrap();
-        let row: (String, String, i64, String) = conn
-            .query_row(
-                "SELECT current_content, original_content, revision, knowledge_state
-                 FROM entries WHERE id = 'legacy-entry'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        let knowledge_tables: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name IN ('entry_aliases', 'entry_links')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
 
-        assert_eq!(version, 7);
+        assert_eq!(version, 9);
         assert_eq!(
             row,
             (
@@ -594,26 +664,32 @@ mod tests {
 
         restore_backup(&state, &backup.path).unwrap();
 
-        let conn = state.read_conn().unwrap();
-        let restored = EntriesRepo::get(&conn, &target.id).unwrap();
-        let relations = KnowledgeRepo::relations(&conn, &target.id).unwrap();
+        let restored = state
+            .with_read_conn(|conn| EntriesRepo::get(conn, &target.id))
+            .unwrap();
+        let relations = state
+            .with_read_conn(|conn| KnowledgeRepo::relations(conn, &target.id))
+            .unwrap();
         let mut filter = default_filter();
         filter.query = Some("旧标题".to_string());
         filter.knowledge_state = Some(KnowledgeState::Knowledge);
-        let search = EntriesRepo::list(&conn, &filter, &default_page()).unwrap();
-        let bogus_links: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entry_links WHERE raw_target = '坏数据'",
-                [],
-                |row| row.get(0),
-            )
+        let search = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &filter, &default_page()))
             .unwrap();
-        let bogus_search: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM entries_fts WHERE entry_id = 'bogus'",
-                [],
-                |row| row.get(0),
-            )
+        let (bogus_links, bogus_search): (i64, i64) = state
+            .with_read_conn(|conn| {
+                let links = conn.query_row(
+                    "SELECT COUNT(*) FROM entry_links WHERE raw_target = '坏数据'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let search = conn.query_row(
+                    "SELECT COUNT(*) FROM entries_fts WHERE entry_id = 'bogus'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((links, search))
+            })
             .unwrap();
 
         assert_eq!(restored.knowledge_state, KnowledgeState::Knowledge);
@@ -646,13 +722,49 @@ mod tests {
         let result = restore_backup(&state, &backup.path);
 
         assert!(result.is_err());
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 2);
         assert!(page
             .items
             .iter()
             .any(|entry| entry.summary == "live only after backup"));
+    }
+
+    #[test]
+    fn restore_failure_preserves_committed_data_left_in_wal() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let (mut write_conn, read_conn) = open_database(&paths.database_path).unwrap();
+        write_conn
+            .execute_batch("PRAGMA wal_autocheckpoint = 0;")
+            .unwrap();
+        let now = now_string();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "before backup", &now).unwrap();
+        tx.commit().unwrap();
+        let backup = create_backup(&paths, "manual").unwrap();
+        let tx = write_conn.transaction().unwrap();
+        EntriesRepo::create(&tx, "committed only in wal", &now).unwrap();
+        tx.commit().unwrap();
+        assert!(sidecar_path(&paths.database_path, "-wal").is_file());
+
+        let backup_conn = Connection::open(&backup.path).unwrap();
+        backup_conn.execute("DROP TABLE entry_links", []).unwrap();
+        drop(backup_conn);
+        let state = AppState::new(write_conn, read_conn, paths);
+
+        assert!(restore_backup(&state, &backup.path).is_err());
+
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page
+            .items
+            .iter()
+            .any(|entry| entry.summary == "committed only in wal"));
     }
 
     #[test]
@@ -671,8 +783,9 @@ mod tests {
         let result = restore_backup(&state, &invalid_backup.display().to_string());
 
         assert!(result.is_err());
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "still here");
     }
@@ -693,8 +806,9 @@ mod tests {
         let result = restore_backup(&state, &empty_backup.display().to_string());
 
         assert!(result.is_err());
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "still here");
     }
@@ -719,8 +833,9 @@ mod tests {
         let result = restore_backup(&state, &foreign_backup.display().to_string());
 
         assert!(result.is_err());
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "still here");
     }
@@ -761,8 +876,9 @@ mod tests {
         let result = restore_backup(&state, &backup.path);
 
         assert!(result.is_err());
-        let conn = state.read_conn().unwrap();
-        let page = EntriesRepo::list(&conn, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "still here");
     }
@@ -780,19 +896,18 @@ mod tests {
         drop(write_conn);
         let rollback_path = paths.database_path.with_extension("restore.bak");
         fs::rename(&paths.database_path, &rollback_path).unwrap();
-        let mut current_write = Connection::open_in_memory().unwrap();
-        let mut current_read = Connection::open_in_memory().unwrap();
+        let state = AppState::new(
+            Connection::open_in_memory().unwrap(),
+            Connection::open_in_memory().unwrap(),
+            paths.clone(),
+        );
 
-        recover_live_connections(
-            &paths,
-            &rollback_path,
-            Path::new(&snapshot.path),
-            &mut current_write,
-            &mut current_read,
-        )
-        .unwrap();
+        recover_live_connections(&state, &paths, &rollback_path, Path::new(&snapshot.path))
+            .unwrap();
 
-        let page = EntriesRepo::list(&current_read, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "rollback entry");
     }
@@ -813,42 +928,80 @@ mod tests {
         drop(write_conn);
         let rollback_path = paths.database_path.with_extension("restore.bak");
         assert!(!rollback_path.exists());
-        let mut current_write = Connection::open_in_memory().unwrap();
-        let mut current_read = Connection::open_in_memory().unwrap();
+        let state = AppState::new(
+            Connection::open_in_memory().unwrap(),
+            Connection::open_in_memory().unwrap(),
+            paths.clone(),
+        );
 
-        recover_live_connections(
-            &paths,
-            &rollback_path,
-            Path::new(&snapshot.path),
-            &mut current_write,
-            &mut current_read,
-        )
-        .unwrap();
+        recover_live_connections(&state, &paths, &rollback_path, Path::new(&snapshot.path))
+            .unwrap();
 
-        let page = EntriesRepo::list(&current_read, &default_filter(), &default_page()).unwrap();
+        let page = state
+            .with_read_conn(|conn| EntriesRepo::list(conn, &default_filter(), &default_page()))
+            .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].summary, "snapshot entry");
     }
 
     #[test]
-    fn live_connection_swap_installs_both_prebuilt_placeholders() {
-        let (mut current_write, mut current_read) = open_in_memory().unwrap();
-        let tx = current_write.transaction().unwrap();
-        EntriesRepo::create(&tx, "old live entry", &now_string()).unwrap();
-        tx.commit().unwrap();
-        let placeholder_write = Connection::open_in_memory().unwrap();
-        let placeholder_read = Connection::open_in_memory().unwrap();
+    fn daily_backup_is_due_when_missing_or_older_than_a_day() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        let _ = open_database(&paths.database_path).unwrap();
 
-        let (_old_write, old_read) = swap_live_connections(
-            &mut current_write,
-            &mut current_read,
-            placeholder_write,
-            placeholder_read,
+        assert!(ensure_daily_backup(&paths, 10, "2026-07-31T00:00:00Z")
+            .unwrap()
+            .is_some());
+
+        let recent = list_daily_backups(&paths).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert!(ensure_daily_backup(&paths, 10, &now_string())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn retention_removes_old_daily_only() {
+        let paths = test_paths();
+        fs::create_dir_all(&paths.backup_dir).unwrap();
+        for (stamp, kind) in [
+            ("20260701-000000", "daily"),
+            ("20260702-000000", "daily"),
+            ("20260703-000000", "daily"),
+            ("20260704-000000", "daily"),
+            ("20260705-000000", "manual"),
+            ("20260706-000000", "before_restore"),
+        ] {
+            fs::write(
+                paths
+                    .backup_dir
+                    .join(format!("2notes-{stamp}-{kind}-fixture.sqlite")),
+                b"fixture",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(prune_daily_backups(&paths, 2).unwrap(), 2);
+        let remaining = list_backups(&paths).unwrap();
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|backup| backup.kind == "daily")
+                .count(),
+            2
         );
+        assert!(remaining.iter().any(|backup| backup.kind == "manual"));
+        assert!(remaining
+            .iter()
+            .any(|backup| backup.kind == "before_restore"));
+    }
 
-        let page = EntriesRepo::list(&old_read, &default_filter(), &default_page()).unwrap();
-        assert_eq!(page.items.len(), 1);
-        assert!(current_read.prepare("SELECT 1 FROM entries").is_err());
+    #[test]
+    fn retention_count_is_clamped_to_safe_bounds() {
+        assert_eq!(DEFAULT_DAILY_RETENTION, 10);
+        assert_eq!(MIN_DAILY_RETENTION, 1);
+        assert_eq!(MAX_DAILY_RETENTION, 100);
     }
 
     #[test]
@@ -981,44 +1134,39 @@ mod tests {
 
         restore_backup(&state, &legacy.display().to_string()).unwrap();
 
-        let conn = state.read_conn().unwrap();
-        let version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
+        let (version, documents, blocks, hierarchy, current_content) = state
+            .with_read_conn(|conn| {
+                let version: i64 =
+                    conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                        row.get(0)
+                    })?;
+                // schema 005 introduces entry_documents and blocks and they must be
+                // populated for the source entry, with its current_content preserved
+                // verbatim as a legacy snapshot.
+                let (documents, blocks): (i64, i64) = conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM entry_documents WHERE entry_id = 'legacy-source'),
+                            (SELECT COUNT(*) FROM blocks WHERE entry_id = 'legacy-source')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let hierarchy: (Option<String>, i64) = conn.query_row(
+                    "SELECT parent_entry_id, sibling_order
+                     FROM entry_hierarchy WHERE entry_id = 'legacy-target'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let current_content: String = conn.query_row(
+                    "SELECT current_content FROM entries WHERE id = 'legacy-source'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((version, documents, blocks, hierarchy, current_content))
             })
             .unwrap();
-        assert_eq!(version, 7);
-
-        // schema 005 introduces entry_documents and blocks and they must be populated for
-        // the source entry, with its current_content preserved verbatim as a legacy snapshot.
-        let (documents, blocks): (i64, i64) = conn
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM entry_documents WHERE entry_id = 'legacy-source'),
-                        (SELECT COUNT(*) FROM blocks WHERE entry_id = 'legacy-source')",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
+        assert_eq!(version, 9);
         assert_eq!(documents, 1);
         assert!(blocks > 0);
-
-        let hierarchy: (Option<String>, i64) = conn
-            .query_row(
-                "SELECT parent_entry_id, sibling_order
-                 FROM entry_hierarchy WHERE entry_id = 'legacy-target'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
         assert_eq!(hierarchy, (None, 0));
-
-        let current_content: String = conn
-            .query_row(
-                "SELECT current_content FROM entries WHERE id = 'legacy-source'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
         assert_eq!(current_content, "正文 [[目标]] 收尾");
     }
 
@@ -1221,7 +1369,7 @@ mod tests {
 
     fn expected_v030_fixture_metrics(ids: &V030FixtureSeedIds) -> V030FixtureMetrics {
         V030FixtureMetrics {
-            schema_version: 7,
+            schema_version: 9,
             entries_total: 4,
             capture_active: 2,
             knowledge_active: 1,
@@ -1267,17 +1415,20 @@ mod tests {
         let state = AppState::new(write_conn, read_conn, paths.clone());
         restore_backup(&state, &backup.path).unwrap();
 
-        let conn = state.read_conn().unwrap();
-        let restored = collect_v030_fixture_metrics(
-            &conn,
-            V030FixtureSeedIds {
-                capture_id: metrics.capture_id.clone(),
-                knowledge_id: metrics.knowledge_id.clone(),
-                linker_id: metrics.linker_id.clone(),
-                trash_id: metrics.trash_id.clone(),
-                knowledge_title_key: metrics.knowledge_title_key.clone(),
-            },
-        );
+        let restored = state
+            .with_read_conn(|conn| {
+                Ok(collect_v030_fixture_metrics(
+                    conn,
+                    V030FixtureSeedIds {
+                        capture_id: metrics.capture_id.clone(),
+                        knowledge_id: metrics.knowledge_id.clone(),
+                        linker_id: metrics.linker_id.clone(),
+                        trash_id: metrics.trash_id.clone(),
+                        knowledge_title_key: metrics.knowledge_title_key.clone(),
+                    },
+                ))
+            })
+            .unwrap();
         assert_eq!(restored, expected);
 
         if std::env::var("GENERATE_V030_FIXTURE").ok().as_deref() == Some("1") {

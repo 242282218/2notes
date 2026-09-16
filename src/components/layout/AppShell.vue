@@ -4,12 +4,18 @@ import { listen } from "@tauri-apps/api/event";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import type { AppView } from "../../app/routes";
+import { VIEW_LABELS } from "../../constants/labels";
 import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
 import { useAppShellShortcuts } from "../../composables/useAppShellShortcuts";
-import { knowledgeMove } from "../../services/knowledgeApi";
+import { waitForPendingOperations } from "../../composables/usePendingOperations";
 import { windowOpenQuickCapture } from "../../services/windowApi";
+import { toErrorMessage, isKnownNonRecoverable } from "../../utils/errors";
 import { useEntriesStore } from "../../stores/entries";
-import type { EntryStatus, EntryType } from "../../types/generated";
+import type {
+  EntryDetail as EntryDetailType,
+  EntryStatus,
+  EntryType,
+} from "../../types/generated";
 import EntryDetail from "../entry/EntryDetail.vue";
 import type { EntryDetailToolbarState } from "../entry/entryDetailToolbar";
 import EntryList from "../entry/EntryList.vue";
@@ -22,11 +28,10 @@ import TagFilterPanel from "./TagFilterPanel.vue";
 
 const entries = useEntriesStore();
 const detailRef = ref<InstanceType<typeof EntryDetail> | null>(null);
+const entryListRef = ref<InstanceType<typeof EntryList> | null>(null);
 const topbarRef = ref<InstanceType<typeof AppTopbar> | null>(null);
 const tagPanelOpen = ref(false);
 const creatingEntry = ref(false);
-const knowledgeTreeToken = ref(0);
-const healthInvalidationToken = ref(0);
 const tagPanelRef = ref<InstanceType<typeof TagFilterPanel> | null>(null);
 const toolbarState = ref<EntryDetailToolbarState>({
   saveState: "idle",
@@ -39,15 +44,7 @@ const toolbarState = ref<EntryDetailToolbarState>({
 let unlistenEntriesChanged: (() => void) | null = null;
 let disposed = false;
 
-const viewLabels: Record<AppView, string> = {
-  inbox: "收集箱",
-  knowledge: "知识库",
-  health: "知识健康",
-  search: "搜索",
-  tags: "标签",
-  trash: "回收站",
-  settings: "设置",
-};
+const viewLabels = VIEW_LABELS;
 const currentViewLabel = computed(() => viewLabels[entries.view]);
 const showDetailActions = computed(
   () =>
@@ -104,7 +101,50 @@ async function requestMoveSelectedToTrash() {
   detailRef.value?.requestMoveToTrash();
 }
 
-useAppQuitRequest(flushDetail);
+function clarify(key: string): boolean {
+  if (!entries.selectedId || entries.view === "trash") return false;
+  if (key === "j" || key === "k") {
+    entryListRef.value?.focusRelative(key === "j" ? 1 : -1);
+    return true;
+  }
+  if (key === "e") {
+    detailRef.value?.focusTitle();
+    return true;
+  }
+  if (key === "t") {
+    (
+      document.querySelector(".entry-type-select") as HTMLSelectElement | null
+    )?.focus();
+    return true;
+  }
+  if (key === "l") {
+    (document.querySelector("[data-tag-input]") as HTMLElement | null)?.focus();
+    return true;
+  }
+  if (key === "d") {
+    void requestMoveSelectedToTrash();
+    return true;
+  }
+  if (key === "a") {
+    // Through the detail form, not the store: the store write would bypass the
+    // detail's local state and the next autosave would restore the old status.
+    return detailRef.value?.archive() ?? false;
+  }
+  if (key === "m") {
+    if (entries.view === "knowledge") {
+      (
+        document.querySelector("[data-entry-tree]") as HTMLElement | null
+      )?.focus();
+      return true;
+    }
+  }
+  return false;
+}
+
+useAppQuitRequest(async () => {
+  if (!(await flushDetail())) return false;
+  return waitForPendingOperations();
+});
 useAppShellShortcuts({
   focusSearch: () => topbarRef.value?.focusSearch(),
   closeTopmostOverlay,
@@ -112,26 +152,33 @@ useAppShellShortcuts({
   requestDelete: () => {
     void requestMoveSelectedToTrash();
   },
+  clarify,
 });
 
 onMounted(async () => {
   document.addEventListener("pointerdown", onDocumentPointerDown);
-  if (!isTauri()) return;
-  const unlisten = await listen("entries-changed", async () => {
-    if (disposed) return;
-    if (await flushDetail()) {
-      if (entries.view !== "health") {
-        await entries.load();
-        await entries.refreshTags();
+  // Tauri event wiring only; browser dev (pnpm dev without Tauri) falls through
+  // to the store load below, which surfaces a load-error banner via the services
+  // instead of leaving a silent blank workspace.
+  if (isTauri()) {
+    const unlisten = await listen("entries-changed", async () => {
+      if (disposed) return;
+      if (await flushDetail()) {
+        if (entries.view !== "health") {
+          // Preserve the current selection: a quick-capture submit must not
+          // kick the user off an entry that fell out of the first page.
+          await entries.reconcileCurrentList();
+          await entries.refreshTags();
+        }
+        entries.noteExternalChange();
       }
-      entries.noteExternalChange();
+    });
+    if (disposed) {
+      unlisten();
+      return;
     }
-  });
-  if (disposed) {
-    unlisten();
-    return;
+    unlistenEntriesChanged = unlisten;
   }
-  unlistenEntriesChanged = unlisten;
   await entries.load();
   await entries.refreshTags();
   if (disposed) return;
@@ -162,24 +209,15 @@ async function moveKnowledgeEntry(id: string, parentId: string | null) {
   }
   const expectedRevision = entries.detail.revision;
   try {
-    const updated = await knowledgeMove(id, parentId, 0, expectedRevision);
-    if (
-      entries.selectionGeneration === requestGeneration &&
-      entries.selectedId === id
-    ) {
-      entries.applySavedEntry(updated, requestGeneration);
-    } else {
-      entries.applyEntryListUpdate(updated);
-    }
-    knowledgeTreeToken.value += 1;
-    healthInvalidationToken.value += 1;
+    const updated = await entries.moveKnowledge(id, parentId, expectedRevision);
+    entries.applySavedEntry(updated, requestGeneration);
   } catch (cause) {
     if (
       entries.selectionGeneration === requestGeneration &&
       entries.selectedId === id
     ) {
-      entries.error =
-        cause instanceof Error ? cause.message : "移动知识条目失败";
+      entries.error = toErrorMessage(cause, "移动知识条目失败");
+      entries.errorRecoverable = !isKnownNonRecoverable(cause);
     }
   }
 }
@@ -221,6 +259,33 @@ function setQuery(value: string) {
   searchQuery.value = value;
   entries.setQuery(value);
 }
+
+function onSaved(entry: EntryDetailType, generation: number) {
+  entries.applySavedEntry(entry, generation);
+}
+
+function onEntryUpdated(entry: EntryDetailType) {
+  entries.applyEntryListUpdate(entry);
+}
+
+async function onMoveToTrash() {
+  await entries.moveSelectedToTrash();
+}
+
+async function onRestoreSelected() {
+  await entries.restoreSelected();
+}
+
+async function onDeleteForever() {
+  await entries.deleteSelectedForever();
+}
+
+function openQuickCapture() {
+  void windowOpenQuickCapture().catch((error) => {
+    entries.error = toErrorMessage(error, "打开快速记录失败");
+    entries.errorRecoverable = !isKnownNonRecoverable(error);
+  });
+}
 </script>
 
 <template>
@@ -257,7 +322,7 @@ function setQuery(value: string) {
         @type-change="setTypeFilter"
         @status-change="setStatusFilter"
         @create="createEntry"
-        @quick-capture="windowOpenQuickCapture"
+        @quick-capture="openQuickCapture"
         @retry="detailRef?.retrySave()"
         @promote="detailRef?.promoteToKnowledge()"
         @demote="detailRef?.demoteFromKnowledge()"
@@ -270,7 +335,8 @@ function setQuery(value: string) {
         class="elevation-1 z-10 m-0 shrink-0 border-x-0 border-t-0 bg-bg-elevated px-4 py-2 text-ui text-danger"
         role="alert"
       >
-        {{ entries.error }}
+        {{ entries.error
+        }}<template v-if="!entries.errorRecoverable">（无法重试）</template>
       </p>
       <section class="relative min-h-0 flex-1 overflow-hidden">
         <section
@@ -285,7 +351,7 @@ function setQuery(value: string) {
         >
           <KnowledgeHealthView
             :invalidated-token="
-              healthInvalidationToken + entries.externalChangeToken
+              entries.healthToken + entries.externalChangeToken
             "
             @open-entry="openRelatedEntry"
           />
@@ -297,12 +363,15 @@ function setQuery(value: string) {
           <EntryTree
             v-if="entries.view === 'knowledge'"
             :selected-id="entries.selectedId"
-            :refresh-token="knowledgeTreeToken + entries.externalChangeToken"
+            :refresh-token="
+              entries.knowledgeTreeToken + entries.externalChangeToken
+            "
             @select="selectEntry"
             @move="moveKnowledgeEntry"
           />
           <EntryList
             v-else
+            ref="entryListRef"
             :items="entries.items"
             :selected-id="entries.selectedId"
             :loading="entries.loading"
@@ -317,41 +386,11 @@ function setQuery(value: string) {
             :refresh-token="entries.externalChangeToken"
             :selection-generation="entries.selectionGeneration"
             @toolbar-change="toolbarState = $event"
-            @saved="
-              (entry, generation) => {
-                entries.applySavedEntry(entry, generation);
-                knowledgeTreeToken += 1;
-                healthInvalidationToken += 1;
-              }
-            "
-            @entry-updated="
-              (entry) => {
-                entries.applyEntryListUpdate(entry);
-                knowledgeTreeToken += 1;
-                healthInvalidationToken += 1;
-              }
-            "
-            @trash="
-              async () => {
-                await entries.moveSelectedToTrash();
-                knowledgeTreeToken += 1;
-                healthInvalidationToken += 1;
-              }
-            "
-            @restore="
-              async () => {
-                await entries.restoreSelected();
-                knowledgeTreeToken += 1;
-                healthInvalidationToken += 1;
-              }
-            "
-            @delete-forever="
-              async () => {
-                await entries.deleteSelectedForever();
-                knowledgeTreeToken += 1;
-                healthInvalidationToken += 1;
-              }
-            "
+            @saved="onSaved"
+            @entry-updated="onEntryUpdated"
+            @trash="onMoveToTrash"
+            @restore="onRestoreSelected"
+            @delete-forever="onDeleteForever"
             @open-related="openRelatedEntry"
           />
         </section>
@@ -371,17 +410,3 @@ function setQuery(value: string) {
     </section>
   </main>
 </template>
-
-<style scoped>
-.tag-panel-enter-active,
-.tag-panel-leave-active {
-  transition:
-    opacity var(--duration-base) var(--ease-out),
-    transform var(--duration-base) var(--ease-out);
-}
-.tag-panel-enter-from,
-.tag-panel-leave-to {
-  opacity: 0;
-  transform: translateX(-10px);
-}
-</style>

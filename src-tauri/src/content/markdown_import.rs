@@ -45,8 +45,12 @@ pub fn parse_import_bytes(bytes: &[u8]) -> AppResult<MarkdownImport> {
         .replace("\r\n", "\n")
         .replace('\r', "\n");
     let (frontmatter, body) = extract_frontmatter(&normalized);
-    let (body, provenance) = split_provenance(body);
     let metadata = frontmatter.map(parse_frontmatter).unwrap_or_default();
+    let (body, legacy_provenance) = if metadata.original_content.is_some() {
+        (body, None)
+    } else {
+        split_provenance(body)
+    };
     let arena = Arena::new();
     let mut options = Options::default();
     options.extension.strikethrough = true;
@@ -57,11 +61,16 @@ pub fn parse_import_bytes(bytes: &[u8]) -> AppResult<MarkdownImport> {
         .filter_map(|node| block_from_ast(node, &mut warnings))
         .collect::<Vec<_>>();
 
-    let title = blocks
+    // An empty H1 (`#` alone) is a title placeholder rather than a title: taking it as
+    // the title would suppress the `auto_title` fallback and the whole file would be
+    // rejected with ENTRY_TITLE_REQUIRED. The heading is still consumed either way.
+    let heading_title = blocks
         .first()
         .filter(|block| block.kind == BlockKind::Heading && block.attrs.level == Some(1))
         .map(|block| inline_text(&block.content));
-    if title.is_some() {
+    let has_heading = heading_title.is_some();
+    let title = heading_title.filter(|text| !text.trim().is_empty());
+    if has_heading {
         blocks.remove(0);
     }
     if blocks.is_empty() {
@@ -79,7 +88,10 @@ pub fn parse_import_bytes(bytes: &[u8]) -> AppResult<MarkdownImport> {
         document,
         title,
         title_source,
-        original_content: provenance.unwrap_or_else(|| original_content.to_string()),
+        original_content: metadata
+            .original_content
+            .or(legacy_provenance)
+            .unwrap_or_else(|| original_content.to_string()),
         entry_type: metadata.entry_type.unwrap_or(EntryType::Unclear),
         status: metadata.status.unwrap_or(EntryStatus::Pending),
         tags: metadata.tags,
@@ -96,6 +108,7 @@ struct ImportFrontmatter {
     status: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    original_content: Option<String>,
 }
 
 #[derive(Default)]
@@ -104,6 +117,7 @@ struct TrustedMetadata {
     entry_type: Option<EntryType>,
     status: Option<EntryStatus>,
     tags: Vec<String>,
+    original_content: Option<String>,
 }
 
 /// Extract a JSON/YAML front-matter block from the head of `input`.
@@ -130,13 +144,20 @@ fn extract_frontmatter(input: &str) -> (Option<&str>, &str) {
     (Some(candidate), &rest[end + "\n---\n".len()..])
 }
 
-/// True when `candidate` parses as JSON or YAML `ImportFrontmatter`. Used to
-/// gate the front-matter boundary so a non-metadata `---` rule is never treated
-/// as metadata (which would silently drop the document body above it).
+/// True when `candidate` parses as JSON or YAML `ImportFrontmatter` and names at
+/// least one field this app owns. YAML accepts unknown keys by default, so parse
+/// success alone would turn arbitrary prose into invisible metadata.
 fn is_valid_frontmatter(candidate: &str) -> bool {
-    serde_json::from_str::<ImportFrontmatter>(candidate)
-        .or_else(|_| serde_yaml_ng::from_str::<ImportFrontmatter>(candidate))
-        .is_ok()
+    let parsed = serde_json::from_str::<ImportFrontmatter>(candidate)
+        .or_else(|_| serde_yaml_ng::from_str::<ImportFrontmatter>(candidate));
+    let Ok(parsed) = parsed else {
+        return false;
+    };
+    parsed.id.is_some()
+        || parsed.entry_type.is_some()
+        || parsed.status.is_some()
+        || !parsed.tags.is_empty()
+        || parsed.original_content.is_some()
 }
 
 fn split_provenance(body: &str) -> (&str, Option<String>) {
@@ -166,6 +187,7 @@ fn parse_frontmatter(input: &str) -> TrustedMetadata {
             .into_iter()
             .filter(|tag| is_trusted_tag(tag))
             .collect(),
+        original_content: parsed.original_content,
     }
 }
 
@@ -360,6 +382,19 @@ mod tests {
     }
 
     #[test]
+    fn markdown_import_falls_back_to_an_auto_title_for_an_empty_h1() {
+        // `#` with no text is a title placeholder: taking it literally would mark the
+        // title as user-supplied and reject the whole file as ENTRY_TITLE_REQUIRED.
+        let imported = parse_import_bytes("#\n\nbody text\n".as_bytes()).unwrap();
+
+        assert_eq!(imported.title_source, TitleSource::Auto);
+        assert_eq!(imported.title.as_deref(), Some("body text"));
+        assert_eq!(imported.document.blocks.len(), 1);
+        assert_eq!(text(&imported.document.blocks[0].content), "body text");
+        validate_document(&imported.document).unwrap();
+    }
+
+    #[test]
     fn markdown_import_parses_legacy_json_export_user_title_and_provenance() {
         let markdown = "---\n{\n  \"id\": \"f67fe992-4e45-4c50-95c1-c7a6f264101e\",\n  \"type\": \"task\",\n  \"status\": \"done\",\n  \"tags\": [\"work\", \"rust\"]\n}\n---\n\n# User title\n\nbody\n\n---\n\n## 原始内容\n\nraw capture\n";
         let imported = parse_import_bytes(markdown.as_bytes()).unwrap();
@@ -377,6 +412,26 @@ mod tests {
         assert_eq!(imported.document.blocks[0].kind, BlockKind::Paragraph);
         assert_eq!(text(&imported.document.blocks[0].content), "body");
         validate_document(&imported.document).unwrap();
+    }
+
+    #[test]
+    fn markdown_import_prefers_structured_original_content_over_legacy_divider() {
+        let markdown = concat!(
+            "---\n{\n",
+            "  \"id\": \"f67fe992-4e45-4c50-95c1-c7a6f264101e\",\n",
+            "  \"original_content\": \"raw capture\\n\\n---\\n\\n## 原始内容\\n\\nmarker\\n\"\n",
+            "}\n---\n\n",
+            "# User title\n\nbody\n\n",
+            "---\n\n## 原始内容\n\nlegacy body text\n"
+        );
+
+        let imported = parse_import_bytes(markdown.as_bytes()).unwrap();
+
+        assert_eq!(
+            imported.original_content,
+            "raw capture\n\n---\n\n## 原始内容\n\nmarker\n"
+        );
+        assert_eq!(text(&imported.document.blocks[0].content), "body");
     }
 
     #[test]
@@ -402,6 +457,19 @@ mod tests {
             imported.document.blocks[0].content[1],
             InlineNode::HardBreak
         ));
+    }
+
+    #[test]
+    fn markdown_import_keeps_unrecognized_yaml_as_body() {
+        // Valid YAML alone is insufficient: without a 2notes metadata key this is
+        // ordinary Markdown content and must not disappear from the editor body.
+        let markdown = "---\ntitle: My Note\ndate: 2020-01-01\n---\n\nbody text\n";
+        let imported = parse_import_bytes(markdown.as_bytes()).unwrap();
+        let rendered = document_to_plain_text(&imported.document);
+
+        assert!(rendered.contains("title: My Note"), "got: {rendered}");
+        assert!(rendered.contains("date: 2020-01-01"), "got: {rendered}");
+        assert!(rendered.contains("body text"), "got: {rendered}");
     }
 
     #[test]

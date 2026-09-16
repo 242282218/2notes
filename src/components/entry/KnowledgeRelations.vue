@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { Link2 } from "lucide-vue-next";
 
 import { knowledgeRelationsGet } from "../../services/knowledgeApi";
+import { toErrorMessage } from "../../utils/errors";
 import type { KnowledgeRelations, RelatedEntry } from "../../types/generated";
 import EmptyState from "../shared/EmptyState.vue";
 
@@ -28,6 +29,16 @@ const isEmpty = computed(
 );
 let requestId = 0;
 
+// Revision bumps on every autosave refresh the relations; keep the previous data
+// visible during the reload instead of nulling it (which flickers "加载关联中").
+// Only an entry-id switch must clear the stale panel.
+watch(
+  () => props.entryId,
+  (id, oldId) => {
+    if (id !== oldId) relations.value = null;
+  },
+);
+
 watch(
   () => [props.entryId, props.revision, props.refreshToken] as const,
   loadRelations,
@@ -42,7 +53,6 @@ async function loadRelations() {
   const currentRequest = ++requestId;
   loading.value = true;
   error.value = "";
-  relations.value = null;
   try {
     const result = await knowledgeRelationsGet(props.entryId);
     if (currentRequest !== requestId) return;
@@ -52,8 +62,7 @@ async function loadRelations() {
     relations.value = result;
   } catch (loadError) {
     if (currentRequest !== requestId) return;
-    error.value =
-      loadError instanceof Error ? loadError.message : "加载关联失败";
+    error.value = toErrorMessage(loadError, "加载关联失败");
   } finally {
     if (currentRequest === requestId) {
       loading.value = false;

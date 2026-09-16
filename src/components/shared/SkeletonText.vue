@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed } from "vue";
+
 const props = withDefaults(
   defineProps<{
     lines?: number;
@@ -9,7 +11,7 @@ const props = withDefaults(
 );
 
 const widths = [72, 92, 64, 84, 58];
-const lineCount = Math.max(1, Math.floor(props.lines));
+const lineCount = computed(() => Math.max(1, Math.floor(props.lines)));
 </script>
 
 <template>

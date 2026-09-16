@@ -60,6 +60,8 @@ pnpm run tauri:build
 
 以下命令会静默安装 NSIS 包到唯一的 `.tmp` 目录，并且只从安装目录中的 `two_notes.exe` 启动。它以 `TWONOTES_TEST_ROOT` 隔离数据，使用真实 CDP 鼠标/键盘和原生目录对话框完成快速捕获、主窗编辑、WikiLink、搜索、知识树/大纲/健康、回收站、Markdown 导入导出、备份恢复与重启；SQLite 仅以只读查询生成最终证据。
 
+运行前置要求：Node.js 22+、Python 3、PowerShell 5.1+，以及一次成功的 `pnpm run tauri:build`。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/installed-nsis-smoke.ps1 `
   -InstallerPath src-tauri/target/release/bundle/nsis/2notes_0.3.0_x64-setup.exe `
@@ -120,11 +122,17 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 - `pnpm run typecheck`
 - `pnpm run test:unit`
 - `pnpm run build`
+- `pnpm run audit:frontend`
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/check-tauri-capabilities.ps1`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/check-tauri-command-guards.ps1`
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/cargo-audit-if-available.ps1`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/knowledge-scale.ps1`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/block-document-scale.ps1`
 - `pnpm run tauri:build`
+
+`pnpm run gen:types` 用于在 Rust 类型变更后重新生成 `src/types/generated.ts`；CI 通过 `cargo test` 的 `generated_typescript_is_current` 校验其新鲜度。
 
 ## 暂不做
 

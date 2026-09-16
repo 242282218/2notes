@@ -10,6 +10,17 @@ use crate::{
 pub struct DraftsRepo;
 
 const QUICK_CAPTURE_DRAFT_ID: &str = "quick_capture";
+const MAX_QUICK_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
+
+fn validate_content(content: &str) -> AppResult<()> {
+    if content.len() > MAX_QUICK_CAPTURE_BYTES {
+        return Err(AppError::validation(
+            "CONTENT_TOO_LARGE",
+            "快速记录内容不能超过 2 MiB",
+        ));
+    }
+    Ok(())
+}
 
 impl DraftsRepo {
     pub fn get(conn: &Connection) -> AppResult<Draft> {
@@ -40,6 +51,7 @@ impl DraftsRepo {
         expected_revision: i64,
         now: &str,
     ) -> AppResult<Draft> {
+        validate_content(content)?;
         let existing: Option<i64> = tx
             .query_row(
                 "SELECT revision FROM drafts WHERE id = ?1",
@@ -110,6 +122,7 @@ impl DraftsRepo {
         expected_revision: i64,
         now: &str,
     ) -> AppResult<Draft> {
+        validate_content(content)?;
         EntriesRepo::create(tx, content, now)?;
         Self::clear(tx, expected_revision, now)
     }
@@ -135,6 +148,24 @@ mod tests {
         assert_eq!(draft.revision, 1);
         assert_eq!(cleared.content, "");
         assert_eq!(DraftsRepo::get(&conn).unwrap().content, "");
+    }
+
+    #[test]
+    fn rejects_oversized_quick_capture_content() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        let err = DraftsRepo::update(
+            &tx,
+            &"x".repeat(MAX_QUICK_CAPTURE_BYTES + 1),
+            0,
+            &now_string(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AppError::Validation { code, .. } if code == "CONTENT_TOO_LARGE"
+        ));
     }
 
     #[test]

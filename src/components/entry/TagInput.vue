@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { X } from "lucide-vue-next";
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 
 import { normalizeTagNames } from "../../composables/useEntryFilters";
 import { tagsSuggest } from "../../services/tagApi";
 import type { Tag } from "../../types/generated";
+
+const SUGGEST_DEBOUNCE_MS = 150;
 
 const props = defineProps<{
   modelValue: string[];
@@ -27,18 +29,37 @@ const activeSuggestionId = computed(() =>
     : undefined,
 );
 let suggestionRequestId = 0;
+let suggestTimer: number | undefined;
 
 watch(suggestions, () => {
   activeSuggestionIndex.value = 0;
 });
 
-watch(draft, async (value) => {
-  const requestId = ++suggestionRequestId;
-  const query = value.trim();
+// Debounce network suggestions: every keystroke otherwise fires tagsSuggest.
+function cancelPendingSuggest() {
+  if (suggestTimer !== undefined) {
+    window.clearTimeout(suggestTimer);
+    suggestTimer = undefined;
+  }
+  suggestionRequestId += 1;
+}
+
+watch(draft, (value) => {
   if (props.disabled) {
     suggestions.value = [];
+    cancelPendingSuggest();
     return;
   }
+  cancelPendingSuggest();
+  suggestTimer = window.setTimeout(() => {
+    suggestTimer = undefined;
+    void loadSuggestions(value);
+  }, SUGGEST_DEBOUNCE_MS);
+});
+
+async function loadSuggestions(value: string) {
+  const requestId = ++suggestionRequestId;
+  const query = value.trim();
   try {
     const nextSuggestions = query ? await tagsSuggest(query) : [];
     if (requestId === suggestionRequestId) {
@@ -49,7 +70,9 @@ watch(draft, async (value) => {
       suggestions.value = [];
     }
   }
-});
+}
+
+onUnmounted(cancelPendingSuggest);
 
 function addTag(value = draft.value) {
   if (props.disabled) {
@@ -120,6 +143,7 @@ function onKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
       suggestions.value = [];
+      cancelPendingSuggest();
       return;
     }
     if (event.key === "Enter") {
@@ -177,6 +201,7 @@ defineExpose({ commitDraft });
     </span>
     <input
       v-model="draft"
+      data-tag-input
       type="text"
       placeholder="添加标签"
       role="combobox"

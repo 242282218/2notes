@@ -62,12 +62,19 @@ function Get-ElementSummary {
 
     $rect = Get-ElementProperty $Element ([System.Windows.Automation.AutomationElement]::BoundingRectangleProperty)
     $bounds = $null
-    if ($null -ne $rect -and $rect.Width -gt 0 -and $rect.Height -gt 0) {
+    $rectProperties = $rect.PSObject.Properties
+    if (
+        $null -ne $rect -and
+        $null -ne $rectProperties["Width"] -and
+        $null -ne $rectProperties["Height"] -and
+        [double]$rect.Width -gt 0 -and
+        [double]$rect.Height -gt 0
+    ) {
         $bounds = @{
-            left = [Math]::Round($rect.Left, 0)
-            top = [Math]::Round($rect.Top, 0)
-            width = [Math]::Round($rect.Width, 0)
-            height = [Math]::Round($rect.Height, 0)
+            left = [Math]::Round([double]$rect.Left, 0)
+            top = [Math]::Round([double]$rect.Top, 0)
+            width = [Math]::Round([double]$rect.Width, 0)
+            height = [Math]::Round([double]$rect.Height, 0)
         }
     }
 

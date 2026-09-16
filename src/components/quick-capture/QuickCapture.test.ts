@@ -153,6 +153,28 @@ describe("QuickCapture", () => {
     expect(quickCaptureSubmit).not.toHaveBeenCalled();
   });
 
+  it("registers restore listeners before the initial draft hydration finishes", async () => {
+    let resolveDraft: ((value: Draft) => void) | undefined;
+    draftGet.mockImplementationOnce(
+      () =>
+        new Promise<Draft>((resolve) => {
+          resolveDraft = resolve;
+        }),
+    );
+
+    mount(QuickCapture);
+    await flushPromises();
+
+    const listener = eventListeners.get("database-restore-prepare");
+    expect(listener).toBeDefined();
+    await listener?.({ payload: { requestId: "restore-before-hydrate" } });
+    await flushPromises();
+
+    expect(databaseRestoreReady).toHaveBeenCalledWith("restore-before-hydrate");
+    resolveDraft?.(draft("", 0));
+    await flushPromises();
+  });
+
   it("flushes the local draft before acknowledging database restore", async () => {
     draftUpdate.mockResolvedValue(draft("unsaved draft", 1));
     const wrapper = mount(QuickCapture);
@@ -185,6 +207,54 @@ describe("QuickCapture", () => {
     await wrapper.get("textarea").setValue("restored draft updated");
     await vi.advanceTimersByTimeAsync(250);
     expect(draftUpdate).toHaveBeenLastCalledWith("restored draft updated", 2);
+  });
+
+  it("does not let the initial hydration overwrite a newer restore hydration", async () => {
+    let resolveInitial: ((value: Draft) => void) | undefined;
+    draftGet
+      .mockImplementationOnce(
+        () =>
+          new Promise<Draft>((resolve) => {
+            resolveInitial = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(draft("restored draft", 2));
+
+    const wrapper = mount(QuickCapture);
+    await flushPromises();
+    await eventListeners.get("database-restored")?.({ payload: null });
+    await flushPromises();
+
+    expect(wrapper.get("textarea").element.value).toBe("restored draft");
+    resolveInitial?.(draft("stale initial draft", 1));
+    await flushPromises();
+    expect(wrapper.get("textarea").element.value).toBe("restored draft");
+  });
+
+  it("waits for a pending submit before acknowledging database restore", async () => {
+    let resolveSubmit: ((value: Draft) => void) | undefined;
+    quickCaptureSubmit.mockImplementationOnce(
+      () =>
+        new Promise<Draft>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+
+    const wrapper = mount(QuickCapture);
+    await flushPromises();
+    await wrapper.get("textarea").setValue("submit first");
+    await wrapper.get("button.btn-primary").trigger("click");
+    await flushPromises();
+
+    const prepare = eventListeners.get("database-restore-prepare");
+    const preparing = prepare?.({ payload: { requestId: "restore-submit" } });
+    await flushPromises();
+    expect(databaseRestoreReady).not.toHaveBeenCalled();
+
+    resolveSubmit?.(draft("", 3));
+    await preparing;
+    await flushPromises();
+    expect(databaseRestoreReady).toHaveBeenCalledWith("restore-submit");
   });
 
   it("does not autosave after the component is unmounted", async () => {

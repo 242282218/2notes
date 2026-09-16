@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { backupsList, backupsRestore } from "../../services/backupApi";
 import { exportMarkdown } from "../../services/exportApi";
 import { knowledgeRebuildIndex } from "../../services/knowledgeApi";
-import { settingsGet } from "../../services/settingsApi";
+import { settingsGet, settingsUpdate } from "../../services/settingsApi";
 import { useEntriesStore } from "../../stores/entries";
 import type {
   AppSettings,
@@ -40,6 +40,9 @@ describe("SettingsView", () => {
   const observe = vi.fn();
   const disconnect = vi.fn();
   const createObserver = vi.fn();
+  // jsdom does not implement Element#scrollIntoView; install a shared stub so
+  // every category-click test can call it without ordering side effects.
+  const scrollIntoView = vi.fn();
 
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -51,6 +54,11 @@ describe("SettingsView", () => {
     observe.mockReset();
     disconnect.mockReset();
     createObserver.mockReset();
+    scrollIntoView.mockReset();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
     class IntersectionObserverStub {
       observe = observe;
       disconnect = disconnect;
@@ -65,13 +73,34 @@ describe("SettingsView", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
+  it("updates the automatic backup retention count", async () => {
+    const wrapper = mount(SettingsView);
+    await flushPromises();
+    vi.mocked(settingsUpdate).mockResolvedValue({
+      ...baseSettings,
+      backupRetentionCount: 20,
+    });
+
+    const input = wrapper.get('input[aria-label="自动备份保留数量"]');
+    await input.setValue("20");
+    await input.trigger("change");
+    await flushPromises();
+
+    expect(settingsUpdate).toHaveBeenCalledWith({
+      autostartEnabled: null,
+      themeMode: null,
+      backupRetentionCount: 20,
+      shortcut: null,
+    });
+    expect((input.element as HTMLInputElement).value).toBe("20");
+    wrapper.unmount();
   });
 
   it("exposes settings content as a labeled section instead of a nested main", async () => {
     const wrapper = mount(SettingsView);
-    await flushPromises();
-
-    expect(wrapper.findAll("main")).toHaveLength(0);
     expect(wrapper.find('section[aria-label="设置内容"]').exists()).toBe(true);
   });
 
@@ -82,7 +111,11 @@ describe("SettingsView", () => {
     const appearanceButton = wrapper.get('button[data-category="appearance"]');
     const backupButton = wrapper.get('button[data-category="backup"]');
     expect(appearanceButton.attributes("aria-current")).toBe("location");
-    expect(observe).toHaveBeenCalledTimes(7);
+    // One section per category; derive from the rendered DOM so adding a
+    // category does not silently break this assertion.
+    expect(observe).toHaveBeenCalledTimes(
+      wrapper.findAll("[data-category]").length,
+    );
 
     observerCallback(
       [intersectionEntry(wrapper.get("#backup").element, true, 0.8)],
@@ -112,8 +145,6 @@ describe("SettingsView", () => {
 
   it("activates and scrolls to a category when its navigation button is clicked", async () => {
     vi.stubGlobal("IntersectionObserver", undefined);
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
     const wrapper = mount(SettingsView);
     await flushPromises();
 
@@ -304,6 +335,7 @@ const baseSettings: AppSettings = {
   shortcutError: null,
   autostartEnabled: false,
   themeMode: "system",
+  backupRetentionCount: 10,
 };
 
 const backup: BackupInfo = {

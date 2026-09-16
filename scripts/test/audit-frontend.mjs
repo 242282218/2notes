@@ -8,6 +8,15 @@ for (const root of roots) {
   collectDependencies(root.optionalDependencies);
 }
 
+// A resolved tree this large is expected; anything smaller means collection
+// silently broke and the audit would "pass" without checking anything.
+const MIN_EXPECTED_PACKAGES = 200;
+if (packages.size < MIN_EXPECTED_PACKAGES) {
+  throw new Error(
+    `Frontend audit collected only ${packages.size} packages (expected >= ${MIN_EXPECTED_PACKAGES}); refusing to report a clean result`,
+  );
+}
+
 const requestBody = Object.fromEntries(
   [...packages.entries()].map(([name, versions]) => [
     name,
@@ -81,6 +90,8 @@ function runPnpmList() {
     {
       encoding: "utf8",
       maxBuffer: 32 * 1024 * 1024,
+      // Node >= 18.20.2 refuses to spawn .cmd shims without a shell.
+      shell: true,
     },
   );
 }

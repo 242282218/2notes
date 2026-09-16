@@ -1,8 +1,9 @@
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use crate::{
     app_state::AppState,
+    commands::{require_known_window, run_blocking},
     db::{migrations::now_string, repos::DraftsRepo},
     error::{AppErrorResponse, CommandResult},
     types::settings::Draft,
@@ -17,34 +18,51 @@ struct EntriesChangedPayload {
 }
 
 #[tauri::command]
-pub fn draft_get(state: State<'_, AppState>) -> CommandResult<Draft> {
-    let conn = state.read_conn().map_err(AppErrorResponse::from)?;
-    DraftsRepo::get(&conn).map_err(AppErrorResponse::from)
+pub async fn draft_get(app: AppHandle, window: WebviewWindow) -> CommandResult<Draft> {
+    require_known_window(window.label()).map_err(AppErrorResponse::from)?;
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_read_conn(DraftsRepo::get)
+    })
+    .await
+    .map_err(AppErrorResponse::from)
 }
 
 #[tauri::command]
-pub fn draft_update(
-    state: State<'_, AppState>,
-    content: String,
-    expected_revision: i64,
-) -> CommandResult<Draft> {
-    let now = now_string();
-    state
-        .with_write_tx(|tx| DraftsRepo::update(tx, &content, expected_revision, &now))
-        .map_err(AppErrorResponse::from)
-}
-
-#[tauri::command]
-pub fn quick_capture_submit(
+pub async fn draft_update(
     app: AppHandle,
-    state: State<'_, AppState>,
+    window: WebviewWindow,
     content: String,
     expected_revision: i64,
 ) -> CommandResult<Draft> {
+    require_known_window(window.label()).map_err(AppErrorResponse::from)?;
     let now = now_string();
-    let draft = state
-        .with_write_tx(|tx| DraftsRepo::submit_quick_capture(tx, &content, expected_revision, &now))
-        .map_err(AppErrorResponse::from)?;
+    run_blocking(move || {
+        let state = app.state::<AppState>();
+        state.with_write_tx(|tx| DraftsRepo::update(tx, &content, expected_revision, &now))
+    })
+    .await
+    .map_err(AppErrorResponse::from)
+}
+
+#[tauri::command]
+pub async fn quick_capture_submit(
+    app: AppHandle,
+    window: WebviewWindow,
+    content: String,
+    expected_revision: i64,
+) -> CommandResult<Draft> {
+    require_known_window(window.label()).map_err(AppErrorResponse::from)?;
+    let now = now_string();
+    let worker_app = app.clone();
+    let draft = run_blocking(move || {
+        let state = worker_app.state::<AppState>();
+        state.with_write_tx(|tx| {
+            DraftsRepo::submit_quick_capture(tx, &content, expected_revision, &now)
+        })
+    })
+    .await
+    .map_err(AppErrorResponse::from)?;
     if let Err(err) = app.emit_to(
         "main",
         ENTRIES_CHANGED,

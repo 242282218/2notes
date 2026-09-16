@@ -2,11 +2,15 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Clipboard, Send, X } from "lucide-vue-next";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 
 import { useAppQuitRequest } from "../../composables/useAppQuitRequest";
 import { databaseRestoreReady } from "../../services/backupApi";
 import { useAutosave } from "../../composables/useAutosave";
+import {
+  trackPendingOperation,
+  waitForPendingOperations,
+} from "../../composables/usePendingOperations";
 import { revealCurrentWindow } from "../../composables/useWindowReveal";
 import {
   draftGet,
@@ -14,6 +18,8 @@ import {
   quickCaptureSubmit,
 } from "../../services/draftApi";
 import { windowHideQuickCapture } from "../../services/windowApi";
+import { QUICK_CAPTURE_DEBOUNCE_MS } from "../../constants/limits";
+import { toErrorMessage } from "../../utils/errors";
 import IconButton from "../shared/IconButton.vue";
 
 const content = ref("");
@@ -22,11 +28,15 @@ const hydrated = ref(false);
 const submitting = ref(false);
 const error = ref<string | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const restorePreparing = ref(false);
 let unlistenDatabaseRestored: (() => void) | null = null;
 let unlistenDatabaseRestorePrepare: (() => void) | null = null;
+let unlistenDatabaseRestoreFailed: (() => void) | null = null;
+let hydrationGeneration = 0;
+let disposed = false;
 
 const autosave = useAutosave({
-  delay: 250,
+  delay: QUICK_CAPTURE_DEBOUNCE_MS,
   save: () => draftUpdate(content.value, revision.value),
   onSaved: (draft) => {
     revision.value = draft.revision;
@@ -36,14 +46,14 @@ const autosave = useAutosave({
     revision.value = draft.revision;
   },
   onFailed: (saveError) => {
-    error.value =
-      saveError instanceof Error ? saveError.message : "草稿保存失败";
+    error.value = toErrorMessage(saveError, "草稿保存失败");
   },
 });
 
 const saving = computed(() => autosave.state.value === "saving");
 const statusText = computed(() => {
   if (!hydrated.value) return "正在加载草稿";
+  if (restorePreparing.value) return "正在准备恢复";
   if (submitting.value) return "正在保存";
   if (saving.value) return "草稿保存中";
   return "就绪";
@@ -52,25 +62,29 @@ const statusText = computed(() => {
 useAppQuitRequest(async () => {
   try {
     await autosave.flush();
-    return true;
+    return waitForPendingOperations();
   } catch {
     return false;
   }
 });
 
 async function hydrateDraft() {
+  const requestGeneration = ++hydrationGeneration;
   hydrated.value = false;
   autosave.reset();
   try {
     const draft = await draftGet();
+    if (disposed || requestGeneration !== hydrationGeneration) return;
     content.value = draft.content;
     revision.value = draft.revision;
   } catch (loadError) {
-    error.value =
-      loadError instanceof Error ? loadError.message : "草稿加载失败";
+    if (disposed || requestGeneration !== hydrationGeneration) return;
+    error.value = toErrorMessage(loadError, "草稿加载失败");
   } finally {
-    hydrated.value = true;
-    textareaRef.value?.focus();
+    if (!disposed && requestGeneration === hydrationGeneration) {
+      hydrated.value = true;
+      textareaRef.value?.focus();
+    }
   }
 }
 
@@ -79,32 +93,56 @@ type DatabaseRestorePreparePayload = {
 };
 
 async function prepareDatabaseRestore(requestId: string) {
+  if (restorePreparing.value) return;
+  restorePreparing.value = true;
   try {
     await autosave.flush();
+    if (!(await waitForPendingOperations())) {
+      throw new Error("快速记录仍有未完成操作");
+    }
     await databaseRestoreReady(requestId);
   } catch (restoreError) {
-    error.value =
-      restoreError instanceof Error ? restoreError.message : "草稿保存失败";
+    restorePreparing.value = false;
+    error.value = toErrorMessage(restoreError, "草稿保存失败");
     await revealCurrentWindow();
   }
 }
 
-onMounted(async () => {
-  await hydrateDraft();
-  if (isTauri()) {
-    unlistenDatabaseRestored = await listen("database-restored", hydrateDraft);
-    unlistenDatabaseRestorePrepare =
-      await listen<DatabaseRestorePreparePayload>(
-        "database-restore-prepare",
-        (event) => prepareDatabaseRestore(event.payload.requestId),
-      );
+async function registerListeners() {
+  if (!isTauri()) return;
+  const [restored, restorePrepare, restoreFailed] = await Promise.all([
+    listen("database-restored", () => {
+      restorePreparing.value = false;
+      return hydrateDraft();
+    }),
+    listen<DatabaseRestorePreparePayload>("database-restore-prepare", (event) =>
+      prepareDatabaseRestore(event.payload.requestId),
+    ),
+    listen("database-restore-failed", () => {
+      restorePreparing.value = false;
+    }),
+  ]);
+  if (disposed) {
+    restored();
+    restorePrepare();
+    restoreFailed();
+    return;
   }
-});
+  unlistenDatabaseRestored = restored;
+  unlistenDatabaseRestorePrepare = restorePrepare;
+  unlistenDatabaseRestoreFailed = restoreFailed;
+}
+
+void registerListeners();
+void hydrateDraft();
 
 onUnmounted(() => {
+  disposed = true;
+  hydrationGeneration += 1;
   autosave.dispose();
   unlistenDatabaseRestored?.();
   unlistenDatabaseRestorePrepare?.();
+  unlistenDatabaseRestoreFailed?.();
 });
 
 function onContentChange() {
@@ -117,14 +155,17 @@ function onContentChange() {
 
 async function submit() {
   const trimmed = content.value.trim();
-  if (!trimmed || submitting.value) {
+  if (!trimmed || submitting.value || restorePreparing.value) {
     return;
   }
   submitting.value = true;
   error.value = null;
   try {
     await autosave.flush();
-    const cleared = await quickCaptureSubmit(trimmed, revision.value);
+    if (restorePreparing.value || disposed) return;
+    const cleared = await trackPendingOperation(
+      quickCaptureSubmit(trimmed, revision.value),
+    );
     hydrated.value = false;
     try {
       content.value = "";
@@ -134,8 +175,7 @@ async function submit() {
       hydrated.value = true;
     }
   } catch (submitError) {
-    error.value =
-      submitError instanceof Error ? submitError.message : "提交失败";
+    error.value = toErrorMessage(submitError, "提交失败");
   } finally {
     submitting.value = false;
   }
@@ -153,7 +193,7 @@ async function copyContent() {
   try {
     await navigator.clipboard.writeText(content.value);
   } catch (copyError) {
-    error.value = copyError instanceof Error ? copyError.message : "复制失败";
+    error.value = toErrorMessage(copyError, "复制失败");
   }
 }
 
@@ -208,7 +248,7 @@ async function hideQuickCapture() {
           ref="textareaRef"
           v-model="content"
           autofocus
-          :disabled="!hydrated || submitting"
+          :disabled="!hydrated || submitting || restorePreparing"
           :aria-invalid="Boolean(error)"
           :aria-describedby="error ? 'quick-capture-error' : undefined"
           placeholder="记下现在这件事"
@@ -233,13 +273,15 @@ async function hideQuickCapture() {
             <IconButton
               label="复制"
               :icon="Clipboard"
-              :disabled="!hydrated || !content"
+              :disabled="!hydrated || !content || restorePreparing"
               @click="copyContent"
             />
             <button
               type="button"
               class="btn-primary"
-              :disabled="!hydrated || !content.trim() || submitting"
+              :disabled="
+                !hydrated || !content.trim() || submitting || restorePreparing
+              "
               @click="submit"
             >
               <Send :size="16" aria-hidden="true" />
@@ -251,13 +293,3 @@ async function hideQuickCapture() {
     </Transition>
   </main>
 </template>
-
-<style scoped>
-@media (max-height: 250px) {
-  .quick-capture-card {
-    grid-template-rows: 32px minmax(0, 1fr) 34px;
-    gap: var(--space-2);
-    padding: var(--space-3);
-  }
-}
-</style>

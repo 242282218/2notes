@@ -23,6 +23,7 @@ export default tseslint.config(
       globals: {
         crypto: "readonly",
         document: "readonly",
+        Element: "readonly",
         Event: "readonly",
         FocusEvent: "readonly",
         HTMLElement: "readonly",

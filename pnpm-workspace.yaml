@@ -4,13 +4,19 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - postcss@8.5.24
   - minimatch@10.2.6
+  - brace-expansion@5.0.12
 
 # Force patched transitive versions for frontend audit gate:
 # - minimatch@10 uses brace-expansion@5 (CJS/default-export-safe for its own code)
 # - do NOT globally force brace-expansion@5 onto minimatch@9 (default export is not a function)
-# - pin minimatch to 10.x so every consumer gets brace-expansion@5.0.8 without the minimatch@9 break
+# - pin minimatch to 10.x so every consumer gets brace-expansion@5 without the minimatch@9 break
+# - brace-expansion: GHSA-rgw5-rvv9-x895 (>=4.0.0 <5.0.9)
 # - postcss: GHSA-r28c-9q8g-f849
+# - nanoid (via postcss): GHSA-2v37-7h3g-55p8 (<3.3.18)
+# - undici (via jsdom, dev only): GHSA-4cwx-7wf7-3272 (>=7.0.0 <7.29.0)
 overrides:
   minimatch: 10.2.6
-  brace-expansion: 5.0.8
+  brace-expansion: 5.0.12
   postcss: 8.5.24
+  nanoid: 3.3.19
+  undici: 7.29.1

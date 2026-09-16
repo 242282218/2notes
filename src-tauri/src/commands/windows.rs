@@ -1,7 +1,7 @@
 use tauri::{AppHandle, WebviewWindow};
 
 use crate::{
-    commands::require_main_window,
+    commands::{require_known_window, require_main_window},
     error::{AppErrorResponse, CommandResult},
     system::windows::{hide_quick_capture_window, show_quick_capture_window},
 };
@@ -13,7 +13,8 @@ pub async fn window_open_quick_capture(app: AppHandle, window: WebviewWindow) ->
 }
 
 #[tauri::command]
-pub async fn window_hide_quick_capture(app: AppHandle) -> CommandResult<()> {
+pub async fn window_hide_quick_capture(app: AppHandle, window: WebviewWindow) -> CommandResult<()> {
+    require_known_window(window.label()).map_err(AppErrorResponse::from)?;
     hide_quick_capture_window(&app).map_err(AppErrorResponse::from)
 }
 

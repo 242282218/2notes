@@ -87,8 +87,18 @@ mod tests {
 
     #[test]
     fn generated_typescript_is_current() {
+        let expected_source = generated_typescript();
+        if std::env::var("GENERATE_TYPES").ok().as_deref() == Some("1") {
+            std::fs::write(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../src/types/generated.ts"),
+                expected_source,
+            )
+            .expect("generated TypeScript should be writable");
+            return;
+        }
+
         let actual = normalize_typescript(include_str!("../../../src/types/generated.ts"));
-        let expected = normalize_typescript(&generated_typescript());
+        let expected = normalize_typescript(&expected_source);
         assert_eq!(actual, expected);
     }
 

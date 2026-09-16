@@ -11,7 +11,16 @@ import {
 import { exportMarkdown } from "../../services/exportApi";
 import { knowledgeRebuildIndex } from "../../services/knowledgeApi";
 import { useEntriesStore } from "../../stores/entries";
+import {
+  BACKUP_RETENTION_MAX,
+  BACKUP_RETENTION_MIN,
+} from "../../constants/limits";
+import { toErrorMessage } from "../../utils/errors";
 import { useSettingsStore } from "../../stores/settings";
+import {
+  trackPendingOperation,
+  waitForPendingOperations,
+} from "../../composables/usePendingOperations";
 import type { BackupInfo, KnowledgeIndexReport } from "../../types/generated";
 import AppearanceSettings from "./AppearanceSettings.vue";
 import MarkdownImportPanel from "./MarkdownImportPanel.vue";
@@ -38,6 +47,7 @@ let sectionObserver: {
   disconnect: () => void;
 } | null = null;
 let disposed = false;
+let backupsRequestId = 0;
 let ignoreObserverUntil = 0;
 let scrollLockTimer: number | null = null;
 
@@ -120,6 +130,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  backupsRequestId += 1;
   if (scrollLockTimer !== null) {
     window.clearTimeout(scrollLockTimer);
     scrollLockTimer = null;
@@ -133,13 +144,13 @@ async function chooseExportDir() {
   exportError.value = "";
   exportBusy.value = true;
   try {
-    const result = await exportMarkdown();
+    const result = await trackPendingOperation(exportMarkdown());
     if (result == null) {
       return;
     }
     exportMessage.value = `已导出 ${result.exportedCount} 个文件`;
   } catch (error) {
-    exportError.value = error instanceof Error ? error.message : "导出失败";
+    exportError.value = toErrorMessage(error, "导出失败");
   } finally {
     exportBusy.value = false;
   }
@@ -149,16 +160,19 @@ async function openDir(path: string) {
   try {
     await openPath(path);
   } catch (error) {
-    backupError.value = error instanceof Error ? error.message : "打开目录失败";
+    backupError.value = toErrorMessage(error, "打开目录失败");
   }
 }
 
 async function loadBackups() {
+  const requestId = ++backupsRequestId;
   try {
-    backups.value = await backupsList();
+    const next = await backupsList();
+    if (disposed || requestId !== backupsRequestId) return;
+    backups.value = next;
   } catch (error) {
-    backupError.value =
-      error instanceof Error ? error.message : "备份列表加载失败";
+    if (disposed || requestId !== backupsRequestId) return;
+    backupError.value = toErrorMessage(error, "备份列表加载失败");
   }
 }
 
@@ -167,11 +181,11 @@ async function createManualBackup() {
   backupMessage.value = "";
   backupError.value = "";
   try {
-    const backup = await backupsCreate("manual");
+    const backup = await trackPendingOperation(backupsCreate("manual"));
     backupMessage.value = `已创建备份：${backup.fileName}`;
     await loadBackups();
   } catch (error) {
-    backupError.value = error instanceof Error ? error.message : "创建备份失败";
+    backupError.value = toErrorMessage(error, "创建备份失败");
   } finally {
     backupBusy.value = false;
   }
@@ -190,11 +204,14 @@ async function confirmRestore() {
   backupMessage.value = "";
   backupError.value = "";
   try {
+    if (!(await waitForPendingOperations())) {
+      backupError.value = "仍有未完成操作，已取消恢复";
+      return;
+    }
     try {
-      await backupsRestore(backup.path);
+      await trackPendingOperation(backupsRestore(backup.path));
     } catch (error) {
-      backupError.value =
-        error instanceof Error ? error.message : "恢复备份失败";
+      backupError.value = toErrorMessage(error, "恢复备份失败");
       return;
     }
     backupMessage.value = `已恢复备份：${backup.fileName}`;
@@ -202,6 +219,7 @@ async function confirmRestore() {
     try {
       await Promise.all([
         loadBackups(),
+        settingsStore.load(),
         entriesStore.load(),
         entriesStore.refreshTags(),
       ]);
@@ -222,12 +240,45 @@ async function rebuildKnowledgeIndexes() {
   indexReport.value = null;
   indexError.value = "";
   try {
-    indexReport.value = await knowledgeRebuildIndex();
+    indexReport.value = await trackPendingOperation(knowledgeRebuildIndex());
     entriesStore.noteExternalChange();
   } catch (error) {
-    indexError.value = error instanceof Error ? error.message : "索引重建失败";
+    indexError.value = toErrorMessage(error, "索引重建失败");
   } finally {
     indexBusy.value = false;
+  }
+}
+
+async function updateShortcut(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const shortcut = target.value.trim();
+  if (!shortcut) {
+    target.value = settingsStore.settings?.shortcut ?? "Ctrl+Alt+Space";
+    return;
+  }
+  try {
+    await settingsStore.setShortcut(shortcut);
+  } catch {
+    target.value = settingsStore.settings?.shortcut ?? "Ctrl+Alt+Space";
+  }
+}
+
+async function updateBackupRetention(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const raw = target.value.trim();
+  const value = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < BACKUP_RETENTION_MIN ||
+    value > BACKUP_RETENTION_MAX
+  ) {
+    target.value = String(settingsStore.settings?.backupRetentionCount ?? 10);
+    return;
+  }
+  try {
+    await settingsStore.setBackupRetentionCount(value);
+  } catch {
+    target.value = String(settingsStore.settings?.backupRetentionCount ?? 10);
   }
 }
 
@@ -321,6 +372,20 @@ async function updateAutostart(event: Event) {
           >
             {{ settingsStore.settings.shortcutError }}
           </p>
+          <SettingRow
+            as="label"
+            title="修改快捷键"
+            description="例如 Ctrl+Alt+Space；保存后立即检测冲突"
+          >
+            <input
+              type="text"
+              class="input w-[220px] text-ui"
+              :value="settingsStore.settings.shortcut"
+              :disabled="settingsStore.shortcutSaving"
+              :aria-busy="settingsStore.shortcutSaving ? 'true' : undefined"
+              @change="updateShortcut"
+            />
+          </SettingRow>
 
           <SettingRow
             as="label"
@@ -404,6 +469,22 @@ async function updateAutostart(event: Event) {
           >
             备份
           </h2>
+          <SettingRow
+            title="自动备份保留数量"
+            description="每天自动创建快照，仅清理自动备份，范围 1–100 份"
+          >
+            <input
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              class="input-base h-8 w-24 text-center"
+              :value="settingsStore.settings?.backupRetentionCount ?? 10"
+              :disabled="settingsStore.backupRetentionSaving"
+              aria-label="自动备份保留数量"
+              @change="updateBackupRetention"
+            />
+          </SettingRow>
           <SettingRow
             title="本地备份"
             description="创建当前 SQLite 快照，恢复前会自动再备份一次"

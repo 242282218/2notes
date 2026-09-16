@@ -13,10 +13,20 @@ output/
 __pycache__/
 *.pyc
 
+# Vendored reference sources, kept locally for comparison only
+参考项目/
+
 node_modules
 dist
 dist-ssr
 *.local
+
+# Local configuration and agent state
+.env
+.env.*
+!.env.example
+.zcode/
+.superpowers/
 
 # Editor directories and files
 .vscode/*

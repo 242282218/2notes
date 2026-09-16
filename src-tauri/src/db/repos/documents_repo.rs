@@ -1,7 +1,11 @@
 // Command/repo wiring lands in M1 task 4; allow dead code until then.
 #![allow(dead_code)]
 
-use rusqlite::{params, Connection, Transaction};
+use std::collections::HashMap;
+
+use rusqlite::{
+    params, params_from_iter, types::Value, Connection, OptionalExtension, Transaction,
+};
 
 use crate::{
     content::document::{
@@ -34,33 +38,76 @@ impl DocumentsRepo {
         now: &str,
     ) -> AppResult<DocumentRecord> {
         validate_document(document)?;
-        let record = DocumentRecord::new(entry_id, 0, document, legacy_content, now);
+        let record = DocumentRecord::new(entry_id, 0, document, legacy_content, now)?;
         Self::insert(tx, &record, document)?;
         Ok(record)
     }
 
     pub fn get(conn: &Connection, entry_id: &str) -> AppResult<BlockDocument> {
-        let json: String = conn
+        let json: Option<String> = conn
             .query_row(
                 "SELECT document_json FROM entry_documents WHERE entry_id = ?1",
                 [entry_id],
                 |row| row.get(0),
             )
-            .map_err(|_| AppError::not_found("文档不存在"))?;
+            .optional()?;
+        let json = json.ok_or_else(|| AppError::not_found("文档不存在"))?;
         serde_json::from_str::<BlockDocument>(&json)
             .map_err(|err| AppError::validation("DOCUMENT_JSON_INVALID", err.to_string()))
     }
 
     pub fn get_with_tx(tx: &Transaction<'_>, entry_id: &str) -> AppResult<BlockDocument> {
-        let json: String = tx
+        let json: Option<String> = tx
             .query_row(
                 "SELECT document_json FROM entry_documents WHERE entry_id = ?1",
                 [entry_id],
                 |row| row.get(0),
             )
-            .map_err(|_| AppError::not_found("文档不存在"))?;
+            .optional()?;
+        let json = json.ok_or_else(|| AppError::not_found("文档不存在"))?;
         serde_json::from_str::<BlockDocument>(&json)
             .map_err(|err| AppError::validation("DOCUMENT_JSON_INVALID", err.to_string()))
+    }
+
+    /// Batch-load documents for many entries in one pass.
+    ///
+    /// The per-entry [`Self::get`] inside a `records_to_details` loop cost one round trip
+    /// plus one JSON parse per row, which a full export pays for every entry. Chunked
+    /// because callers such as `list_exportable` pass the entire table at once and would
+    /// otherwise bind one variable per entry, exceeding SQLITE_MAX_VARIABLE_NUMBER.
+    ///
+    /// Entries with no `entry_documents` row are simply absent from the map; callers keep
+    /// owning that fallback. Malformed stored JSON is still a hard error.
+    pub fn get_many(
+        conn: &Connection,
+        entry_ids: &[String],
+    ) -> AppResult<HashMap<String, BlockDocument>> {
+        const CHUNK: usize = 500;
+        let mut documents = HashMap::with_capacity(entry_ids.len());
+        for chunk in entry_ids.chunks(CHUNK) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT entry_id, document_json FROM entry_documents WHERE entry_id IN ({placeholders})"
+            );
+            let values = chunk
+                .iter()
+                .map(|id| Value::Text(id.clone()))
+                .collect::<Vec<_>>();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(values), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (entry_id, json) = row?;
+                let document = serde_json::from_str::<BlockDocument>(&json).map_err(|err| {
+                    AppError::validation("DOCUMENT_JSON_INVALID", err.to_string())
+                })?;
+                documents.insert(entry_id, document);
+            }
+        }
+        Ok(documents)
     }
 
     pub fn replace(
@@ -74,7 +121,7 @@ impl DocumentsRepo {
         if !Self::exists(tx, entry_id)? {
             return Err(AppError::not_found("文档不存在"));
         }
-        let record = DocumentRecord::new(entry_id, entry_revision, document, None, now);
+        let record = DocumentRecord::new(entry_id, entry_revision, document, None, now)?;
         tx.execute("DELETE FROM blocks WHERE entry_id = ?1", [entry_id])?;
         Self::insert(tx, &record, document)?;
         Ok(record)
@@ -119,17 +166,17 @@ impl DocumentsRepo {
     }
 
     /// Return the canonical `markdown_text` derived from the stored document. Used as the
-    /// single WikiLink parsing source and the export body. Falls back to `None` when the
-    /// entry has no document row (defensive; every entry is expected to have one post-004).
+    /// single WikiLink parsing source and the export body. Returns `None` only when the
+    /// entry has no document row (defensive; every entry is expected to have one post-004);
+    /// real database errors propagate instead of being silently downgraded to "no text".
     pub fn markdown_text(conn: &Connection, entry_id: &str) -> AppResult<Option<String>> {
-        let value: Option<String> = conn
+        Ok(conn
             .query_row(
                 "SELECT markdown_text FROM entry_documents WHERE entry_id = ?1",
                 [entry_id],
                 |row| row.get(0),
             )
-            .ok();
-        Ok(value)
+            .optional()?)
     }
 
     /// Transaction-bound variant of [`Self::markdown_text`].
@@ -137,14 +184,13 @@ impl DocumentsRepo {
         tx: &Transaction<'_>,
         entry_id: &str,
     ) -> AppResult<Option<String>> {
-        let value: Option<String> = tx
+        Ok(tx
             .query_row(
                 "SELECT markdown_text FROM entry_documents WHERE entry_id = ?1",
                 [entry_id],
                 |row| row.get(0),
             )
-            .ok();
-        Ok(value)
+            .optional()?)
     }
 
     /// Rebuild `blocks` projection rows that disagree with the stored document JSON, and
@@ -250,16 +296,21 @@ impl DocumentRecord {
         document: &BlockDocument,
         legacy_content: Option<&str>,
         now: &str,
-    ) -> Self {
-        let document_json = serde_json::to_string(document).unwrap_or_default();
-        let markdown_text = document_to_markdown(document).unwrap_or_default();
+    ) -> AppResult<Self> {
+        // Serialization already passed validation, but a failure here must abort the write
+        // instead of persisting an empty document_json/markdown_text that later reads back
+        // as DOCUMENT_JSON_INVALID or a silently broken link index.
+        let document_json = serde_json::to_string(document)
+            .map_err(|err| AppError::validation("DOCUMENT_ENCODE", err.to_string()))?;
+        let markdown_text = document_to_markdown(document)
+            .map_err(|err| AppError::validation("DOCUMENT_MARKDOWN", err.to_string()))?;
         let plain_text = document_to_plain_text(document);
         // The invariant `entries.current_content == document_to_plain_text(document)` is
         // what `EntriesRepo::repair_documents` relies on to detect real content changes
         // versus pure-metadata updates. Use `plain_text` (not `document_json`) so the
         // checksum matches what stored on the entry row.
         let source_content_checksum = crate::db::migrations::checksum(&plain_text);
-        Self {
+        Ok(Self {
             entry_id: entry_id.to_string(),
             entry_revision,
             source_content_checksum,
@@ -268,7 +319,7 @@ impl DocumentRecord {
             plain_text,
             legacy_content: legacy_content.map(str::to_string),
             updated_at: now.to_string(),
-        }
+        })
     }
 }
 
@@ -460,6 +511,58 @@ mod tests {
         let record = DocumentsRepo::create(&tx, "e1", &document, None, &now).unwrap();
         assert!(record.markdown_text.contains("[[Link]]"));
         assert!(record.plain_text.contains("hello"));
+    }
+
+    #[test]
+    fn get_many_batches_documents_and_omits_missing_rows() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        seed_entry(&mut conn, "e1");
+        seed_entry(&mut conn, "e2");
+        seed_entry(&mut conn, "e3");
+        let now = now_string();
+        let tx = conn.transaction().unwrap();
+        DocumentsRepo::create(&tx, "e1", &paragraph_document("p1", "first"), None, &now).unwrap();
+        DocumentsRepo::create(&tx, "e3", &paragraph_document("p3", "third"), None, &now).unwrap();
+        tx.commit().unwrap();
+
+        let ids = vec!["e1".to_string(), "e2".to_string(), "e3".to_string()];
+        let documents = DocumentsRepo::get_many(&conn, &ids).unwrap();
+
+        // e2 has no entry_documents row: absent from the map, not an error. The
+        // caller owns the legacy current_content fallback.
+        assert_eq!(documents.len(), 2);
+        assert!(!documents.contains_key("e2"));
+        assert_eq!(documents.get("e1").unwrap().blocks[0].content.len(), 1);
+        assert_eq!(documents.get("e3").unwrap().blocks[0].content.len(), 1);
+    }
+
+    #[test]
+    fn get_many_spans_the_chunk_boundary() {
+        let (mut conn, _) = open_in_memory().unwrap();
+        let now = now_string();
+        let mut ids = Vec::new();
+        for index in 0..520 {
+            let id = format!("entry-{index:04}");
+            seed_entry(&mut conn, &id);
+            ids.push(id);
+        }
+        let tx = conn.transaction().unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            let document = paragraph_document(&format!("block-{index:04}"), "text");
+            DocumentsRepo::create(&tx, id, &document, None, &now).unwrap();
+        }
+        tx.commit().unwrap();
+
+        // Above the 500-row chunk size, so this fails if chunking drops a chunk.
+        let documents = DocumentsRepo::get_many(&conn, &ids).unwrap();
+        assert_eq!(documents.len(), 520);
+    }
+
+    #[test]
+    fn get_many_returns_empty_for_no_ids() {
+        let (conn, _) = open_in_memory().unwrap();
+        let documents = DocumentsRepo::get_many(&conn, &[]).unwrap();
+        assert!(documents.is_empty());
     }
 
     #[test]

@@ -23,6 +23,9 @@ use crate::{
 const MAX_FILES: usize = 1_000;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_SCAN_FILE_ENTRIES: usize = 10_000;
+const MAX_SCAN_DIRECTORIES: usize = 1_000;
+const MAX_SCAN_DEPTH: usize = 32;
 const SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[tauri::command]
@@ -52,15 +55,9 @@ pub async fn markdown_import_preview(
             format!("无法解析导入目录: {err}"),
         ))
     })?;
-    let scanned = run_blocking(move || {
-        let mut scanned = scan_import_root(&root)?;
-        scanned
-            .warnings
-            .extend(collect_parse_warnings(&scanned.root, &scanned.candidates));
-        Ok(scanned)
-    })
-    .await
-    .map_err(AppErrorResponse::from)?;
+    let scanned = run_blocking(move || scan_import_root(&root))
+        .await
+        .map_err(AppErrorResponse::from)?;
     let state = app.state::<AppState>();
     let session_id = state
         .create_import_session(scanned.root, scanned.candidates.clone(), SESSION_TTL)
@@ -118,12 +115,18 @@ fn scan_import_root(root: &Path) -> AppResult<ScannedImport> {
     let mut candidates = Vec::new();
     let mut warnings = Vec::new();
     let mut total_bytes = 0;
+    let mut budget = ScanBudget {
+        directories: 1,
+        ..ScanBudget::default()
+    };
     scan_dir(
         &root,
         &root,
+        0,
         &mut candidates,
         &mut total_bytes,
         &mut warnings,
+        &mut budget,
     )?;
     candidates.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     Ok(ScannedImport {
@@ -134,12 +137,21 @@ fn scan_import_root(root: &Path) -> AppResult<ScannedImport> {
     })
 }
 
+#[derive(Default)]
+struct ScanBudget {
+    file_entries: usize,
+    directories: usize,
+    stopped: bool,
+}
+
 fn scan_dir(
     root: &Path,
     current: &Path,
+    depth: usize,
     candidates: &mut Vec<ImportSessionCandidate>,
     total_bytes: &mut u64,
     warnings: &mut Vec<String>,
+    budget: &mut ScanBudget,
 ) -> AppResult<()> {
     let entries = fs::read_dir(current).map_err(|err| {
         AppError::system(
@@ -148,10 +160,21 @@ fn scan_dir(
         )
     })?;
     for entry in entries {
+        if budget.stopped {
+            break;
+        }
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
+            if budget.file_entries >= MAX_SCAN_FILE_ENTRIES {
+                warnings.push(format!(
+                    "最多扫描 {MAX_SCAN_FILE_ENTRIES} 个文件，剩余文件已跳过"
+                ));
+                budget.stopped = true;
+                break;
+            }
+            budget.file_entries += 1;
             warnings.push(format!(
                 "已跳过符号链接: {}",
                 display_relative_path(root, &path)
@@ -159,14 +182,53 @@ fn scan_dir(
             continue;
         }
         if file_type.is_dir() {
-            scan_dir(root, &path, candidates, total_bytes, warnings)?;
+            if budget.directories >= MAX_SCAN_DIRECTORIES {
+                warnings.push(format!(
+                    "最多扫描 {MAX_SCAN_DIRECTORIES} 个目录，剩余目录已跳过"
+                ));
+                budget.stopped = true;
+                break;
+            }
+            budget.directories += 1;
+            if depth >= MAX_SCAN_DEPTH {
+                warnings.push(format!(
+                    "超过最大递归深度 {MAX_SCAN_DEPTH}，已跳过目录: {}",
+                    display_relative_path(root, &path)
+                ));
+                continue;
+            }
+            scan_dir(
+                root,
+                &path,
+                depth + 1,
+                candidates,
+                total_bytes,
+                warnings,
+                budget,
+            )?;
             continue;
         }
-        if !file_type.is_file() || !is_markdown_path(&path) {
+        if budget.file_entries >= MAX_SCAN_FILE_ENTRIES {
+            warnings.push(format!(
+                "最多扫描 {MAX_SCAN_FILE_ENTRIES} 个文件，剩余文件已跳过"
+            ));
+            budget.stopped = true;
+            break;
+        }
+        budget.file_entries += 1;
+        if !file_type.is_file() {
+            warnings.push(format!(
+                "已跳过非普通文件: {}",
+                display_relative_path(root, &path)
+            ));
+            continue;
+        }
+        if !is_markdown_path(&path) {
             continue;
         }
         if candidates.len() >= MAX_FILES {
             warnings.push(format!("最多导入 {MAX_FILES} 个 Markdown 文件"));
+            budget.stopped = true;
             break;
         }
         let size_bytes = entry.metadata()?.len();
@@ -179,10 +241,25 @@ fn scan_dir(
         }
         if *total_bytes + size_bytes > MAX_TOTAL_BYTES {
             warnings.push("导入总大小超过 100 MiB，剩余文件已跳过".to_string());
+            budget.stopped = true;
             break;
         }
         let content = fs::read(&path)?;
         let source_hash = blake3::hash(&content).to_hex().to_string();
+        // The content is already in hand for hashing; parse it once here so the
+        // preview does not re-read the same file just to surface parse warnings.
+        match parse_import_bytes(&content) {
+            Ok(parsed) => warnings.extend(
+                parsed
+                    .warnings
+                    .into_iter()
+                    .map(|warning| format!("{}: {warning}", display_relative_path(root, &path))),
+            ),
+            Err(err) => warnings.push(format!(
+                "无法预览 {}: {err}",
+                display_relative_path(root, &path)
+            )),
+        }
         let relative_path = path
             .strip_prefix(root)
             .map_err(|_| AppError::system("IMPORT_SCAN_FAILED", "导入文件不在所选目录内"))?;
@@ -194,32 +271,6 @@ fn scan_dir(
         *total_bytes += size_bytes;
     }
     Ok(())
-}
-
-fn collect_parse_warnings(root: &Path, candidates: &[ImportSessionCandidate]) -> Vec<String> {
-    candidates
-        .iter()
-        .flat_map(|candidate| {
-            let path = root.join(&candidate.relative_path);
-            match fs::read(&path) {
-                Ok(content) => match parse_import_bytes(&content) {
-                    Ok(parsed) => parsed
-                        .warnings
-                        .into_iter()
-                        .map(|warning| format!("{}: {warning}", candidate.relative_path.display()))
-                        .collect(),
-                    Err(err) => vec![format!(
-                        "无法预览 {}: {err}",
-                        candidate.relative_path.display()
-                    )],
-                },
-                Err(err) => vec![format!(
-                    "无法预览 {}: {err}",
-                    candidate.relative_path.display()
-                )],
-            }
-        })
-        .collect()
 }
 
 fn commit_import_session(
@@ -352,6 +403,7 @@ fn commit_one(
         if duplicate {
             return Ok(CommitOutcome::Skipped);
         }
+        let imported_at = now_string();
         let entry = EntriesRepo::create_with_document(
             tx,
             CreateEntrySpec {
@@ -363,7 +415,7 @@ fn commit_one(
                 status: parsed.status.clone(),
                 tags: parsed.tags.clone(),
             },
-            &now_string(),
+            &imported_at,
         )?;
         tx.execute(
             "INSERT INTO entry_imports(
@@ -374,7 +426,7 @@ fn commit_one(
                 canonical_source_path,
                 source_hash,
                 source_entry_id,
-                now_string(),
+                imported_at,
             ],
         )?;
         Ok(CommitOutcome::Imported)
@@ -450,6 +502,56 @@ mod tests {
     }
 
     #[test]
+    fn scan_limits_non_markdown_file_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..10_001 {
+            fs::write(temp.path().join(format!("file-{index:05}.txt")), "x").unwrap();
+        }
+
+        let scanned = scan_import_root(temp.path()).unwrap();
+
+        assert!(scanned.candidates.is_empty());
+        assert!(scanned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("最多扫描 10000 个文件")));
+    }
+
+    #[test]
+    fn scan_limits_directory_count() {
+        let temp = tempfile::tempdir().unwrap();
+        for index in 0..1_001 {
+            fs::create_dir(temp.path().join(format!("directory-{index:04}"))).unwrap();
+        }
+
+        let scanned = scan_import_root(temp.path()).unwrap();
+
+        assert!(scanned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("最多扫描 1000 个目录")));
+    }
+
+    #[test]
+    fn scan_limits_recursive_depth() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut deepest = temp.path().to_path_buf();
+        for index in 0..33 {
+            deepest = deepest.join(format!("level-{index:02}"));
+            fs::create_dir(&deepest).unwrap();
+        }
+        fs::write(deepest.join("note.md"), "too deep").unwrap();
+
+        let scanned = scan_import_root(temp.path()).unwrap();
+
+        assert!(scanned.candidates.is_empty());
+        assert!(scanned
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("最大递归深度 32")));
+    }
+
+    #[test]
     fn relative_display_uses_path_below_root() {
         let root = Path::new("C:/imports");
         assert_eq!(
@@ -498,9 +600,9 @@ mod tests {
         let report = commit_scanned_import(&state, scanned.root, scanned.candidates).unwrap();
         let elapsed = started.elapsed();
         let created_count: usize = state
-            .read_conn()
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .with_read_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?)
+            })
             .unwrap();
 
         println!(
