@@ -39,6 +39,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.93.1
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
@@ -99,28 +100,6 @@ jobs:
           prerelease: false
           args: "--bundles nsis"
 
-      - name: Smoke test installed NSIS package
-        shell: powershell
-        env:
-          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          $version = $env:RELEASE_TAG.TrimStart("v")
-          $installer = @(
-            Get-ChildItem -LiteralPath "src-tauri\target\release\bundle\nsis" -File `
-              -Filter "2notes_$version`_x64-setup.exe"
-          )
-          if ($installer.Count -ne 1) {
-            throw "Expected one NSIS installer for $env:RELEASE_TAG, found $($installer.Count)"
-          }
-          Write-Output "SMOKE_INSTALLER=$($installer[0].FullName)"
-          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/installed-nsis-smoke.ps1 `
-            -InstallerPath $installer[0].FullName `
-            -EvidenceRoot ".tmp\ci-nsis-smoke" `
-            -KeepArtifacts
-          if ($LASTEXITCODE -ne 0) {
-            throw "Installed NSIS smoke test failed with exit code $LASTEXITCODE"
-          }
-
       - name: Upload release checksums
         shell: powershell
         env:
@@ -137,6 +116,47 @@ jobs:
           Set-Content -LiteralPath $checksumPath -Value $checksums -Encoding ascii
           gh release upload $env:RELEASE_TAG $checksumPath --clobber
 
+      - name: Upload draft NSIS installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: draft-nsis-installer
+          path: src-tauri/target/release/bundle/nsis/2notes_*_x64-setup.exe
+          if-no-files-found: error
+
+  verify-installed-nsis:
+    needs: build-tauri
+    # This runner must be a standard-user, interactive Windows desktop (WinSta0),
+    # not a service/Session 0 runner. GitHub-hosted Windows Server verifies builds
+    # but does not promise a WebView2/CDP-capable GUI session.
+    runs-on: [self-hosted, windows, interactive]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: draft-nsis-installer
+          path: .tmp/release-nsis
+      - name: Smoke test installed NSIS package
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $installer = @(
+            Get-ChildItem -LiteralPath ".tmp\release-nsis" -File `
+              -Filter "2notes_$version`_x64-setup.exe"
+          )
+          if ($installer.Count -ne 1) {
+            throw "Expected one NSIS installer for $env:RELEASE_TAG, found $($installer.Count)"
+          }
+          Write-Output "SMOKE_INSTALLER=$($installer[0].FullName)"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/installed-nsis-smoke.ps1 `
+            -InstallerPath $installer[0].FullName `
+            -EvidenceRoot ".tmp\ci-nsis-smoke" `
+            -KeepArtifacts
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installed NSIS smoke test failed with exit code $LASTEXITCODE"
+          }
       - name: Upload smoke evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -145,6 +165,11 @@ jobs:
           path: .tmp/ci-nsis-smoke/
           if-no-files-found: ignore
 
+  publish-release:
+    needs: verify-installed-nsis
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
       - name: Publish release after verification
         shell: powershell
         env:

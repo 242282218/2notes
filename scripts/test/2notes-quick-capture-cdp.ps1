@@ -64,6 +64,7 @@ $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.Environment["TWONOTES_TEST_ROOT"] = $resolvedAppData
+$psi.Environment["WEBVIEW2_USER_DATA_FOLDER"] = Join-Path $resolvedAppData "webview2-profile"
 $psi.Environment["RUST_LOG"] = "trace"
 $psi.Environment["RUST_BACKTRACE"] = "1"
 $psi.Environment["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] =

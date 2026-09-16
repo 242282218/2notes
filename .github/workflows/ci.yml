@@ -49,6 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.93.1
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: src-tauri
@@ -75,18 +76,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.93.1
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: src-tauri
       - run: pnpm install --frozen-lockfile
+      # GitHub-hosted Windows runners verify the production NSIS build. They do
+      # not promise an interactive WebView2 desktop, so real CDP/UI smoke stays
+      # in the release workflow's interactive self-hosted gate.
       - run: pnpm run tauri:build
-      # Cheapest real-UI guard: launch the built source EXE over CDP and drive a
-      # quick capture end to end. Catches startup crashes and main-window JS
-      # errors that unit tests cannot, without waiting for a release.
-      - name: Smoke test source build via CDP
-        shell: powershell
-        run: |
-          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test/2notes-quick-capture-cdp.ps1
-          if ($LASTEXITCODE -ne 0) {
-            throw "Quick-capture CDP smoke failed with exit code $LASTEXITCODE"
-          }
